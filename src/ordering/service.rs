@@ -130,7 +130,7 @@ impl OrderingService {
                 .unwrap_or_default()
                 .as_secs(),
             parent_hash: [0u8; 32],
-            merkle_root: [0u8; 32],
+            merkle_root: crate::mining::transactions_merkle_root(&drained),
             transactions: tx_ids,
             proposer: proposer.to_string(),
             signature: vec![0u8; 64],
@@ -285,5 +285,17 @@ mod tests {
 
         // Queue now empty
         assert!(svc.cut_block(3, "orderer1").unwrap().is_none());
+    }
+
+    #[test]
+    fn cut_block_merkle_root_commits_to_transaction_content() {
+        let svc = OrderingService::with_config(10, 2000);
+        svc.submit_tx(make_tx("tx1")).unwrap();
+        let block = svc.cut_block(1, "orderer1").unwrap().unwrap();
+        assert_eq!(
+            block.merkle_root,
+            crate::mining::transactions_merkle_root(&block.transaction_data)
+        );
+        assert_ne!(block.merkle_root, [0u8; 32]);
     }
 }

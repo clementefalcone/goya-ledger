@@ -150,7 +150,7 @@ impl RaftOrderingService {
                 .unwrap_or_default()
                 .as_secs(),
             parent_hash: [0u8; 32],
-            merkle_root: [0u8; 32],
+            merkle_root: crate::mining::transactions_merkle_root(&tx_data),
             transactions: tx_ids,
             proposer: proposer.to_string(),
             signature: vec![0u8; 64],

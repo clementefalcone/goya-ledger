@@ -129,8 +129,7 @@ impl MiningService {
         let mut all_tx_data = vec![coinbase.clone()];
         all_tx_data.extend(transactions.iter().cloned());
 
-        let merkle_data: String = all_tx_ids.join(",");
-        let merkle_root = hash(merkle_data.as_bytes());
+        let merkle_root = transactions_merkle_root(&all_tx_data);
 
         let mut block = Block {
             height: new_height,
@@ -202,10 +201,36 @@ impl MiningService {
 /// Compute SHA-256 hash of a block (for parent_hash linkage).
 pub fn block_hash(block: &Block) -> [u8; 32] {
     let data = format!(
-        "{}:{}:{:?}:{:?}",
-        block.height, block.timestamp, block.parent_hash, block.transactions
+        "{}:{}:{:?}:{:?}:{:?}",
+        block.height, block.timestamp, block.parent_hash, block.transactions, block.merkle_root
     );
     hash(data.as_bytes())
+}
+
+const MERKLE_LEAF_PREFIX: u8 = 0x00;
+const MERKLE_NODE_PREFIX: u8 = 0x01;
+
+pub fn transactions_merkle_root(transactions: &[Transaction]) -> [u8; 32] {
+    let mut level: Vec<[u8; 32]> = transactions
+        .iter()
+        .map(|tx| {
+            let encoded = serde_json::to_vec(tx).expect("Transaction always serializes to JSON");
+            hash(&[&[MERKLE_LEAF_PREFIX], encoded.as_slice()].concat())
+        })
+        .collect();
+    if level.is_empty() {
+        return [0u8; 32];
+    }
+    while level.len() > 1 {
+        level = level
+            .chunks(2)
+            .map(|pair| {
+                let right = pair.get(1).unwrap_or(&pair[0]);
+                hash(&[&[MERKLE_NODE_PREFIX], pair[0].as_slice(), right.as_slice()].concat())
+            })
+            .collect();
+    }
+    level[0]
 }
 
 fn now() -> u64 {
@@ -244,6 +269,61 @@ mod tests {
         let block1 = store.read_block(1).unwrap();
         let block0 = store.read_block(0).unwrap();
         assert_eq!(block1.parent_hash, block_hash(&block0));
+    }
+
+    fn notarization_tx(content_hash: &str) -> Transaction {
+        Transaction {
+            id: "notarize:abc".to_string(),
+            block_height: 0,
+            timestamp: 0,
+            input_did: "did:goya:signer".to_string(),
+            output_recipient: content_hash.to_string(),
+            amount: 0,
+            state: format!("{{\"content_hash\":\"{content_hash}\"}}"),
+            fee: 0,
+            payload: None,
+        }
+    }
+
+    #[test]
+    fn mined_block_merkle_root_commits_to_transaction_content() {
+        let store = Arc::new(MemoryStore::new());
+        let service = MiningService::new(store.clone(), MiningConfig::default());
+        service
+            .mine_block("miner1", vec![notarization_tx(&"a".repeat(64))])
+            .unwrap();
+
+        let block = store.read_block(0).unwrap();
+        assert_eq!(
+            block.merkle_root,
+            transactions_merkle_root(&block.transaction_data)
+        );
+
+        let mut tampered = block.transaction_data.clone();
+        tampered[1].state = format!("{{\"content_hash\":\"{}\"}}", "b".repeat(64));
+        assert_ne!(block.merkle_root, transactions_merkle_root(&tampered));
+    }
+
+    #[test]
+    fn block_hash_changes_when_merkle_root_changes() {
+        let store = Arc::new(MemoryStore::new());
+        let service = MiningService::new(store.clone(), MiningConfig::default());
+        service.mine_block("miner1", vec![]).unwrap();
+        let block = store.read_block(0).unwrap();
+
+        let mut tampered = block.clone();
+        tampered.merkle_root[0] ^= 0xff;
+        assert_ne!(block_hash(&block), block_hash(&tampered));
+    }
+
+    #[test]
+    fn merkle_root_depends_on_transaction_order() {
+        let first = notarization_tx(&"a".repeat(64));
+        let second = notarization_tx(&"b".repeat(64));
+        assert_ne!(
+            transactions_merkle_root(&[first.clone(), second.clone()]),
+            transactions_merkle_root(&[second, first])
+        );
     }
 
     #[test]
