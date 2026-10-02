@@ -464,6 +464,12 @@ async fn async_main_inner() -> std::io::Result<()> {
         }
     };
 
+    let trusted_signer_count = crate::ordering::configure_trusted_block_signers(
+        &env::var("TRUSTED_BLOCK_SIGNERS").unwrap_or_default(),
+    )
+    .unwrap_or_else(|e| panic!("FATAL: invalid TRUSTED_BLOCK_SIGNERS: {e}"));
+    log::info!("Trusted block signers: {trusted_signer_count} peer key(s) plus this node");
+
     // Ordering backend: "raft" or "solo" (default)
     //
     // When ORDERING_BACKEND=raft, also reads:

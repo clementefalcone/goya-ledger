@@ -1335,14 +1335,12 @@ impl Node {
             Message::OrderedBlock(block) => {
                 if matches!(role, NodeRole::Peer | NodeRole::PeerAndOrderer) {
                     if let Some(s) = &store {
-                        let _ = s.write_block(&block);
-                        for tx in &block.transaction_data {
-                            let mut committed_tx = tx.clone();
-                            if let Err(e) = crate::transaction::apply_tx_payload(s.as_ref(), tx) {
-                                log::warn!("tx {} payload rejected: {e}", tx.id);
-                                committed_tx.state = "invalid_payload".to_string();
-                            }
-                            let _ = s.write_transaction(&committed_tx);
+                        let trusted_signers =
+                            crate::ordering::trusted_block_signers(signing_provider.as_deref());
+                        if let Err(e) = commit_incoming_block(s.as_ref(), &block, &trusted_signers)
+                        {
+                            log::warn!("ordered block rejected: {e}");
+                            return Ok(None);
                         }
                         for entry in &block.embedded_entries {
                             let _ = s.write_notarization(entry);
@@ -1601,6 +1599,18 @@ impl Node {
                 );
                 if let Some(tx) = bft_tx {
                     if let Ok(block) = serde_json::from_slice(&block_data) {
+                        let Some(s) = &store else {
+                            log::warn!("BFT: proposal round={round} rejected: no local store");
+                            return Ok(None);
+                        };
+                        let trusted_signers =
+                            crate::ordering::trusted_block_signers(signing_provider.as_deref());
+                        if let Err(e) =
+                            validate_bft_proposal(&block, &block_hash, s.as_ref(), &trusted_signers)
+                        {
+                            log::warn!("BFT: proposal round={round} rejected: {e}");
+                            return Ok(None);
+                        }
                         let jqc = if justify_qc.is_empty() {
                             None
                         } else {
@@ -2266,11 +2276,12 @@ impl Node {
             })?;
         if let Message::StateResponse { blocks } = resp {
             if let Some(s) = &self.store {
+                let trusted_signers =
+                    crate::ordering::trusted_block_signers(self.signing_provider.as_deref());
                 for block in &blocks {
-                    let _ = s.write_block(block);
-                    for tx in &block.transaction_data {
-                        let _ = crate::transaction::apply_tx_payload(s.as_ref(), tx);
-                        let _ = s.write_transaction(tx);
+                    if let Err(e) = commit_incoming_block(s.as_ref(), block, &trusted_signers) {
+                        log::warn!("state sync from {address} stopped: {e}");
+                        break;
                     }
                 }
                 println!(
@@ -2799,11 +2810,15 @@ impl Node {
                     };
 
                     if let Message::StateResponse { blocks } = resp {
-                        for block in blocks.into_iter().take(gossip::STATE_BATCH_SIZE) {
-                            let _ = store.write_block(&block);
-                            for tx in &block.transaction_data {
-                                let _ = crate::transaction::apply_tx_payload(store.as_ref(), tx);
-                                let _ = store.write_transaction(tx);
+                        let trusted_signers = crate::ordering::trusted_block_signers(
+                            node.signing_provider.as_deref(),
+                        );
+                        for block in blocks.iter().take(gossip::STATE_BATCH_SIZE) {
+                            if let Err(e) =
+                                commit_incoming_block(store.as_ref(), block, &trusted_signers)
+                            {
+                                log::warn!("pull sync from {peer_addr} stopped: {e}");
+                                break;
                             }
                         }
                     }
@@ -2811,6 +2826,49 @@ impl Node {
             }
         })
     }
+}
+
+fn validate_bft_proposal(
+    block: &crate::storage::traits::Block,
+    proposed_hash: &[u8; 32],
+    store: &dyn crate::storage::traits::BlockStore,
+    trusted_signers: &[String],
+) -> Result<(), String> {
+    if crate::mining::block_hash(block) != *proposed_hash {
+        return Err(format!(
+            "proposed hash does not match block {}",
+            block.height
+        ));
+    }
+    crate::ordering::validate_incoming_block(block, store, trusted_signers)
+}
+
+fn commit_incoming_block(
+    store: &dyn crate::storage::traits::BlockStore,
+    block: &crate::storage::traits::Block,
+    trusted_signers: &[String],
+) -> Result<(), String> {
+    let is_known = store
+        .block_exists(block.height)
+        .map_err(|e| format!("failed to check local block {}: {e}", block.height))?;
+    if is_known {
+        return Ok(());
+    }
+    crate::ordering::validate_incoming_block(block, store, trusted_signers)?;
+    store
+        .write_block(block)
+        .map_err(|e| format!("failed to write block {}: {e}", block.height))?;
+    for tx in &block.transaction_data {
+        let mut committed_tx = tx.clone();
+        if let Err(e) = crate::transaction::apply_tx_payload(store, tx) {
+            log::warn!("tx {} payload rejected: {e}", tx.id);
+            committed_tx.state = "invalid_payload".to_string();
+        }
+        store
+            .write_transaction(&committed_tx)
+            .map_err(|e| format!("failed to write tx {}: {e}", tx.id))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2990,33 +3048,13 @@ mod tests {
         assert_eq!(svc.pending_count(), 1);
     }
 
-    #[tokio::test]
-    async fn peer_ordered_block_writes_to_store() {
-        use crate::storage::traits::BlockStore;
-        use crate::storage::MemoryStore;
-
-        let store: Arc<dyn BlockStore> = Arc::new(MemoryStore::new());
+    async fn deliver_ordered_block(
+        block: crate::storage::traits::Block,
+        signing_provider: Arc<dyn crate::identity::signing::SigningProvider>,
+    ) -> Arc<dyn crate::storage::traits::BlockStore> {
+        let store: Arc<dyn crate::storage::traits::BlockStore> =
+            Arc::new(crate::storage::MemoryStore::new());
         let (peers, receipts, rates) = empty_process_message_args();
-
-        let block = crate::storage::traits::Block {
-            height: 7,
-            timestamp: 0,
-            parent_hash: [0u8; 32],
-            merkle_root: [0u8; 32],
-            transactions: vec![],
-            proposer: "ord".to_string(),
-            signature: vec![0u8; 64],
-            signature_algorithm: Default::default(),
-            endorsements: vec![],
-            secondary_signature: None,
-            secondary_signature_algorithm: None,
-            hash_algorithm: Default::default(),
-            orderer_signature: None,
-            commit_qc: None,
-            embedded_entries: Vec::new(),
-            transaction_data: vec![],
-        };
-
         Node::process_message(
             Message::OrderedBlock(block),
             &peers,
@@ -3031,22 +3069,69 @@ mod tests {
             NodeRole::Peer,
             None,
             Some(store.clone()),
-            None,      // gossip_block_tx
-            None,      // membership
-            None,      // chaincode_store
-            None,      // world_state
-            None,      // signing_provider
-            "default", // node_org_id
-            None,      // raft_node
-            None,      // private_data_store
-            None,      // collection_registry
-            None,      // bft_tx
+            None,
+            None,
+            None,
+            None,
+            Some(signing_provider),
+            "default",
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
+        store
+    }
 
-        let saved = store.read_block(7).unwrap();
-        assert_eq!(saved.height, 7);
+    fn block_signed_by(
+        signing_provider: Arc<dyn crate::identity::signing::SigningProvider>,
+    ) -> crate::storage::traits::Block {
+        let svc = crate::ordering::service::OrderingService::with_config(10, 500)
+            .with_signing_provider(signing_provider);
+        svc.submit_tx(crate::storage::traits::Transaction {
+            id: "tx-1".to_string(),
+            block_height: 7,
+            timestamp: 0,
+            input_did: "did:goya:alice".to_string(),
+            output_recipient: "did:goya:bob".to_string(),
+            amount: 1,
+            state: "pending".to_string(),
+            fee: 0,
+            payload: None,
+        })
+        .unwrap();
+        svc.cut_block(7, [0u8; 32], "ord").unwrap().unwrap()
+    }
+
+    fn trusted_provider() -> Arc<dyn crate::identity::signing::SigningProvider> {
+        Arc::new(crate::identity::signing::SoftwareSigningProvider::generate())
+    }
+
+    #[tokio::test]
+    async fn peer_ordered_block_from_trusted_signer_writes_to_store() {
+        let signer = trusted_provider();
+        let store = deliver_ordered_block(block_signed_by(signer.clone()), signer).await;
+        assert_eq!(store.read_block(7).unwrap().height, 7);
+        assert!(store.read_transaction("tx-1").is_ok());
+    }
+
+    #[tokio::test]
+    async fn peer_ordered_block_with_tampered_data_is_rejected() {
+        let signer = trusted_provider();
+        let mut block = block_signed_by(signer.clone());
+        block.transaction_data[0].amount = 1_000_000;
+        let store = deliver_ordered_block(block, signer).await;
+        assert!(!store.block_exists(7).unwrap());
+        assert!(store.read_transaction("tx-1").is_err());
+    }
+
+    #[tokio::test]
+    async fn peer_ordered_block_from_untrusted_signer_is_rejected() {
+        let block = block_signed_by(trusted_provider());
+        let store = deliver_ordered_block(block, trusted_provider()).await;
+        assert!(!store.block_exists(7).unwrap());
     }
 
     #[test]

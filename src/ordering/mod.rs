@@ -56,6 +56,85 @@ pub fn sign_block_with_provider(block: &mut Block, provider: &dyn SigningProvide
     }
 }
 
+static TRUSTED_BLOCK_SIGNERS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+pub fn configure_trusted_block_signers(configured_keys: &str) -> Result<usize, String> {
+    let keys = parse_trusted_block_signers(configured_keys)?;
+    let count = keys.len();
+    TRUSTED_BLOCK_SIGNERS
+        .set(keys)
+        .map_err(|_| "trusted block signers already configured".to_string())?;
+    Ok(count)
+}
+
+pub fn trusted_block_signers(own_signer: Option<&dyn SigningProvider>) -> Vec<String> {
+    let configured = TRUSTED_BLOCK_SIGNERS.get().into_iter().flatten().cloned();
+    let own = own_signer.map(|signer| hex::encode(signer.public_key()));
+    configured.chain(own).collect()
+}
+
+fn parse_trusted_block_signers(configured_keys: &str) -> Result<Vec<String>, String> {
+    configured_keys
+        .split(',')
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(|key| match hex::decode(key) {
+            Ok(_) => Ok(key.to_lowercase()),
+            Err(e) => Err(format!(
+                "TRUSTED_BLOCK_SIGNERS entry {key:?} is not hex: {e}"
+            )),
+        })
+        .collect()
+}
+
+pub fn validate_incoming_block(
+    block: &Block,
+    store: &dyn crate::storage::traits::BlockStore,
+    trusted_signers: &[String],
+) -> Result<(), String> {
+    let data_ids: Vec<&String> = block.transaction_data.iter().map(|tx| &tx.id).collect();
+    let listed_ids: Vec<&String> = block.transactions.iter().collect();
+    if data_ids != listed_ids {
+        return Err(format!(
+            "block {} transaction ids do not match its transaction data",
+            block.height
+        ));
+    }
+    if block.merkle_root != crate::mining::transactions_merkle_root(&block.transaction_data) {
+        return Err(format!(
+            "block {} merkle root does not commit to its transaction data",
+            block.height
+        ));
+    }
+    if block.parent_hash != crate::mining::parent_hash_at(store, block.height)? {
+        return Err(format!(
+            "block {} parent hash does not match local block {}",
+            block.height,
+            block.height.saturating_sub(1)
+        ));
+    }
+    if block.signature.is_empty() {
+        return Err(format!("block {} is unsigned", block.height));
+    }
+    let signing_hash = block_hash_for_signing(block);
+    let signature_hex = hex::encode(&block.signature);
+    let is_trusted = trusted_signers.iter().any(|key| {
+        crate::signature::verify_signature(
+            block.signature_algorithm,
+            key,
+            &signing_hash,
+            &signature_hex,
+        )
+    });
+    if !is_trusted {
+        return Err(format!(
+            "block {} is not signed by a trusted block signer",
+            block.height
+        ));
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 /// Verify a block's orderer signature against the orderer's public key (Ed25519 only).
 ///
@@ -318,5 +397,85 @@ mod tests {
         let block = svc.cut_block(1, [0u8; 32], "orderer").unwrap().unwrap();
 
         assert_eq!(verify_orderer_signature(&block, &verifying), Ok(false));
+    }
+
+    fn signed_block(signer: std::sync::Arc<dyn SigningProvider>, parent_hash: [u8; 32]) -> Block {
+        let svc = service::OrderingService::with_config(100, 2000).with_signing_provider(signer);
+        svc.submit_tx(make_tx("tx1")).unwrap();
+        svc.submit_tx(make_tx("tx2")).unwrap();
+        svc.cut_block(1, parent_hash, "orderer").unwrap().unwrap()
+    }
+
+    fn trusted_signer() -> (std::sync::Arc<dyn SigningProvider>, Vec<String>) {
+        let signer: std::sync::Arc<dyn SigningProvider> =
+            std::sync::Arc::new(crate::identity::signing::SoftwareSigningProvider::generate());
+        let trusted = vec![hex::encode(signer.public_key())];
+        (signer, trusted)
+    }
+
+    #[test]
+    fn validate_incoming_block_accepts_trusted_signed_block() {
+        let (signer, trusted) = trusted_signer();
+        let block = signed_block(signer, [0u8; 32]);
+        let store = crate::storage::MemoryStore::new();
+        assert_eq!(validate_incoming_block(&block, &store, &trusted), Ok(()));
+    }
+
+    #[test]
+    fn validate_incoming_block_rejects_tampered_transaction_data() {
+        let (signer, trusted) = trusted_signer();
+        let mut block = signed_block(signer, [0u8; 32]);
+        block.transaction_data[0].amount = 1_000_000;
+        let store = crate::storage::MemoryStore::new();
+        assert!(validate_incoming_block(&block, &store, &trusted).is_err());
+    }
+
+    #[test]
+    fn validate_incoming_block_rejects_mismatched_transaction_ids() {
+        let (signer, trusted) = trusted_signer();
+        let mut block = signed_block(signer, [0u8; 32]);
+        block.transactions[0] = "forged".to_string();
+        let store = crate::storage::MemoryStore::new();
+        assert!(validate_incoming_block(&block, &store, &trusted).is_err());
+    }
+
+    #[test]
+    fn validate_incoming_block_rejects_untrusted_signer() {
+        let (signer, _) = trusted_signer();
+        let (_, other_trusted) = trusted_signer();
+        let block = signed_block(signer, [0u8; 32]);
+        let store = crate::storage::MemoryStore::new();
+        assert!(validate_incoming_block(&block, &store, &other_trusted).is_err());
+    }
+
+    #[test]
+    fn validate_incoming_block_rejects_unsigned_block() {
+        let (signer, trusted) = trusted_signer();
+        let mut block = signed_block(signer, [0u8; 32]);
+        block.signature.clear();
+        let store = crate::storage::MemoryStore::new();
+        assert!(validate_incoming_block(&block, &store, &trusted).is_err());
+    }
+
+    #[test]
+    fn validate_incoming_block_rejects_block_not_linked_to_parent() {
+        use crate::storage::traits::BlockStore;
+
+        let (signer, trusted) = trusted_signer();
+        let store = crate::storage::MemoryStore::new();
+        let mut parent = signed_block(signer.clone(), [0u8; 32]);
+        parent.height = 0;
+        store.write_block(&parent).unwrap();
+        let block = signed_block(signer, [9u8; 32]);
+        assert!(validate_incoming_block(&block, &store, &trusted).is_err());
+    }
+
+    #[test]
+    fn parse_trusted_block_signers_rejects_non_hex_entry() {
+        assert!(parse_trusted_block_signers("abcd, not-hex").is_err());
+        assert_eq!(
+            parse_trusted_block_signers(" ABCD ,, ef01").unwrap(),
+            vec!["abcd".to_string(), "ef01".to_string()]
+        );
     }
 }
