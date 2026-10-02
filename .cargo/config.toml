@@ -1,0 +1,12 @@
+[build]
+jobs = 3
+incremental = false
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[env]
+RUST_TEST_THREADS = "2"
