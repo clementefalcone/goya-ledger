@@ -259,10 +259,12 @@ impl Gateway {
 
         // ── Step 3: cut block and commit to store ─────────────────────────────
         let next_height = self.store.get_latest_height().unwrap_or(0) + 1;
+        let parent_hash = crate::mining::parent_hash_at(self.store.as_ref(), next_height)
+            .map_err(GatewayError::Storage)?;
 
         let block = self
             .ordering_service
-            .cut_block(next_height, "gateway")
+            .cut_block(next_height, parent_hash, "gateway")
             .map_err(|e| GatewayError::Ordering(e.to_string()))?
             .ok_or_else(|| GatewayError::Ordering("cut_block returned no block".to_string()))?;
 
@@ -385,9 +387,11 @@ impl Gateway {
 
         // 2. Cut a block from the ordering service.
         let next_height = self.store.get_latest_height().unwrap_or(0) + 1;
+        let parent_hash = crate::mining::parent_hash_at(self.store.as_ref(), next_height)
+            .map_err(GatewayError::Storage)?;
         let block = self
             .ordering_service
-            .cut_block(next_height, "gateway")
+            .cut_block(next_height, parent_hash, "gateway")
             .map_err(|e| GatewayError::Ordering(e.to_string()))?
             .ok_or_else(|| GatewayError::Ordering("cut_block returned no block".into()))?;
 
@@ -671,6 +675,18 @@ mod tests {
         // Block must be persisted in the store.
         let block = gw.store.read_block(1).unwrap();
         assert!(block.transactions.contains(&"tx-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn consecutive_gateway_blocks_link_to_their_parent() {
+        let gw = make_gateway();
+        gw.submit("cc-nopolicy", "", make_tx("tx-1")).await.unwrap();
+        gw.submit("cc-nopolicy", "", make_tx("tx-2")).await.unwrap();
+
+        let first = gw.store.read_block(1).unwrap();
+        let second = gw.store.read_block(2).unwrap();
+        assert_eq!(first.parent_hash, [0u8; 32]);
+        assert_eq!(second.parent_hash, crate::mining::block_hash(&first));
     }
 
     #[tokio::test]

@@ -113,7 +113,12 @@ impl OrderingService {
 
     /// Drain up to `max_batch_size` transactions and create an ordered `Block`.
     /// Returns `None` if the pending queue is empty.
-    pub fn cut_block(&self, height: u64, proposer: &str) -> StorageResult<Option<Block>> {
+    pub fn cut_block(
+        &self,
+        height: u64,
+        parent_hash: [u8; 32],
+        proposer: &str,
+    ) -> StorageResult<Option<Block>> {
         let mut queue = self.pending_txs.lock().unwrap_or_else(|e| e.into_inner());
         if queue.is_empty() {
             return Ok(None);
@@ -129,7 +134,7 @@ impl OrderingService {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            parent_hash: [0u8; 32],
+            parent_hash,
             merkle_root: crate::mining::transactions_merkle_root(&drained),
             transactions: tx_ids,
             proposer: proposer.to_string(),
@@ -169,7 +174,14 @@ pub async fn run_batch_loop(service: Arc<OrderingService>, store: Arc<dyn BlockS
 
     loop {
         tokio::time::sleep(timeout).await;
-        match service.cut_block(height, "orderer") {
+        let parent_hash = match crate::mining::parent_hash_at(store.as_ref(), height) {
+            Ok(parent_hash) => parent_hash,
+            Err(e) => {
+                eprintln!("ordering: cannot cut block {height}: {e}");
+                continue;
+            }
+        };
+        match service.cut_block(height, parent_hash, "orderer") {
             Ok(Some(block)) => {
                 height += 1;
                 if let Err(e) = store.write_block(&block) {
@@ -187,8 +199,13 @@ impl super::OrderingBackend for OrderingService {
         self.submit_tx(tx.clone())
     }
 
-    fn cut_block(&self, height: u64, proposer: &str) -> StorageResult<Option<Block>> {
-        self.cut_block(height, proposer)
+    fn cut_block(
+        &self,
+        height: u64,
+        parent_hash: [u8; 32],
+        proposer: &str,
+    ) -> StorageResult<Option<Block>> {
+        self.cut_block(height, parent_hash, proposer)
     }
 
     fn pending_count(&self) -> usize {
@@ -274,24 +291,24 @@ mod tests {
         }
 
         // First cut: 3 txs
-        let b1 = svc.cut_block(1, "orderer1").unwrap().unwrap();
+        let b1 = svc.cut_block(1, [0u8; 32], "orderer1").unwrap().unwrap();
         assert_eq!(b1.transactions.len(), 3);
         assert_eq!(b1.height, 1);
         assert_eq!(b1.proposer, "orderer1");
 
         // Second cut: remaining 2 txs
-        let b2 = svc.cut_block(2, "orderer1").unwrap().unwrap();
+        let b2 = svc.cut_block(2, [0u8; 32], "orderer1").unwrap().unwrap();
         assert_eq!(b2.transactions.len(), 2);
 
         // Queue now empty
-        assert!(svc.cut_block(3, "orderer1").unwrap().is_none());
+        assert!(svc.cut_block(3, [0u8; 32], "orderer1").unwrap().is_none());
     }
 
     #[test]
     fn cut_block_merkle_root_commits_to_transaction_content() {
         let svc = OrderingService::with_config(10, 2000);
         svc.submit_tx(make_tx("tx1")).unwrap();
-        let block = svc.cut_block(1, "orderer1").unwrap().unwrap();
+        let block = svc.cut_block(1, [0u8; 32], "orderer1").unwrap().unwrap();
         assert_eq!(
             block.merkle_root,
             crate::mining::transactions_merkle_root(&block.transaction_data)

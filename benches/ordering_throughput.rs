@@ -53,7 +53,7 @@ fn bench_ordering_throughput(c: &mut Criterion) {
                         for tx in txs {
                             svc.submit_tx(tx).unwrap();
                         }
-                        let block = svc.cut_block(1, "orderer").unwrap().unwrap();
+                        let block = svc.cut_block(1, [0u8; 32], "orderer").unwrap().unwrap();
                         assert_eq!(block.transactions.len(), size);
                         block
                     },

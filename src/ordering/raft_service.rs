@@ -118,7 +118,12 @@ impl RaftOrderingService {
 
     /// Drain committed entries, deserialize transactions, and cut a block.
     /// Returns `None` if no committed entries with transaction data are available.
-    pub fn cut_block(&self, height: u64, proposer: &str) -> StorageResult<Option<Block>> {
+    pub fn cut_block(
+        &self,
+        height: u64,
+        parent_hash: [u8; 32],
+        proposer: &str,
+    ) -> StorageResult<Option<Block>> {
         let mut node = self.raft_node.lock().unwrap_or_else(|e| e.into_inner());
         if node.committed_entries.is_empty() {
             return Ok(None);
@@ -149,7 +154,7 @@ impl RaftOrderingService {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            parent_hash: [0u8; 32],
+            parent_hash,
             merkle_root: crate::mining::transactions_merkle_root(&tx_data),
             transactions: tx_ids,
             proposer: proposer.to_string(),
@@ -180,8 +185,13 @@ impl super::OrderingBackend for RaftOrderingService {
         self.submit_tx(tx)
     }
 
-    fn cut_block(&self, height: u64, proposer: &str) -> StorageResult<Option<Block>> {
-        self.cut_block(height, proposer)
+    fn cut_block(
+        &self,
+        height: u64,
+        parent_hash: [u8; 32],
+        proposer: &str,
+    ) -> StorageResult<Option<Block>> {
+        self.cut_block(height, parent_hash, proposer)
     }
 
     fn pending_count(&self) -> usize {
@@ -236,7 +246,7 @@ mod tests {
         }
 
         let block = svc
-            .cut_block(1, "orderer")
+            .cut_block(1, [0u8; 32], "orderer")
             .unwrap()
             .expect("expected a block");
         assert_eq!(block.height, 1);
@@ -247,7 +257,7 @@ mod tests {
     #[test]
     fn cut_block_returns_none_when_empty() {
         let svc = RaftOrderingService::new(1, vec![1], 100, 2000).unwrap();
-        assert!(svc.cut_block(1, "orderer").unwrap().is_none());
+        assert!(svc.cut_block(1, [0u8; 32], "orderer").unwrap().is_none());
     }
 
     #[test]
@@ -264,15 +274,24 @@ mod tests {
             node.advance();
         }
 
-        let b1 = svc.cut_block(1, "orderer").unwrap().expect("block 1");
+        let b1 = svc
+            .cut_block(1, [0u8; 32], "orderer")
+            .unwrap()
+            .expect("block 1");
         assert_eq!(b1.transactions.len(), 2);
 
-        let b2 = svc.cut_block(2, "orderer").unwrap().expect("block 2");
+        let b2 = svc
+            .cut_block(2, [0u8; 32], "orderer")
+            .unwrap()
+            .expect("block 2");
         assert_eq!(b2.transactions.len(), 2);
 
-        let b3 = svc.cut_block(3, "orderer").unwrap().expect("block 3");
+        let b3 = svc
+            .cut_block(3, [0u8; 32], "orderer")
+            .unwrap()
+            .expect("block 3");
         assert_eq!(b3.transactions.len(), 1);
 
-        assert!(svc.cut_block(4, "orderer").unwrap().is_none());
+        assert!(svc.cut_block(4, [0u8; 32], "orderer").unwrap().is_none());
     }
 }

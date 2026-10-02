@@ -111,16 +111,7 @@ impl MiningService {
             payload: None,
         };
 
-        // Get parent hash
-        let parent_hash = if new_height > 0 {
-            let parent = self
-                .store
-                .read_block(new_height - 1)
-                .map_err(|e| format!("failed to read parent block: {e}"))?;
-            block_hash(&parent)
-        } else {
-            [0u8; 32]
-        };
+        let parent_hash = parent_hash_at(self.store.as_ref(), new_height)?;
 
         // Collect all tx IDs
         let mut all_tx_ids = vec![coinbase.id.clone()];
@@ -205,6 +196,23 @@ pub fn block_hash(block: &Block) -> [u8; 32] {
         block.height, block.timestamp, block.parent_hash, block.transactions, block.merkle_root
     );
     hash(data.as_bytes())
+}
+
+pub fn parent_hash_at(store: &dyn BlockStore, height: u64) -> Result<[u8; 32], String> {
+    let parent_height = match height.checked_sub(1) {
+        Some(parent_height) => parent_height,
+        None => return Ok([0u8; 32]),
+    };
+    let parent_exists = store
+        .block_exists(parent_height)
+        .map_err(|e| format!("failed to check parent block {parent_height}: {e}"))?;
+    if !parent_exists {
+        return Ok([0u8; 32]);
+    }
+    store
+        .read_block(parent_height)
+        .map(|parent| block_hash(&parent))
+        .map_err(|e| format!("failed to read parent block {parent_height}: {e}"))
 }
 
 const MERKLE_LEAF_PREFIX: u8 = 0x00;

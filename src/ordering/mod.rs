@@ -144,7 +144,12 @@ pub fn verify_block_secondary_signature(
 /// Common interface for ordering backends (solo batching vs Raft consensus).
 pub trait OrderingBackend: Send + Sync {
     fn submit_tx(&self, tx: &Transaction) -> StorageResult<()>;
-    fn cut_block(&self, height: u64, proposer: &str) -> StorageResult<Option<Block>>;
+    fn cut_block(
+        &self,
+        height: u64,
+        parent_hash: [u8; 32],
+        proposer: &str,
+    ) -> StorageResult<Option<Block>>;
     #[allow(dead_code)]
     fn pending_count(&self) -> usize;
 }
@@ -222,7 +227,7 @@ mod tests {
     /// Verify that both backends work behind `Box<dyn OrderingBackend>`.
     fn assert_backend_works(backend: &dyn OrderingBackend) {
         assert_eq!(backend.pending_count(), 0);
-        assert!(backend.cut_block(1, "o").unwrap().is_none());
+        assert!(backend.cut_block(1, [0u8; 32], "o").unwrap().is_none());
     }
 
     #[test]
@@ -232,7 +237,7 @@ mod tests {
         assert_backend_works(&*backend);
 
         backend.submit_tx(&make_tx("tx1")).unwrap();
-        let block = backend.cut_block(1, "orderer").unwrap().unwrap();
+        let block = backend.cut_block(1, [0u8; 32], "orderer").unwrap().unwrap();
         assert_eq!(block.transactions, vec!["tx1"]);
     }
 
@@ -254,7 +259,7 @@ mod tests {
         let svc = service::OrderingService::with_config(100, 2000).with_signing_key(key);
         svc.submit_tx(make_tx("tx1").clone()).unwrap();
 
-        let block = svc.cut_block(1, "orderer").unwrap().unwrap();
+        let block = svc.cut_block(1, [0u8; 32], "orderer").unwrap().unwrap();
         assert!(
             block.orderer_signature.is_some(),
             "expected orderer_signature"
@@ -280,7 +285,7 @@ mod tests {
 
         let svc = service::OrderingService::with_config(100, 2000).with_signing_key(key);
         svc.submit_tx(make_tx("tx1").clone()).unwrap();
-        let block = svc.cut_block(1, "orderer").unwrap().unwrap();
+        let block = svc.cut_block(1, [0u8; 32], "orderer").unwrap().unwrap();
 
         assert_eq!(verify_orderer_signature(&block, &verifying), Ok(true));
     }
@@ -295,7 +300,7 @@ mod tests {
 
         let svc = service::OrderingService::with_config(100, 2000).with_signing_key(key);
         svc.submit_tx(make_tx("tx1").clone()).unwrap();
-        let block = svc.cut_block(1, "orderer").unwrap().unwrap();
+        let block = svc.cut_block(1, [0u8; 32], "orderer").unwrap().unwrap();
 
         assert!(verify_orderer_signature(&block, &wrong_verifying).is_err());
     }
@@ -310,7 +315,7 @@ mod tests {
         // Block without signing key → no orderer_signature.
         let svc = service::OrderingService::with_config(100, 2000);
         svc.submit_tx(make_tx("tx1").clone()).unwrap();
-        let block = svc.cut_block(1, "orderer").unwrap().unwrap();
+        let block = svc.cut_block(1, [0u8; 32], "orderer").unwrap().unwrap();
 
         assert_eq!(verify_orderer_signature(&block, &verifying), Ok(false));
     }
