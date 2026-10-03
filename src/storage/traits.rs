@@ -8,7 +8,7 @@ use super::errors::StorageResult;
 use crate::crypto::hasher::HashAlgorithm;
 use crate::endorsement::types::Endorsement;
 use crate::identity::signing::SigningAlgorithm;
-use crate::signature::{BiometricEvidence, SignatureLevel};
+use crate::signature::{BiometricEvidence, SignatureLevel, SignerProof};
 
 /// Block structure for storage
 ///
@@ -333,6 +333,8 @@ pub struct NotarizationEntry {
     /// Biometric evidence commitments (required for Advanced/Qualified).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub biometric_evidence: Vec<BiometricEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_proof: Option<SignerProof>,
 }
 
 /// Records a transfer of ownership for a notarized document.

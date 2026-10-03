@@ -1223,6 +1223,7 @@ mod tests {
 
         let store = MemoryStore::new();
         let entry = NotarizationEntry {
+            signer_proof: None,
             id: "nota-fea-1".into(),
             content_hash: "a".repeat(64),
             signer: "did:goya:fea1".into(),
@@ -1269,6 +1270,7 @@ mod tests {
     fn notarization_simple_has_empty_biometrics() {
         let store = MemoryStore::new();
         let entry = NotarizationEntry {
+            signer_proof: None,
             id: "nota-fes-1".into(),
             content_hash: "d".repeat(64),
             signer: "did:goya:fes1".into(),
@@ -1317,6 +1319,7 @@ mod tests {
         let store = MemoryStore::new();
         for i in 0..3 {
             let entry = NotarizationEntry {
+                signer_proof: None,
                 id: format!("nota-list-{i}"),
                 content_hash: format!("{:0>64}", i),
                 signer: "did:goya:lister".into(),
@@ -1353,6 +1356,7 @@ mod tests {
         let store = MemoryStore::new();
         // First create a notarization
         let nota = NotarizationEntry {
+            signer_proof: None,
             id: "nota-xfer".into(),
             content_hash: "e".repeat(64),
             signer: "did:goya:alice".into(),

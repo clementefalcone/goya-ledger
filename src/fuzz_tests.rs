@@ -247,6 +247,7 @@ mod tests {
 
             let entries: Vec<_> = (0..entry_count).map(|i| {
                 crate::storage::traits::NotarizationEntry {
+                    signer_proof: None,
                     id: format!("entry-{i}"),
                     content_hash: "a".repeat(64),
                     signer: format!("did:goya:noter{i}"),
@@ -721,6 +722,7 @@ mod tests {
             };
 
             let entry = crate::storage::traits::NotarizationEntry {
+                signer_proof: None,
                 id: "test-entry".into(),
                 content_hash: "b".repeat(64),
                 signer: signer.clone(),

@@ -21,7 +21,8 @@ use crate::app_state::AppState;
 use crate::document::DocumentFingerprint;
 use crate::identity::signing::SigningAlgorithm;
 use crate::signature::{
-    compute_biometrics_hash, verify_signature, BiometricEvidence, SignatureLevel,
+    compute_biometrics_hash, is_signer_proven, verify_signature, BiometricEvidence, SignatureLevel,
+    SignerProof,
 };
 use crate::storage::traits::{NotarizationEntry, OwnershipTransfer};
 use actix_web::{get, post, web, HttpRequest, HttpResponse};
@@ -84,6 +85,18 @@ pub struct NotarizeRequest {
     /// Biometric evidence (required for Advanced).
     #[serde(default)]
     pub biometric_evidence: Vec<BiometricEvidence>,
+    #[serde(default)]
+    pub signer_proof: Option<SignerProof>,
+}
+
+fn signer_not_proven(signer: &str) -> HttpResponse {
+    HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
+        err_dto(
+            "SIGNER_MISMATCH",
+            &format!("signer {signer} is not proven by the signing key or a valid signer_proof"),
+        ),
+        401,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -170,21 +183,6 @@ pub async fn submit_notarization(
         )));
     }
 
-    // Verify signer DID matches public key — prevents impersonation.
-    // FEA uses the node's ML-DSA-65 key (not the user's Ed25519), so the
-    // DID (derived from the user's Ed25519 pubkey) will never match.
-    if body.signature_level == SignatureLevel::Simple
-        && !crate::identity::did::did_matches_pubkey(&body.signer, &body.public_key)
-    {
-        return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
-            err_dto(
-                "SIGNER_MISMATCH",
-                "signer DID does not match the provided public key",
-            ),
-            401,
-        )));
-    }
-
     // Build and verify signature over the level-appropriate payload
     let sign_msg = build_notarize_payload(
         body.signature_level,
@@ -192,6 +190,14 @@ pub async fn submit_notarization(
         &body.content_hash,
         &body.biometric_evidence,
     );
+    if !is_signer_proven(
+        &body.signer,
+        &body.public_key,
+        body.signer_proof.as_ref(),
+        sign_msg.as_bytes(),
+    ) {
+        return Ok(signer_not_proven(&body.signer));
+    }
     if !verify_signature(
         body.signature_algorithm,
         &body.public_key,
@@ -219,6 +225,7 @@ pub async fn submit_notarization(
     let block_height = store.get_latest_height().unwrap_or(0);
 
     let entry = NotarizationEntry {
+        signer_proof: body.signer_proof.clone(),
         id: uuid::Uuid::new_v4().to_string(),
         content_hash: body.content_hash.clone(),
         signer: body.signer.clone(),
@@ -280,6 +287,7 @@ pub struct PdfNotarizeRequest {
     pub signer: String,
     /// Biometric evidence (required — FEA server-side signing).
     pub biometric_evidence: Vec<BiometricEvidence>,
+    pub signer_proof: SignerProof,
 }
 
 /// Notarize a PDF with server-side ML-DSA-65 signature.
@@ -360,6 +368,14 @@ pub async fn notarize_pdf(
         "notarize_fea:{}:{}:{}",
         body.signer, fingerprint.canonical_hash, bio_hash
     );
+    if !is_signer_proven(
+        &body.signer,
+        "",
+        Some(&body.signer_proof),
+        payload.as_bytes(),
+    ) {
+        return Ok(signer_not_proven(&body.signer));
+    }
 
     let signature = provider.sign(payload.as_bytes()).map_err(|e| {
         crate::api::errors::ApiError::StorageError {
@@ -391,6 +407,7 @@ pub async fn notarize_pdf(
     let sig_hex = hex::encode(&signature);
 
     let entry = NotarizationEntry {
+        signer_proof: Some(body.signer_proof.clone()),
         id: uuid::Uuid::new_v4().to_string(),
         content_hash: fingerprint.canonical_hash.clone(),
         signer: body.signer.clone(),
@@ -458,6 +475,76 @@ pub async fn notarize_pdf(
     )))
 }
 
+struct EntryVerification {
+    signature: Option<bool>,
+    cades: Option<bool>,
+    signer: bool,
+}
+
+impl EntryVerification {
+    fn is_authentic(&self) -> bool {
+        self.signature == Some(true) && self.cades != Some(false) && self.signer
+    }
+}
+
+fn verify_entry(state: &AppState, entry: &NotarizationEntry) -> EntryVerification {
+    if entry.public_key.is_empty() {
+        return EntryVerification {
+            signature: None,
+            cades: None,
+            signer: false,
+        };
+    }
+    let payload = build_notarize_payload(
+        entry.signature_level,
+        &entry.signer,
+        &entry.content_hash,
+        &entry.biometric_evidence,
+    );
+    let signature = verify_signature(
+        entry.signature_algorithm,
+        &entry.public_key,
+        payload.as_bytes(),
+        &entry.signature,
+    );
+    let cades = entry
+        .cades_der
+        .as_ref()
+        .map(|cades_hex| verify_entry_cades(state, entry, cades_hex));
+    let signer = is_signer_proven(
+        &entry.signer,
+        &entry.public_key,
+        entry.signer_proof.as_ref(),
+        payload.as_bytes(),
+    );
+    EntryVerification {
+        signature: Some(signature),
+        cades,
+        signer,
+    }
+}
+
+fn verify_entry_cades(state: &AppState, entry: &NotarizationEntry, cades_hex: &str) -> bool {
+    let Ok(der) = hex::decode(cades_hex) else {
+        return false;
+    };
+    let bio_hash = compute_biometrics_hash(&entry.biometric_evidence);
+    let content_bytes = hex::decode(&entry.content_hash).unwrap_or_default();
+    let signing_content = [content_bytes.as_slice(), bio_hash.as_bytes()].concat();
+    let ctx = crate::signature::cades_der::VerifyContext {
+        trusted_roots: &[],
+        crl_store: state.crl_store.as_deref(),
+        verify_timestamp: true,
+    };
+    crate::signature::cades_der::verify_cades_with_context(
+        &der,
+        &signing_content,
+        &entry.public_key,
+        &ctx,
+    )
+    .is_ok()
+}
+
 /// Verify a document hash — returns the notarization record if it exists.
 #[get("/notarize/verify/{hash}")]
 pub async fn verify_notarization(
@@ -479,58 +566,22 @@ pub async fn verify_notarization(
 
     match store.read_notarization_by_hash(&content_hash) {
         Ok(entry) => {
-            let signature_verified = if entry.public_key.is_empty() {
-                None
-            } else {
-                let payload = build_notarize_payload(
-                    entry.signature_level,
-                    &entry.signer,
-                    &entry.content_hash,
-                    &entry.biometric_evidence,
-                );
-                Some(verify_signature(
-                    entry.signature_algorithm,
-                    &entry.public_key,
-                    payload.as_bytes(),
-                    &entry.signature,
-                ))
-            };
-
-            let cades_verified = match (&entry.cades_der, &entry.public_key) {
-                (Some(cades_hex), pk) if !pk.is_empty() => {
-                    let bio_hash = compute_biometrics_hash(&entry.biometric_evidence);
-                    let content_bytes = hex::decode(&entry.content_hash).unwrap_or_default();
-                    let signing_content = [content_bytes.as_slice(), bio_hash.as_bytes()].concat();
-                    match hex::decode(cades_hex) {
-                        Ok(der) => {
-                            let crl_ref: Option<&dyn crate::msp::CrlStore> =
-                                state.crl_store.as_deref();
-                            let ctx = crate::signature::cades_der::VerifyContext {
-                                trusted_roots: &[],
-                                crl_store: crl_ref,
-                                verify_timestamp: true,
-                            };
-                            Some(
-                                crate::signature::cades_der::verify_cades_with_context(
-                                    &der,
-                                    &signing_content,
-                                    pk,
-                                    &ctx,
-                                )
-                                .is_ok(),
-                            )
-                        }
-                        Err(_) => Some(false),
-                    }
-                }
-                _ => None,
-            };
+            let verification = verify_entry(&state, &entry);
+            if !verification.is_authentic() {
+                return Ok(HttpResponse::UnprocessableEntity().json(ApiResponse::<()>::error(
+                    err_dto(
+                        "INVALID_SIGNATURE",
+                        &format!("notarization {} for hash {content_hash} failed signature verification", entry.id),
+                    ),
+                    422,
+                )));
+            }
 
             Ok(HttpResponse::Ok().json(ApiResponse::success(
                 serde_json::json!({
                     "verified": true,
-                    "signature_verified": signature_verified,
-                    "cades_verified": cades_verified,
+                    "signature_verified": verification.signature,
+                    "cades_verified": verification.cades,
                     "id": entry.id,
                     "content_hash": entry.content_hash,
                     "signer": entry.signer,
@@ -849,6 +900,7 @@ pub struct SignFeaRequest {
     /// Output format: "json" (default), "cades-der", "cades-t".
     #[serde(default)]
     pub format: Option<String>,
+    pub signer_proof: SignerProof,
 }
 
 /// POST /api/v1/sign/fea — server-side FEA signature with CAdES DER.
@@ -918,6 +970,14 @@ pub async fn sign_fea(
         "notarize_fea:{}:{}:{}",
         body.signer, body.content_hash, bio_hash
     );
+    if !is_signer_proven(
+        &body.signer,
+        "",
+        Some(&body.signer_proof),
+        payload.as_bytes(),
+    ) {
+        return Ok(signer_not_proven(&body.signer));
+    }
     let signature = provider.sign(payload.as_bytes()).map_err(|e| {
         crate::api::errors::ApiError::StorageError {
             reason: format!("signing failed: {e}"),
@@ -1340,6 +1400,7 @@ pub async fn sign_fes_bulk(
         }
 
         let entry = NotarizationEntry {
+            signer_proof: None,
             id: id.clone(),
             content_hash: content_hash.clone(),
             signer: body.signer.clone(),
@@ -1491,9 +1552,14 @@ pub async fn verify_fes_bulk(
 
         match store.read_notarization_by_hash(&hash) {
             Ok(entry) => {
+                let status = if verify_entry(&state, &entry).is_authentic() {
+                    "verified"
+                } else {
+                    "invalid_signature"
+                };
                 results.push(serde_json::json!({
                     "index": i,
-                    "status": "verified",
+                    "status": status,
                     "content_hash": hash,
                     "id": entry.id,
                     "signer": entry.signer,
@@ -1602,10 +1668,254 @@ mod tests {
         (did, pk_hex, provider)
     }
 
+    fn signer_proof_for(provider: &SoftwareSigningProvider, payload: &str) -> serde_json::Value {
+        serde_json::json!({
+            "public_key": hex::encode(provider.public_key()),
+            "signature": hex::encode(provider.sign(payload.as_bytes()).unwrap()),
+        })
+    }
+
+    fn sign_fea_body(
+        content_hash: &str,
+        biometric_evidence: serde_json::Value,
+    ) -> serde_json::Value {
+        let (did, _, provider) = ed25519_identity();
+        let evidence: Vec<BiometricEvidence> =
+            serde_json::from_value(biometric_evidence.clone()).unwrap_or_default();
+        let payload = format!(
+            "notarize_fea:{did}:{content_hash}:{}",
+            compute_biometrics_hash(&evidence)
+        );
+        serde_json::json!({
+            "content_hash": content_hash,
+            "signer": did,
+            "biometric_evidence": biometric_evidence,
+            "signer_proof": signer_proof_for(&provider, &payload),
+        })
+    }
+
+    fn fingerprint_evidence() -> serde_json::Value {
+        serde_json::json!([{
+            "evidence_type": "fingerprint",
+            "commitment": "a".repeat(64),
+            "captured_at": 1700000000u64,
+        }])
+    }
+
+    struct NodeSignedFea {
+        body: serde_json::Value,
+        payload: String,
+    }
+
+    fn node_signed_fea_request(signer: &str, hash: &str) -> NodeSignedFea {
+        let (_, node_pk, node) = mldsa65_identity();
+        let evidence: Vec<BiometricEvidence> =
+            serde_json::from_value(fingerprint_evidence()).unwrap();
+        let payload = format!(
+            "notarize_fea:{signer}:{hash}:{}",
+            compute_biometrics_hash(&evidence)
+        );
+        let body = serde_json::json!({
+            "content_hash": hash,
+            "signer": signer,
+            "public_key": node_pk,
+            "signature": hex::encode(node.sign(payload.as_bytes()).unwrap()),
+            "signature_level": "advanced",
+            "signature_algorithm": "MlDsa65",
+            "biometric_evidence": fingerprint_evidence(),
+        });
+        NodeSignedFea { body, payload }
+    }
+
+    #[actix_web::test]
+    async fn sign_fea_rejects_signer_proof_from_another_key() {
+        let mut state = AppState::test_default();
+        state.signing_provider = Some(std::sync::Arc::new(MlDsaSigningProvider::generate()));
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(state))
+                .service(web::scope("/api/v1").service(sign_fea)),
+        )
+        .await;
+        let (victim_did, _, _) = ed25519_identity();
+        let (_, _, attacker) = ed25519_identity();
+        let mut body = sign_fea_body(&"a".repeat(64), fingerprint_evidence());
+        body["signer"] = serde_json::json!(victim_did);
+        body["signer_proof"] = signer_proof_for(&attacker, "anything");
+
+        let req = test::TestRequest::post()
+            .uri("/api/v1/sign/fea")
+            .set_json(body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"]["code"], "SIGNER_MISMATCH");
+    }
+
+    #[actix_web::test]
+    async fn notarize_advanced_rejects_unproven_signer() {
+        let app = test::init_service(
+            App::new()
+                .app_data(make_app_data())
+                .service(web::scope("/api/v1").service(submit_notarization)),
+        )
+        .await;
+        let (victim_did, _, _) = ed25519_identity();
+        let request = node_signed_fea_request(&victim_did, &content_hash());
+
+        let req = test::TestRequest::post()
+            .uri("/api/v1/notarize")
+            .set_json(request.body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"]["code"], "SIGNER_MISMATCH");
+    }
+
+    #[actix_web::test]
+    async fn notarize_advanced_with_signer_proof_verifies() {
+        let app = test::init_service(
+            App::new().app_data(make_app_data()).service(
+                web::scope("/api/v1")
+                    .service(submit_notarization)
+                    .service(verify_notarization),
+            ),
+        )
+        .await;
+        let (signer_did, _, signer) = ed25519_identity();
+        let hash = content_hash();
+        let mut request = node_signed_fea_request(&signer_did, &hash);
+        request.body["signer_proof"] = signer_proof_for(&signer, &request.payload);
+
+        let req = test::TestRequest::post()
+            .uri("/api/v1/notarize")
+            .set_json(request.body)
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 201);
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/v1/notarize/verify/{hash}"))
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 200);
+    }
+
+    #[actix_web::test]
+    async fn verify_rejects_advanced_entry_without_signer_proof() {
+        let state = make_app_data();
+        let (victim_did, _, _) = ed25519_identity();
+        let (_, node_pk, node) = mldsa65_identity();
+        let hash = content_hash();
+        let payload = format!(
+            "notarize_fea:{victim_did}:{hash}:{}",
+            compute_biometrics_hash(&[])
+        );
+        get_channel_store(&state, "default")
+            .unwrap()
+            .write_notarization(&NotarizationEntry {
+                signer_proof: None,
+                id: uuid::Uuid::new_v4().to_string(),
+                content_hash: hash.clone(),
+                signer: victim_did,
+                metadata: None,
+                notarized_at: 1_700_000_000,
+                block_height: 0,
+                signature: hex::encode(node.sign(payload.as_bytes()).unwrap()),
+                public_key: node_pk,
+                cades_der: None,
+                signature_algorithm: SigningAlgorithm::MlDsa65,
+                signature_level: SignatureLevel::Advanced,
+                biometric_evidence: Vec::new(),
+            })
+            .unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .service(web::scope("/api/v1").service(verify_notarization)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/v1/notarize/verify/{hash}"))
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 422);
+    }
+
     fn content_hash() -> String {
         use pqc_crypto_module::legacy::sha256::Digest;
         let hash = pqc_crypto_module::legacy::sha256::Sha256::digest(b"test document");
         hex::encode(hash)
+    }
+
+    fn store_forged_notarization(state: &web::Data<AppState>, hash: &str) {
+        let (did, pk_hex, provider) = ed25519_identity();
+        let signature_over_other_document = hex::encode(
+            provider
+                .sign(format!("notarize:{did}:{}", "0".repeat(64)).as_bytes())
+                .unwrap(),
+        );
+        let store = get_channel_store(state, "default").unwrap();
+        store
+            .write_notarization(&NotarizationEntry {
+                signer_proof: None,
+                id: uuid::Uuid::new_v4().to_string(),
+                content_hash: hash.to_string(),
+                signer: did,
+                metadata: None,
+                notarized_at: 1_700_000_000,
+                block_height: 0,
+                signature: signature_over_other_document,
+                public_key: pk_hex,
+                cades_der: None,
+                signature_algorithm: SigningAlgorithm::Ed25519,
+                signature_level: SignatureLevel::Simple,
+                biometric_evidence: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    #[actix_web::test]
+    async fn verify_rejects_entry_with_invalid_signature() {
+        let state = make_app_data();
+        let hash = content_hash();
+        store_forged_notarization(&state, &hash);
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .service(web::scope("/api/v1").service(verify_notarization)),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/v1/notarize/verify/{hash}"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 422);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"]["code"], "INVALID_SIGNATURE");
+    }
+
+    #[actix_web::test]
+    async fn bulk_verify_rejects_entry_with_invalid_signature() {
+        let state = make_app_data();
+        let hash = content_hash();
+        store_forged_notarization(&state, &hash);
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .service(web::scope("/api/v1").service(verify_fes_bulk)),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/api/v1/verify/fes/bulk")
+            .set_json(serde_json::json!({ "items": [{ "content_hash": hash }] }))
+            .to_request();
+        let body: serde_json::Value =
+            test::read_body_json(test::call_service(&app, req).await).await;
+        assert_eq!(body["data"]["verified"], 0);
+        assert_eq!(body["data"]["results"][0]["status"], "invalid_signature");
     }
 
     // ── E2E: Simple (FES) with Ed25519 ──────────────────────────────
@@ -2298,15 +2608,14 @@ mod tests {
 
         let req = test::TestRequest::post()
             .uri("/api/v1/sign/fea")
-            .set_json(serde_json::json!({
-                "content_hash": "short",
-                "signer": "did:goya:test",
-                "biometric_evidence": [{
+            .set_json(sign_fea_body(
+                "short",
+                serde_json::json!([{
                     "evidence_type": "fingerprint",
                     "commitment": "a".repeat(64),
                     "captured_at": 1700000000u64,
-                }],
-            }))
+                }]),
+            ))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
@@ -2326,11 +2635,7 @@ mod tests {
 
         let req = test::TestRequest::post()
             .uri("/api/v1/sign/fea")
-            .set_json(serde_json::json!({
-                "content_hash": "a".repeat(64),
-                "signer": "did:goya:test",
-                "biometric_evidence": [],
-            }))
+            .set_json(sign_fea_body(&"a".repeat(64), serde_json::json!([])))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
@@ -2350,15 +2655,14 @@ mod tests {
 
         let req = test::TestRequest::post()
             .uri("/api/v1/sign/fea")
-            .set_json(serde_json::json!({
-                "content_hash": "a".repeat(64),
-                "signer": "did:goya:test",
-                "biometric_evidence": [{
+            .set_json(sign_fea_body(
+                &"a".repeat(64),
+                serde_json::json!([{
                     "evidence_type": "fingerprint",
                     "commitment": "tooshort",
                     "captured_at": 1700000000u64,
-                }],
-            }))
+                }]),
+            ))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
@@ -2380,15 +2684,14 @@ mod tests {
 
         let req = test::TestRequest::post()
             .uri("/api/v1/sign/fea")
-            .set_json(serde_json::json!({
-                "content_hash": "a".repeat(64),
-                "signer": "did:goya:test",
-                "biometric_evidence": [{
+            .set_json(sign_fea_body(
+                &"a".repeat(64),
+                serde_json::json!([{
                     "evidence_type": "fingerprint",
                     "commitment": "a".repeat(64),
                     "captured_at": 1700000000u64,
-                }],
-            }))
+                }]),
+            ))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 500);
@@ -2410,15 +2713,14 @@ mod tests {
 
         let req = test::TestRequest::post()
             .uri("/api/v1/sign/fea")
-            .set_json(serde_json::json!({
-                "content_hash": "a".repeat(64),
-                "signer": "did:goya:test",
-                "biometric_evidence": [{
+            .set_json(sign_fea_body(
+                &"a".repeat(64),
+                serde_json::json!([{
                     "evidence_type": "fingerprint",
                     "commitment": "a".repeat(64),
                     "captured_at": 1700000000u64,
-                }],
-            }))
+                }]),
+            ))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);

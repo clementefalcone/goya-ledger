@@ -33,6 +33,31 @@ use serde::{Deserialize, Serialize};
 
 pub use verify::{validate_public_key, verify_signature};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignerProof {
+    pub public_key: String,
+    pub signature: String,
+}
+
+pub fn is_signer_proven(
+    signer: &str,
+    signing_public_key: &str,
+    proof: Option<&SignerProof>,
+    payload: &[u8],
+) -> bool {
+    if crate::identity::did::did_matches_pubkey(signer, signing_public_key) {
+        return true;
+    }
+    let Some(proof) = proof else {
+        return false;
+    };
+    let Some(algorithm) = verify::infer_algorithm_from_key(&proof.public_key) else {
+        return false;
+    };
+    crate::identity::did::did_matches_pubkey(signer, &proof.public_key)
+        && verify_signature(algorithm, &proof.public_key, payload, &proof.signature)
+}
+
 // ── Signature level ──────────────────────────────────────────────────────────
 
 /// Electronic signature level per international legal frameworks.
