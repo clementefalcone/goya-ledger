@@ -144,6 +144,7 @@ fn cmd_init(node: &str, name: &str, org: &str) -> Result<(), String> {
     let now_ts = chrono::Utc::now().timestamp() as u64;
     let body = serde_json::json!({
         "did": did,
+        "public_key": public_hex,
         "created_at": now_ts,
         "updated_at": now_ts,
         "status": "active"

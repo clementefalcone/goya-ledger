@@ -178,10 +178,15 @@ fn p2p_identity_and_credentials_cross_check() {
         .unwrap()
         .as_secs();
 
+    let issuer_key = "11".repeat(32);
+    let subject_key = "22".repeat(32);
+    let issuer_did = rust_bc::identity::did::did_from_pubkey_hex(&issuer_key);
+    let subject_did = rust_bc::identity::did::did_from_pubkey_hex(&subject_key);
+
     // Create issuer DID
     let issuer = post_json(
         &node1.api_url("/store/identities"),
-        serde_json::json!({"did": "did:goya:issuer-test", "status": "active", "created_at": now, "updated_at": now}),
+        serde_json::json!({"did": issuer_did, "public_key": issuer_key, "status": "active", "created_at": now, "updated_at": now}),
     );
     assert_eq!(
         issuer["status"], "Success",
@@ -191,7 +196,7 @@ fn p2p_identity_and_credentials_cross_check() {
     // Create subject DID
     let subject = post_json(
         &node1.api_url("/store/identities"),
-        serde_json::json!({"did": "did:goya:subject-test", "status": "active", "created_at": now, "updated_at": now}),
+        serde_json::json!({"did": subject_did, "public_key": subject_key, "status": "active", "created_at": now, "updated_at": now}),
     );
     assert_eq!(
         subject["status"], "Success",
@@ -201,8 +206,8 @@ fn p2p_identity_and_credentials_cross_check() {
         &node1.api_url("/store/credentials"),
         serde_json::json!({
             "id": "cred-p2p-test",
-            "issuer_did": "did:goya:issuer-test",
-            "subject_did": "did:goya:subject-test",
+            "issuer_did": issuer_did,
+            "subject_did": subject_did,
             "cred_type": "Test Certificate",
             "issued_at": now,
             "expires_at": 0
@@ -213,6 +218,6 @@ fn p2p_identity_and_credentials_cross_check() {
     // Verify credential
     let verify = get_json(&node1.api_url("/store/credentials/cred-p2p-test"));
     assert_eq!(verify["status"], "Success");
-    assert_eq!(verify["data"]["issuer_did"], "did:goya:issuer-test");
-    assert_eq!(verify["data"]["subject_did"], "did:goya:subject-test");
+    assert_eq!(verify["data"]["issuer_did"], issuer_did.as_str());
+    assert_eq!(verify["data"]["subject_did"], subject_did.as_str());
 }

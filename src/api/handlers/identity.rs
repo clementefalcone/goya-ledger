@@ -456,6 +456,7 @@ pub async fn store_write_identity(
     let _channel = channel_id_from_req(&req);
     enforce_channel_membership(&state, _channel, &req)?;
     let store = get_channel_store(&state, _channel)?;
+    validate_new_identity(store.as_ref(), &body)?;
     store
         .write_identity(&body)
         .map_err(|e| ApiError::StorageError {
@@ -471,6 +472,30 @@ pub async fn store_write_identity(
         Some(format!("did={}", body.did)),
     );
     Ok(HttpResponse::Created().json(ApiResponse::success(body.into_inner(), trace_id)))
+}
+
+fn validate_new_identity(
+    store: &dyn crate::storage::traits::BlockStore,
+    record: &crate::storage::traits::IdentityRecord,
+) -> Result<(), ApiError> {
+    if !crate::identity::did::did_matches_pubkey(&record.did, &record.public_key) {
+        return Err(ApiError::ValidationError {
+            field: "did".into(),
+            reason: "did must be derived from public_key".into(),
+        });
+    }
+    if record.status != "active" {
+        return Err(ApiError::ValidationError {
+            field: "status".into(),
+            reason: format!("new identities must be active, got {:?}", record.status),
+        });
+    }
+    if store.read_identity(&record.did).is_ok() {
+        return Err(ApiError::Conflict {
+            reason: format!("identity {} already registered", record.did),
+        });
+    }
+    Ok(())
 }
 
 /// GET /api/v1/store/identities/{did} — lee un IdentityRecord del store.
@@ -729,6 +754,76 @@ mod tests {
     #[test]
     fn store_identity_handlers_are_public() {
         let _ = (store_write_identity, store_get_identity);
+    }
+
+    fn identity_record(
+        did: &str,
+        public_key: &str,
+        status: &str,
+    ) -> crate::storage::traits::IdentityRecord {
+        crate::storage::traits::IdentityRecord {
+            did: did.to_string(),
+            public_key: public_key.to_string(),
+            created_at: 1,
+            updated_at: 1,
+            status: status.to_string(),
+            migrated_from: None,
+            signature_algorithm: None,
+            civil_anchor: None,
+        }
+    }
+
+    fn canonical_identity() -> (String, String) {
+        use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
+        let public_key = hex::encode(SoftwareSigningProvider::generate().public_key());
+        (
+            crate::identity::did::did_from_pubkey_hex(&public_key),
+            public_key,
+        )
+    }
+
+    #[test]
+    fn new_identity_accepts_did_derived_from_key() {
+        let store = crate::storage::MemoryStore::new();
+        let (did, public_key) = canonical_identity();
+        let record = identity_record(&did, &public_key, "active");
+        assert!(validate_new_identity(&store, &record).is_ok());
+    }
+
+    #[test]
+    fn new_identity_rejects_did_not_derived_from_key() {
+        let store = crate::storage::MemoryStore::new();
+        let (victim_did, _) = canonical_identity();
+        let (_, attacker_key) = canonical_identity();
+        let record = identity_record(&victim_did, &attacker_key, "active");
+        assert!(matches!(
+            validate_new_identity(&store, &record),
+            Err(ApiError::ValidationError { .. })
+        ));
+    }
+
+    #[test]
+    fn new_identity_rejects_non_active_status() {
+        let store = crate::storage::MemoryStore::new();
+        let (did, public_key) = canonical_identity();
+        let record = identity_record(&did, &public_key, "revoked");
+        assert!(matches!(
+            validate_new_identity(&store, &record),
+            Err(ApiError::ValidationError { .. })
+        ));
+    }
+
+    #[test]
+    fn new_identity_rejects_existing_did() {
+        use crate::storage::traits::BlockStore;
+        let store = crate::storage::MemoryStore::new();
+        let (did, public_key) = canonical_identity();
+        let record = identity_record(&did, &public_key, "active");
+        store.write_identity(&record).unwrap();
+        assert!(matches!(
+            validate_new_identity(&store, &record),
+            Err(ApiError::Conflict { .. })
+        ));
     }
 
     #[test]
