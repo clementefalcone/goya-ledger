@@ -25,6 +25,8 @@ pub enum LexChainError {
     NoParties,
     #[error("DID not registered: {0}")]
     DidNotRegistered(String),
+    #[error("signing key does not belong to DID: {0}")]
+    SignerMismatch(String),
     #[error("archival failed: {0}")]
     ArchivalFailed(String),
     #[error("contract expired")]
@@ -160,6 +162,10 @@ pub fn sign(
 
     if party.signed {
         return Err(LexChainError::AlreadySigned(req.did.clone()));
+    }
+
+    if !crate::identity::did::did_matches_pubkey(&req.did, &req.public_key) {
+        return Err(LexChainError::SignerMismatch(req.did.clone()));
     }
 
     let sig_level = party.signature_level;
@@ -566,7 +572,7 @@ mod tests {
             contract_type: "service_agreement".into(),
             parties: vec![PartyDefinition {
                 role: "client".into(),
-                did: "did:goya:alice".into(),
+                did: did("alice"),
                 signature_level: SignatureLevel::Simple,
             }],
             payload: serde_json::json!({"terms": "test"}),
@@ -582,12 +588,12 @@ mod tests {
             parties: vec![
                 PartyDefinition {
                     role: "provider".into(),
-                    did: "did:goya:alice".into(),
+                    did: did("alice"),
                     signature_level: SignatureLevel::Simple,
                 },
                 PartyDefinition {
                     role: "client".into(),
-                    did: "did:goya:bob".into(),
+                    did: did("bob"),
                     signature_level: SignatureLevel::Simple,
                 },
             ],
@@ -612,6 +618,35 @@ mod tests {
         }
     }
 
+    fn did_of(provider: &dyn SigningProvider) -> String {
+        crate::identity::did::did_from_pubkey_hex(&hex::encode(provider.public_key()))
+    }
+
+    fn key(name: &str) -> SoftwareSigningProvider {
+        SoftwareSigningProvider::from_key(
+            pqc_crypto_module::legacy::ed25519::SigningKey::from_bytes(&[name.as_bytes()[0]; 32]),
+        )
+    }
+
+    fn did(name: &str) -> String {
+        did_of(&key(name))
+    }
+
+    #[test]
+    fn sign_rejects_key_not_bound_to_party_did() {
+        let store = test_store();
+        register_did(&store, &did("alice"));
+        let contract = deploy(&store, fes_definition()).unwrap();
+
+        let forged = sign_as(&contract, &key("mallory"));
+
+        assert_eq!(forged.did, did("alice"));
+        assert!(matches!(
+            sign(&store, &contract.id, &forged),
+            Err(LexChainError::SignerMismatch(_))
+        ));
+    }
+
     #[test]
     fn deploy_creates_pending_contract() {
         let store = test_store();
@@ -633,10 +668,9 @@ mod tests {
     #[test]
     fn sign_advances_to_fully_signed() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         let updated = sign(&store, &contract.id, &req).unwrap();
         assert_eq!(updated.state, ContractState::FullySigned);
         assert!(updated.parties[0].signed);
@@ -647,8 +681,7 @@ mod tests {
     fn sign_rejects_unregistered_did() {
         let store = test_store();
         let contract = deploy(&store, fes_definition()).unwrap();
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         assert!(matches!(
             sign(&store, &contract.id, &req),
             Err(LexChainError::DidNotRegistered(_))
@@ -658,11 +691,11 @@ mod tests {
     #[test]
     fn sign_rejects_unknown_party() {
         let store = test_store();
-        register_did(&store, "did:goya:unknown");
+        register_did(&store, &did("unknown"));
         let contract = deploy(&store, fes_definition()).unwrap();
         let provider = SoftwareSigningProvider::generate();
         let mut req = sign_as(&contract, &provider);
-        req.did = "did:goya:unknown".into();
+        req.did = did("unknown");
         assert!(matches!(
             sign(&store, &contract.id, &req),
             Err(LexChainError::PartyNotFound(_))
@@ -672,10 +705,9 @@ mod tests {
     #[test]
     fn sign_rejects_after_fully_signed() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         let signed = sign(&store, &contract.id, &req).unwrap();
         assert_eq!(signed.state, ContractState::FullySigned);
         assert!(matches!(
@@ -687,20 +719,19 @@ mod tests {
     #[test]
     fn two_party_flow_pending_until_both_sign() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
-        register_did(&store, "did:goya:bob");
+        register_did(&store, &did("alice"));
+        register_did(&store, &did("bob"));
         let contract = deploy(&store, two_party_definition()).unwrap();
 
-        let alice = SoftwareSigningProvider::generate();
-        let req_a = sign_as(&contract, &alice);
+        let req_a = sign_as(&contract, &key("alice"));
         let after_alice = sign(&store, &contract.id, &req_a).unwrap();
         assert_eq!(after_alice.state, ContractState::PendingSignatures);
 
-        let bob = SoftwareSigningProvider::generate();
+        let bob = key("bob");
         let req_b = SignRequest {
-            did: "did:goya:bob".into(),
+            did: did("bob"),
             signature: {
-                let payload = format!("fes:did:goya:bob:{}", contract.content_hash);
+                let payload = format!("fes:{}:{}", did("bob"), contract.content_hash);
                 hex::encode(bob.sign(payload.as_bytes()).unwrap())
             },
             public_key: hex::encode(bob.public_key()),
@@ -725,11 +756,10 @@ mod tests {
     #[test]
     fn full_lifecycle_deploy_sign_notarize_archive() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         let signed = sign(&store, &contract.id, &req).unwrap();
         assert_eq!(signed.state, ContractState::FullySigned);
 
@@ -753,12 +783,14 @@ mod tests {
     #[test]
     fn pqc_fea_lifecycle() {
         let store = test_store();
-        register_did(&store, "did:goya:notary");
+        let provider = MlDsaSigningProvider::generate();
+        let notary_did = did_of(&provider);
+        register_did(&store, &notary_did);
         let def = ContractDefinition {
             contract_type: "notarial_deed".into(),
             parties: vec![PartyDefinition {
                 role: "notary".into(),
-                did: "did:goya:notary".into(),
+                did: notary_did.clone(),
                 signature_level: SignatureLevel::Advanced,
             }],
             payload: serde_json::json!({"document": "deed"}),
@@ -768,7 +800,6 @@ mod tests {
         };
         let contract = deploy(&store, def).unwrap();
 
-        let provider = MlDsaSigningProvider::generate();
         let pk_hex = hex::encode(provider.public_key());
         let bio_commitment = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let evidence = vec![BiometricEvidence {
@@ -778,11 +809,11 @@ mod tests {
             capture_device: Some("scanner-1".into()),
         }];
         let bio_hash = crate::signature::compute_biometrics_hash(&evidence);
-        let payload = format!("fea:did:goya:notary:{}:{}", contract.content_hash, bio_hash);
+        let payload = format!("fea:{notary_did}:{}:{}", contract.content_hash, bio_hash);
         let sig = provider.sign(payload.as_bytes()).unwrap();
 
         let req = SignRequest {
-            did: "did:goya:notary".into(),
+            did: notary_did,
             signature: hex::encode(&sig),
             public_key: pk_hex,
             biometric_evidence: evidence,
@@ -803,11 +834,10 @@ mod tests {
     #[test]
     fn archive_writes_transaction_to_store() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         sign(&store, &contract.id, &req).unwrap();
 
         let archived = archive(&store, &contract.id).unwrap();
@@ -816,7 +846,7 @@ mod tests {
         let tx_id = format!("lxc-archive:{}", contract.id);
         let tx = store.backend().read_transaction(&tx_id).unwrap();
         assert_eq!(tx.output_recipient, "lexchain:archive");
-        assert_eq!(tx.input_did, "did:goya:alice");
+        assert_eq!(tx.input_did, did("alice"));
     }
 
     #[test]
@@ -832,7 +862,7 @@ mod tests {
     #[test]
     fn persistence_roundtrip() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
         let id = contract.id.clone();
 
@@ -846,7 +876,7 @@ mod tests {
             contract_type: "urgent_agreement".into(),
             parties: vec![PartyDefinition {
                 role: "client".into(),
-                did: "did:goya:alice".into(),
+                did: did("alice"),
                 signature_level: SignatureLevel::Simple,
             }],
             payload: serde_json::json!({"terms": "expires fast"}),
@@ -875,15 +905,14 @@ mod tests {
     #[test]
     fn sign_rejects_expired_contract() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let mut def = fes_definition();
         def.deadline_secs = Some(0);
         let contract = deploy(&store, def).unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(1100));
 
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         let result = sign(&store, &contract.id, &req);
         assert!(matches!(result, Err(LexChainError::Expired)));
 
@@ -912,13 +941,12 @@ mod tests {
     #[test]
     fn signed_contract_with_deadline_does_not_expire() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let mut def = fes_definition();
         def.deadline_secs = Some(3600);
         let contract = deploy(&store, def).unwrap();
 
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         let signed = sign(&store, &contract.id, &req).unwrap();
         assert_eq!(signed.state, ContractState::FullySigned);
         assert!(!signed.is_expired(signed.created_at + 7200));
@@ -930,7 +958,7 @@ mod tests {
             contract_type: "test".into(),
             parties: vec![PartyDefinition {
                 role: "a".into(),
-                did: "did:goya:a".into(),
+                did: did("a"),
                 signature_level: SignatureLevel::Simple,
             }],
             payload: serde_json::json!({}),
@@ -964,8 +992,8 @@ mod tests {
     fn deploy_from_nda_template() {
         let store = test_store();
         let mut parties = std::collections::HashMap::new();
-        parties.insert("discloser".into(), "did:goya:alice".into());
-        parties.insert("recipient".into(), "did:goya:bob".into());
+        parties.insert("discloser".into(), did("alice"));
+        parties.insert("recipient".into(), did("bob"));
 
         let contract = deploy_from_template(
             &store,
@@ -988,7 +1016,7 @@ mod tests {
     fn deploy_from_template_rejects_missing_role() {
         let store = test_store();
         let mut parties = std::collections::HashMap::new();
-        parties.insert("discloser".into(), "did:goya:alice".into());
+        parties.insert("discloser".into(), did("alice"));
         // missing "recipient"
 
         let result = deploy_from_template(&store, "nda", parties, serde_json::json!({}));
@@ -1019,8 +1047,8 @@ mod tests {
     fn deploy_request_from_template() {
         let store = test_store();
         let mut parties = std::collections::HashMap::new();
-        parties.insert("provider".into(), "did:goya:alice".into());
-        parties.insert("client".into(), "did:goya:bob".into());
+        parties.insert("provider".into(), did("alice"));
+        parties.insert("client".into(), did("bob"));
 
         let req = DeployRequest::FromTemplate {
             template: "service_agreement".into(),
@@ -1063,8 +1091,8 @@ mod tests {
         });
 
         let mut parties = std::collections::HashMap::new();
-        parties.insert("landlord".into(), "did:goya:owner".into());
-        parties.insert("tenant".into(), "did:goya:renter".into());
+        parties.insert("landlord".into(), did("owner"));
+        parties.insert("tenant".into(), did("renter"));
 
         let contract = deploy_from_template(
             &store,
@@ -1079,23 +1107,19 @@ mod tests {
     #[test]
     fn deliver_creates_receipt_with_tsa() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         sign(&store, &contract.id, &req).unwrap();
 
         let signer = std::sync::Arc::new(SoftwareSigningProvider::generate());
         let tsa = TsaProvider::new(signer, "did:goya:tsa".into());
 
-        let delivered = deliver(&store, &contract.id, "did:goya:alice", &tsa).unwrap();
+        let delivered = deliver(&store, &contract.id, &did("alice"), &tsa).unwrap();
         assert_eq!(delivered.state, ContractState::Delivered);
         assert_eq!(delivered.delivery_receipts.len(), 1);
-        assert_eq!(
-            delivered.delivery_receipts[0].recipient_did,
-            "did:goya:alice"
-        );
+        assert_eq!(delivered.delivery_receipts[0].recipient_did, did("alice"));
         assert!(delivered.delivery_receipts[0].send_tsa_token.is_some());
         assert!(delivered.delivery_receipts[0].received_at.is_none());
     }
@@ -1103,18 +1127,17 @@ mod tests {
     #[test]
     fn acknowledge_delivery_timestamps_receipt() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         sign(&store, &contract.id, &req).unwrap();
 
         let signer = std::sync::Arc::new(SoftwareSigningProvider::generate());
         let tsa = TsaProvider::new(signer, "did:goya:tsa".into());
 
-        deliver(&store, &contract.id, "did:goya:alice", &tsa).unwrap();
-        let acked = acknowledge_delivery(&store, &contract.id, "did:goya:alice", &tsa).unwrap();
+        deliver(&store, &contract.id, &did("alice"), &tsa).unwrap();
+        let acked = acknowledge_delivery(&store, &contract.id, &did("alice"), &tsa).unwrap();
         assert!(acked.delivery_receipts[0].received_at.is_some());
         assert!(acked.delivery_receipts[0].receipt_tsa_token.is_some());
     }
@@ -1122,17 +1145,16 @@ mod tests {
     #[test]
     fn deliver_rejects_unknown_party() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         sign(&store, &contract.id, &req).unwrap();
 
         let signer = std::sync::Arc::new(SoftwareSigningProvider::generate());
         let tsa = TsaProvider::new(signer, "did:goya:tsa".into());
 
-        let result = deliver(&store, &contract.id, "did:goya:unknown", &tsa);
+        let result = deliver(&store, &contract.id, &did("unknown"), &tsa);
         assert!(matches!(result, Err(LexChainError::PartyNotFound(_))));
     }
 
@@ -1142,26 +1164,25 @@ mod tests {
         let contract = deploy(&store, fes_definition()).unwrap();
         let signer = std::sync::Arc::new(SoftwareSigningProvider::generate());
         let tsa = TsaProvider::new(signer, "did:goya:tsa".into());
-        let result = deliver(&store, &contract.id, "did:goya:alice", &tsa);
+        let result = deliver(&store, &contract.id, &did("alice"), &tsa);
         assert!(matches!(result, Err(LexChainError::InvalidState { .. })));
     }
 
     #[test]
     fn two_party_delivery_transitions_on_last() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
-        register_did(&store, "did:goya:bob");
+        register_did(&store, &did("alice"));
+        register_did(&store, &did("bob"));
         let contract = deploy(&store, two_party_definition()).unwrap();
 
-        let alice = SoftwareSigningProvider::generate();
-        let req_a = sign_as(&contract, &alice);
+        let req_a = sign_as(&contract, &key("alice"));
         sign(&store, &contract.id, &req_a).unwrap();
 
-        let bob = SoftwareSigningProvider::generate();
+        let bob = key("bob");
         let req_b = SignRequest {
-            did: "did:goya:bob".into(),
+            did: did("bob"),
             signature: {
-                let payload = format!("fes:did:goya:bob:{}", contract.content_hash);
+                let payload = format!("fes:{}:{}", did("bob"), contract.content_hash);
                 hex::encode(bob.sign(payload.as_bytes()).unwrap())
             },
             public_key: hex::encode(bob.public_key()),
@@ -1172,27 +1193,26 @@ mod tests {
         let signer = std::sync::Arc::new(SoftwareSigningProvider::generate());
         let tsa = TsaProvider::new(signer, "did:goya:tsa".into());
 
-        let after_alice = deliver(&store, &contract.id, "did:goya:alice", &tsa).unwrap();
+        let after_alice = deliver(&store, &contract.id, &did("alice"), &tsa).unwrap();
         assert_eq!(after_alice.state, ContractState::FullySigned);
 
-        let after_bob = deliver(&store, &contract.id, "did:goya:bob", &tsa).unwrap();
+        let after_bob = deliver(&store, &contract.id, &did("bob"), &tsa).unwrap();
         assert_eq!(after_bob.state, ContractState::Delivered);
     }
 
     #[test]
     fn archive_accepts_delivered_state() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         sign(&store, &contract.id, &req).unwrap();
 
         let signer = std::sync::Arc::new(SoftwareSigningProvider::generate());
         let tsa = TsaProvider::new(signer, "did:goya:tsa".into());
 
-        deliver(&store, &contract.id, "did:goya:alice", &tsa).unwrap();
+        deliver(&store, &contract.id, &did("alice"), &tsa).unwrap();
         let archived = archive(&store, &contract.id).unwrap();
         assert_eq!(archived.state, ContractState::Archived);
     }
@@ -1200,19 +1220,18 @@ mod tests {
     #[test]
     fn full_erds_lifecycle() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
-        let provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &provider);
+        let req = sign_as(&contract, &key("alice"));
         sign(&store, &contract.id, &req).unwrap();
 
         let signer = std::sync::Arc::new(SoftwareSigningProvider::generate());
         let tsa = TsaProvider::new(signer, "did:goya:tsa".into());
 
         notarize(&store, &contract.id, &tsa).unwrap();
-        deliver(&store, &contract.id, "did:goya:alice", &tsa).unwrap();
-        acknowledge_delivery(&store, &contract.id, "did:goya:alice", &tsa).unwrap();
+        deliver(&store, &contract.id, &did("alice"), &tsa).unwrap();
+        acknowledge_delivery(&store, &contract.id, &did("alice"), &tsa).unwrap();
         let archived = archive(&store, &contract.id).unwrap();
 
         assert_eq!(archived.state, ContractState::Archived);
@@ -1224,11 +1243,10 @@ mod tests {
     #[test]
     fn preserve_contract_re_signs_with_pqc() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
-        let ed_provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &ed_provider);
+        let req = sign_as(&contract, &key("alice"));
         sign(&store, &contract.id, &req).unwrap();
 
         let pqc = MlDsaSigningProvider::generate();
@@ -1261,11 +1279,10 @@ mod tests {
         use crate::crypto::algorithm_policy::AlgorithmPolicy;
 
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
 
         let contract = deploy(&store, fes_definition()).unwrap();
-        let ed_provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &ed_provider);
+        let req = sign_as(&contract, &key("alice"));
         sign(&store, &contract.id, &req).unwrap();
 
         let mut policy = AlgorithmPolicy::new(SigningAlgorithm::MlDsa65);
@@ -1295,11 +1312,10 @@ mod tests {
         use crate::crypto::algorithm_policy::AlgorithmPolicy;
 
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
 
         let contract = deploy(&store, fes_definition()).unwrap();
-        let ed_provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &ed_provider);
+        let req = sign_as(&contract, &key("alice"));
         sign(&store, &contract.id, &req).unwrap();
 
         let mut policy = AlgorithmPolicy::new(SigningAlgorithm::MlDsa65);
@@ -1326,11 +1342,10 @@ mod tests {
         use crate::crypto::algorithm_policy::AlgorithmPolicy;
 
         let store = test_store();
-        register_did(&store, "did:goya:alice");
+        register_did(&store, &did("alice"));
 
         let contract = deploy(&store, fes_definition()).unwrap();
-        let ed_provider = SoftwareSigningProvider::generate();
-        let req = sign_as(&contract, &ed_provider);
+        let req = sign_as(&contract, &key("alice"));
         sign(&store, &contract.id, &req).unwrap();
 
         let policy = AlgorithmPolicy::new(SigningAlgorithm::MlDsa65);
@@ -1346,18 +1361,20 @@ mod tests {
     #[test]
     fn quarantine_classical_only_contracts() {
         let store = test_store();
-        register_did(&store, "did:goya:alice");
-        register_did(&store, "did:goya:bob");
+        register_did(&store, &did("alice"));
 
         let ed_contract = deploy(&store, fes_definition()).unwrap();
-        let req = sign_as(&ed_contract, &SoftwareSigningProvider::generate());
+        let req = sign_as(&ed_contract, &key("alice"));
         sign(&store, &ed_contract.id, &req).unwrap();
 
+        let pqc_signer = MlDsaSigningProvider::generate();
+        let pqc_did = did_of(&pqc_signer);
+        register_did(&store, &pqc_did);
         let pqc_def = ContractDefinition {
             contract_type: "nda".into(),
             parties: vec![PartyDefinition {
                 role: "signer".into(),
-                did: "did:goya:bob".into(),
+                did: pqc_did.clone(),
                 signature_level: SignatureLevel::Simple,
             }],
             payload: serde_json::json!({"scope": "pqc"}),
@@ -1366,12 +1383,11 @@ mod tests {
             webhook_url: None,
         };
         let pqc_contract = deploy(&store, pqc_def).unwrap();
-        let pqc_signer = MlDsaSigningProvider::generate();
         let pk_hex = hex::encode(pqc_signer.public_key());
-        let payload = format!("fes:did:goya:bob:{}", pqc_contract.content_hash);
+        let payload = format!("fes:{pqc_did}:{}", pqc_contract.content_hash);
         let sig = pqc_signer.sign(payload.as_bytes()).unwrap();
         let pqc_req = SignRequest {
-            did: "did:goya:bob".into(),
+            did: pqc_did,
             signature: hex::encode(&sig),
             public_key: pk_hex,
             biometric_evidence: vec![],
