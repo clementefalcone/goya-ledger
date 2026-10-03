@@ -143,41 +143,44 @@ pub struct MigrationResult {
 pub fn migrate_identity(
     store: &dyn BlockStore,
     old_did: &str,
-    new_algorithm: SigningAlgorithm,
+    new_public_key_hex: &str,
     timestamp: u64,
 ) -> Result<MigrationResult, StorageError> {
+    let new_algorithm = crate::signature::verify::infer_algorithm_from_key(new_public_key_hex)
+        .ok_or_else(|| {
+            StorageError::Other(format!(
+                "cannot infer signing algorithm from new public key of {} hex chars",
+                new_public_key_hex.len()
+            ))
+        })?;
     let old_record = store.read_identity(old_did)?;
-
-    let provider = new_provider(new_algorithm);
-    let new_pk_hex = hex::encode(provider.public_key());
-    let new_did = did_from_pubkey_hex(&new_pk_hex);
+    let new_did = did_from_pubkey_hex(new_public_key_hex);
 
     store.write_identity(&IdentityRecord {
-        did: old_did.to_string(),
-        public_key: old_record.public_key,
-        created_at: old_record.created_at,
         updated_at: timestamp,
         status: "migrated".to_string(),
-        migrated_from: None,
-        signature_algorithm: old_record.signature_algorithm,
-        civil_anchor: None,
+        ..old_record.clone()
     })?;
 
     store.write_identity(&IdentityRecord {
         did: new_did.clone(),
-        public_key: new_pk_hex.clone(),
+        public_key: new_public_key_hex.to_string(),
         created_at: timestamp,
         updated_at: timestamp,
         status: "active".to_string(),
         migrated_from: Some(old_did.to_string()),
         signature_algorithm: Some(format!("{:?}", new_algorithm)),
-        civil_anchor: None,
+        civil_anchor: old_record.civil_anchor.clone(),
     })?;
+
+    if let Some(anchor) = &old_record.civil_anchor {
+        store.write_civil_anchor(anchor, &new_did)?;
+    }
 
     Ok(MigrationResult {
         old_did: old_did.to_string(),
         new_did,
-        new_public_key_hex: new_pk_hex,
+        new_public_key_hex: new_public_key_hex.to_string(),
         new_algorithm,
     })
 }
@@ -309,7 +312,13 @@ mod tests {
             })
             .unwrap();
 
-        let result = migrate_identity(&store, &old_did, SigningAlgorithm::MlDsa65, 2000).unwrap();
+        let result = migrate_identity(
+            &store,
+            &old_did,
+            &KeyManager::with_algorithm(SigningAlgorithm::MlDsa65, 2000).public_key_hex(),
+            2000,
+        )
+        .unwrap();
 
         assert_ne!(result.old_did, result.new_did);
         assert_eq!(result.new_algorithm, SigningAlgorithm::MlDsa65);
@@ -342,7 +351,13 @@ mod tests {
             })
             .unwrap();
 
-        let result = migrate_identity(&store, &old_did, SigningAlgorithm::MlDsa65, 2000).unwrap();
+        let result = migrate_identity(
+            &store,
+            &old_did,
+            &KeyManager::with_algorithm(SigningAlgorithm::MlDsa65, 2000).public_key_hex(),
+            2000,
+        )
+        .unwrap();
 
         let resolved = resolve_identity(&store, &old_did).unwrap();
         assert_eq!(resolved.did, result.new_did);
@@ -374,11 +389,11 @@ mod tests {
     }
 
     #[test]
-    fn migrate_produces_valid_signing_proof() {
+    fn migrate_keeps_civil_anchor_pointing_to_new_did() {
         let store = crate::storage::memory::MemoryStore::new();
         let km = KeyManager::new(1000);
         let old_did = km.did();
-
+        let anchor = "ab".repeat(64);
         store
             .write_identity(&IdentityRecord {
                 did: old_did.clone(),
@@ -388,14 +403,19 @@ mod tests {
                 status: "active".into(),
                 migrated_from: None,
                 signature_algorithm: None,
-                civil_anchor: None,
+                civil_anchor: Some(anchor.clone()),
             })
             .unwrap();
+        store.write_civil_anchor(&anchor, &old_did).unwrap();
+        let new_key = KeyManager::with_algorithm(SigningAlgorithm::MlDsa65, 2000);
 
-        let result = migrate_identity(&store, &old_did, SigningAlgorithm::MlDsa65, 2000).unwrap();
-        let new_provider = new_provider(result.new_algorithm);
-        let test_data = b"migration verification";
-        let sig = new_provider.sign(test_data).unwrap();
-        assert_eq!(sig.len(), 3309);
+        let result = migrate_identity(&store, &old_did, &new_key.public_key_hex(), 2000).unwrap();
+
+        let new_record = store.read_identity(&result.new_did).unwrap();
+        assert_eq!(new_record.civil_anchor.as_deref(), Some(anchor.as_str()));
+        assert_eq!(
+            store.resolve_by_civil_anchor(&anchor).unwrap(),
+            result.new_did
+        );
     }
 }

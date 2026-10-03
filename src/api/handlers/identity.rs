@@ -317,9 +317,9 @@ async fn verify_signature(
 
 #[derive(Debug, serde::Deserialize)]
 pub struct MigrateRequest {
-    #[serde(default = "default_target_algorithm")]
-    pub target_algorithm: String,
+    pub new_public_key: String,
     pub signature: String,
+    pub new_key_signature: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -352,10 +352,6 @@ fn verify_owner_signature(
     Ok(())
 }
 
-fn default_target_algorithm() -> String {
-    "ml-dsa-65".into()
-}
-
 #[derive(Debug, serde::Serialize)]
 struct MigrateResponse {
     old_did: String,
@@ -375,32 +371,36 @@ pub async fn migrate_did(
     let did = path.into_inner();
     let trace_id = uuid::Uuid::new_v4().to_string();
 
-    let target = match body.target_algorithm.to_lowercase().as_str() {
-        "ml-dsa-65" | "mldsa65" | "" => crate::identity::signing::SigningAlgorithm::MlDsa65,
-        "ed25519" => crate::identity::signing::SigningAlgorithm::Ed25519,
-        other => {
-            return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-                ErrorDto {
-                    code: "INVALID_ALGORITHM".into(),
-                    message: format!("unsupported target: {other}. Use ml-dsa-65 or ed25519"),
-                    field: Some("target_algorithm".into()),
-                },
-                400,
-            )));
-        }
-    };
-
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
 
     let record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
         resource: format!("identity {did}"),
     })?;
-    verify_owner_signature(
-        &record,
-        &format!("identity:migrate:{did}:{}", body.target_algorithm),
-        &body.signature,
-    )?;
+    let new_did = crate::identity::did::did_from_pubkey_hex(&body.new_public_key);
+    let message = format!("identity:migrate:{did}:{new_did}");
+    verify_owner_signature(&record, &message, &body.signature)?;
+    let controls_new_key = crate::signature::verify::infer_algorithm_from_key(&body.new_public_key)
+        .is_some_and(|algorithm| {
+            crate::signature::verify_signature(
+                algorithm,
+                &body.new_public_key,
+                message.as_bytes(),
+                &body.new_key_signature,
+            )
+        });
+    if !controls_new_key {
+        return Err(ApiError::UnauthorizedWithMessage {
+            message: format!(
+                "new_key_signature over {message:?} does not verify against new_public_key"
+            ),
+        });
+    }
+    if store.read_identity(&new_did).is_ok() {
+        return Err(ApiError::Conflict {
+            reason: format!("identity {new_did} already registered"),
+        });
+    }
 
     if record.status == "migrated" {
         return Ok(HttpResponse::Conflict().json(ApiResponse::<()>::error(
@@ -418,10 +418,11 @@ pub async fn migrate_did(
         .unwrap_or_default()
         .as_secs();
 
-    let result = crate::identity::keys::migrate_identity(store.as_ref(), &did, target, now)
-        .map_err(|e| ApiError::StorageError {
-            reason: format!("migration failed: {e}"),
-        })?;
+    let result =
+        crate::identity::keys::migrate_identity(store.as_ref(), &did, &body.new_public_key, now)
+            .map_err(|e| ApiError::StorageError {
+                reason: format!("migration failed: {e}"),
+            })?;
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         MigrateResponse {
@@ -952,28 +953,61 @@ mod tests {
         assert_eq!(owner_status(&owner), "revoked");
     }
 
+    fn migration_body(
+        owner: &RegisteredOwner,
+        old_key: &crate::identity::signing::SoftwareSigningProvider,
+        new_key: &crate::identity::signing::MlDsaSigningProvider,
+    ) -> (serde_json::Value, String) {
+        use crate::identity::signing::SigningProvider;
+        let new_public_key = hex::encode(new_key.public_key());
+        let new_did = crate::identity::did::did_from_pubkey_hex(&new_public_key);
+        let message = format!("identity:migrate:{}:{new_did}", owner.did);
+        let body = serde_json::json!({
+            "new_public_key": new_public_key,
+            "signature": sign_hex(old_key, &message),
+            "new_key_signature": hex::encode(new_key.sign(message.as_bytes()).unwrap()),
+        });
+        (body, new_did)
+    }
+
     #[actix_web::test]
     async fn migrate_rejects_signature_from_another_key() {
         let owner = registered_owner();
         let attacker = crate::identity::signing::SoftwareSigningProvider::generate();
-        let message = format!("identity:migrate:{}:ml-dsa-65", owner.did);
-        let body = serde_json::json!({
-            "target_algorithm": "ml-dsa-65",
-            "signature": sign_hex(&attacker, &message),
-        });
+        let new_key = crate::identity::signing::MlDsaSigningProvider::generate();
+        let (body, _) = migration_body(&owner, &attacker, &new_key);
         assert_eq!(post_owner_action(&owner, "migrate", body).await, 401);
         assert_eq!(owner_status(&owner), "active");
     }
 
     #[actix_web::test]
-    async fn migrate_with_owner_signature_migrates() {
+    async fn migrate_rejects_new_key_without_its_signature() {
         let owner = registered_owner();
-        let message = format!("identity:migrate:{}:ml-dsa-65", owner.did);
-        let body = serde_json::json!({
-            "target_algorithm": "ml-dsa-65",
-            "signature": sign_hex(&owner.key, &message),
-        });
+        let new_key = crate::identity::signing::MlDsaSigningProvider::generate();
+        let other_key = crate::identity::signing::MlDsaSigningProvider::generate();
+        let (mut body, _) = migration_body(&owner, &owner.key, &new_key);
+        let (other_body, _) = migration_body(&owner, &owner.key, &other_key);
+        body["new_key_signature"] = other_body["new_key_signature"].clone();
+        assert_eq!(post_owner_action(&owner, "migrate", body).await, 401);
+        assert_eq!(owner_status(&owner), "active");
+    }
+
+    #[actix_web::test]
+    async fn migrate_moves_identity_to_owner_supplied_key() {
+        use crate::identity::signing::SigningProvider;
+        let owner = registered_owner();
+        let new_key = crate::identity::signing::MlDsaSigningProvider::generate();
+        let (body, new_did) = migration_body(&owner, &owner.key, &new_key);
         assert_eq!(post_owner_action(&owner, "migrate", body).await, 200);
         assert_eq!(owner_status(&owner), "migrated");
+        let new_record = get_channel_store(&owner.state, "default")
+            .unwrap()
+            .read_identity(&new_did)
+            .unwrap();
+        assert_eq!(new_record.public_key, hex::encode(new_key.public_key()));
+        assert_eq!(
+            new_record.migrated_from.as_deref(),
+            Some(owner.did.as_str())
+        );
     }
 }

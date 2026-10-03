@@ -285,8 +285,13 @@ fn phase3_identity_migration_ed25519_to_mldsa65() {
     let mut results = Vec::new();
 
     for old_id in &ed_identities {
-        let result =
-            migrate_identity(store.as_ref(), &old_id.did, SigningAlgorithm::MlDsa65, 1000).unwrap();
+        let result = migrate_identity(
+            store.as_ref(),
+            &old_id.did,
+            &hex::encode(MlDsaSigningProvider::generate().public_key()),
+            1000,
+        )
+        .unwrap();
 
         assert_ne!(result.old_did, result.new_did);
         assert_eq!(result.new_algorithm, SigningAlgorithm::MlDsa65);
@@ -1363,8 +1368,13 @@ fn phase7_migration_during_partition_then_rejoin() {
     // While partitioned, migrate C and D's identities to ML-DSA-65
     for v_id in partitioned {
         let old_did = format!("did:goya:{v_id}");
-        let result =
-            migrate_identity(store.as_ref(), &old_did, SigningAlgorithm::MlDsa65, 1000).unwrap();
+        let result = migrate_identity(
+            store.as_ref(),
+            &old_did,
+            &hex::encode(MlDsaSigningProvider::generate().public_key()),
+            1000,
+        )
+        .unwrap();
 
         let old_rec = store.read_identity(&old_did).unwrap();
         assert_eq!(old_rec.status, "migrated");
