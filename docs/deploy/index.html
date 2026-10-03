@@ -1,611 +1,892 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Goya Ledger — Firma electronica con prueba matematica. Post-quantum, blockchain BFT, verificable para siempre.">
-<title>Goya Ledger — What, Why, How</title>
+<title>Goya Ledger — Registro distribuido post-cuántico, explicado en simple</title>
+<meta name="description" content="Goya Ledger es un registro distribuido (DLT) post-cuántico: lo que se registra no se puede falsificar. Explicado para quienes nunca han oído de blockchain.">
+<meta name="theme-color" content="#060708">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;600;700&family=Figtree:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-@font-face {
-  font-family: 'Display';
-  src: local('Iowan Old Style'), local('Palatino Linotype'), local('Palatino'), local('Book Antiqua'), local('Georgia');
-  font-weight: 400;
-}
-@font-face {
-  font-family: 'Display';
-  src: local('Iowan Old Style Bold'), local('Palatino Linotype Bold'), local('Palatino Bold'), local('Georgia Bold');
-  font-weight: 700;
-}
-
 :root {
-  --bg: #FCFBF8;
-  --bg-alt: #F3F1EC;
-  --fg: #1C1917;
-  --fg-mid: #44403C;
-  --fg-soft: #78716C;
-  --accent: #1B4332;
-  --accent-light: #D8E8DF;
-  --border: #D6D3CE;
-  --negative: #92400E;
-  --negative-bg: #FEF3C7;
+  --ink: #060708;
+  --ink-2: #0d0f12;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.16);
+  --text: #eceae4;
+  --muted: #8b8f96;
+  --faint: #5a5e65;
+  --seal: #ffb547;
+  --seal-soft: rgba(255, 181, 71, 0.14);
+  --ice: #cfe8ff;
+  --alert: #ff6a5c;
+  --display: "Schibsted Grotesk", system-ui, sans-serif;
+  --body: "Figtree", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --gutter: clamp(16px, 4vw, 40px);
+  --max: 1160px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1A1816;
-    --bg-alt: #252220;
-    --fg: #F5F3EF;
-    --fg-mid: #C8C4BD;
-    --fg-soft: #8C877F;
-    --accent: #6EE7A0;
-    --accent-light: #1B3328;
-    --border: #3D3935;
-    --negative: #FCD34D;
-    --negative-bg: #3D2E0A;
-  }
-}
-:root[data-theme="dark"] {
-  --bg: #1A1816;
-  --bg-alt: #252220;
-  --fg: #F5F3EF;
-  --fg-mid: #C8C4BD;
-  --fg-soft: #8C877F;
-  --accent: #6EE7A0;
-  --accent-light: #1B3328;
-  --border: #3D3935;
-  --negative: #FCD34D;
-  --negative-bg: #3D2E0A;
-}
-:root[data-theme="light"] {
-  --bg: #FCFBF8;
-  --bg-alt: #F3F1EC;
-  --fg: #1C1917;
-  --fg-mid: #44403C;
-  --fg-soft: #78716C;
-  --accent: #1B4332;
-  --accent-light: #D8E8DF;
-  --border: #D6D3CE;
-  --negative: #92400E;
-  --negative-bg: #FEF3C7;
-}
-
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
 body {
-  background: var(--bg);
-  color: var(--fg);
-  font-family: Display, Georgia, 'Times New Roman', serif;
-  font-size: 1.05rem;
-  line-height: 1.65;
+  background: var(--ink);
+  color: var(--text);
+  font-family: var(--body);
+  font-size: 17px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 100;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+a { color: inherit; text-decoration: none; }
+::selection { background: var(--seal); color: var(--ink); }
+:focus-visible { outline: 2px solid var(--seal); outline-offset: 3px; border-radius: 4px; }
+
+.wrap { width: 100%; max-width: var(--max); margin: 0 auto; padding: 0 var(--gutter); }
+
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  background: rgba(6, 7, 8, 0.72);
+  border-bottom: 1px solid var(--line);
+}
+.nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+.brand { font-family: var(--display); font-weight: 600; font-size: 21px; letter-spacing: -0.03em; }
+.nav-links { display: flex; gap: 28px; font-size: 14px; color: var(--muted); }
+.nav-links a:hover { color: var(--text); }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--body); font-weight: 600; font-size: 15px;
+  padding: 12px 20px; border-radius: 999px;
+  transition: transform .2s ease, background .2s ease, box-shadow .2s ease;
+  cursor: pointer; border: 0;
+}
+.btn-light { background: var(--text); color: var(--ink); }
+.btn-light:hover { transform: translateY(-1px); box-shadow: 0 8px 30px rgba(236, 234, 228, 0.18); }
+.btn-ghost { color: var(--text); border: 1px solid var(--line-strong); background: transparent; }
+.btn-ghost:hover { border-color: var(--text); }
+.btn-sm { padding: 8px 16px; font-size: 14px; }
+
+.hero { position: relative; overflow: hidden; }
+.field {
+  position: absolute; top: 0; left: 0; width: 100%; height: calc(100svh - 64px);
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(90deg, transparent 30%, rgba(0, 0, 0, 0.5) 55%, #000 78%), linear-gradient(180deg, #000 70%, transparent);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(90deg, transparent 30%, rgba(0, 0, 0, 0.5) 55%, #000 78%), linear-gradient(180deg, #000 70%, transparent);
+  mask-composite: intersect;
+}
+.field-caption {
+  position: absolute; right: var(--gutter); bottom: clamp(16px, 3svh, 32px); z-index: 1;
+  font-family: var(--mono); font-size: 12px; color: var(--faint); text-align: right; line-height: 1.5;
+}
+.hero-fold { position: relative; z-index: 1; min-height: calc(100svh - 64px); display: flex; flex-direction: column; justify-content: center; padding-block: clamp(20px, 4svh, 48px); }
+.horizon {
+  position: absolute; left: 50%; bottom: -62vw; width: 140vw; height: 80vw;
+  transform: translateX(-50%); border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(207, 232, 255, 0.10), transparent 72%);
+  border-top: 1px solid rgba(207, 232, 255, 0.35);
+  box-shadow: 0 -40px 120px rgba(207, 232, 255, 0.12), inset 0 40px 120px rgba(207, 232, 255, 0.06);
+  animation: breathe 9s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes breathe { 0%, 100% { opacity: .75; } 50% { opacity: 1; } }
+
+.eyebrow { font-size: 15px; color: var(--muted); }
+h1, h2, h3 { font-family: var(--display); letter-spacing: -0.04em; line-height: 1.04; font-weight: 600; }
+h1 { font-size: clamp(28px, min(4.6vw, 7.2svh), 66px); max-width: 24ch; margin: min(14px, 1.6svh) 0 min(24px, 2.8svh); text-wrap: balance; }
+h1 .h1-quiet { display: block; color: var(--muted); }
+.lede { font-size: clamp(15px, min(2vw, 2.6svh), 21px); color: var(--muted); max-width: 54ch; }
+.lede strong { color: var(--text); font-weight: 500; }
+.hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: min(36px, 4svh); }
+
+.trial-stage {
+  display: grid; grid-template-columns: 1fr 1.1fr; gap: 1px;
+  background: var(--line); border: 1px solid var(--line); border-radius: 20px; overflow: hidden;
+}
+.trial-doc, .trial-panel { background: var(--ink-2); padding: clamp(20px, 3vw, 32px); display: flex; flex-direction: column; gap: 16px; }
+.doc-head { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; color: var(--muted); }
+.doc-edit-hint { color: var(--seal); animation: nudge 2.4s ease-in-out infinite; white-space: nowrap; }
+.doc-edit-hint.quiet { animation: none; color: var(--faint); }
+@keyframes nudge { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+.doc {
+  width: 100%; min-height: 300px; resize: vertical;
+  background: rgba(255, 255, 255, 0.02); color: var(--text);
+  border: 1px dashed rgba(255, 181, 71, 0.5); border-radius: 12px; padding: 16px;
+  font-family: var(--body); font-size: 16px; line-height: 1.7; transition: border-color .3s ease;
+}
+.doc:hover { border-color: var(--seal); }
+.doc:focus { outline: none; border-style: solid; border-color: var(--seal); }
+.doc[readonly] { border: 1px solid var(--line-strong); color: var(--muted); cursor: not-allowed; }
+.demo-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.demo-actions[hidden] { display: none; }
+.chip {
+  font-family: var(--body); font-size: 14px; color: var(--muted);
+  border: 1px solid var(--line-strong); background: transparent;
+  padding: 7px 14px; border-radius: 999px; cursor: pointer;
+}
+.chip:hover { color: var(--text); border-color: var(--text); }
+
+.stepper { list-style: none; display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+.step-tab {
+  display: flex; align-items: center; gap: 10px;
+  font-family: var(--body); font-size: 15px; font-weight: 500; color: var(--muted);
+  background: transparent; border: 1px solid var(--line-strong); border-radius: 999px;
+  padding: 7px 16px 7px 7px; cursor: pointer; transition: all .2s ease;
+}
+.step-tab span { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--line-strong); color: var(--text); font-size: 13px; }
+.step-tab[aria-current="step"] { color: var(--ink); background: var(--text); border-color: var(--text); }
+.step-tab[aria-current="step"] span { background: var(--ink); color: var(--text); }
+.step-tab.done span { background: var(--seal); color: var(--ink); }
+.step-tab:disabled { opacity: .4; cursor: not-allowed; }
+
+.panel { display: flex; flex-direction: column; gap: 18px; height: 100%; }
+.panel[hidden] { display: none; }
+.panel h3 { font-size: clamp(22px, 2.4vw, 28px); font-weight: 600; letter-spacing: -0.02em; }
+.panel > p { color: var(--muted); }
+.panel-next { margin-top: auto; align-self: flex-start; }
+.print { display: grid; grid-template-columns: repeat(16, 1fr); gap: 3px; }
+.print i, .print-mini i { aspect-ratio: 1; background: var(--ice); transition: opacity .45s ease; }
+.print i { border-radius: 2px; }
+.print-mini { display: grid; grid-template-columns: repeat(16, 1fr); gap: 1px; }
+.print-mini i { border-radius: 1px; }
+.print-code summary { font-size: 13px; color: var(--faint); cursor: pointer; }
+.print-code code { display: block; margin-top: 8px; font-family: var(--mono); font-size: 12px; color: var(--muted); word-break: break-all; }
+
+.status { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--line-strong); font-size: 15px; line-height: 1.5; }
+.status::before { content: ""; width: 10px; height: 10px; margin-top: 6px; border-radius: 50%; flex: none; background: var(--seal); }
+.status.ok { border-color: rgba(120, 220, 160, 0.4); background: rgba(120, 220, 160, 0.06); }
+.status.ok::before { background: #78dca0; box-shadow: 0 0 10px #78dca0; }
+.status.bad { border-color: rgba(255, 106, 92, 0.5); background: rgba(255, 106, 92, 0.07); }
+.status.bad::before { background: var(--alert); box-shadow: 0 0 10px var(--alert); }
+
+.chain { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.block {
+  border: 1px solid var(--line); border-radius: 12px; padding: 10px;
+  display: grid; grid-template-rows: auto 2.6em auto auto; gap: 8px; align-content: start;
+  font-size: 12px; color: var(--muted); line-height: 1.3;
+  animation: rise .5s ease both; transition: border-color .3s ease, background .3s ease;
+}
+.block b { color: var(--text); font-weight: 500; font-size: 13px; }
+.block.mine { border-color: rgba(255, 181, 71, 0.55); background: var(--seal-soft); }
+.block.broken { border-color: rgba(255, 106, 92, 0.65); background: rgba(255, 106, 92, 0.08); }
+.block-state { font-size: 11px; color: var(--faint); white-space: nowrap; }
+.block b, .block > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.block .block-label { white-space: normal; }
+.block.broken .block-state { color: var(--alert); }
+
+section { padding: clamp(88px, 12vw, 150px) 0; border-top: 1px solid var(--line); }
+h2 { font-size: clamp(36px, 5.6vw, 72px); }
+
+.section-title { font-size: clamp(32px, 4.4vw, 60px); max-width: 20ch; text-wrap: balance; margin-bottom: clamp(40px, 6vw, 72px); }
+.statements { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 20px; overflow: hidden; }
+.statement { background: var(--ink); padding: clamp(24px, 3vw, 36px); display: grid; grid-template-rows: subgrid; grid-row: span 3; row-gap: 12px; align-content: start; }
+.statement:not(:has(.tag)) { grid-row: span 2; }
+.statement:has(.more) { grid-row: span 4; }
+.nist-stat { display: flex; flex-direction: column; gap: 8px; }
+.nist-count { font-family: var(--display); font-size: clamp(44px, 4.4vw, 60px); font-weight: 600; letter-spacing: -0.04em; line-height: 1; color: var(--seal); }
+.nist-label { color: var(--text); font-size: 16px; }
+.nist-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.nist-badges span { font-family: var(--mono); font-size: 12px; color: var(--seal); border: 1px solid rgba(255, 181, 71, 0.4); padding: 3px 9px; border-radius: 999px; }
+.more summary { list-style: none; cursor: pointer; font-size: 14px; color: var(--text); display: inline-flex; align-items: center; gap: 8px; padding-top: 4px; }
+.more summary::-webkit-details-marker { display: none; }
+.more summary::before { content: "+"; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line-strong); font-size: 14px; line-height: 1; color: var(--muted); transition: transform .2s ease; }
+.more[open] summary::before { content: "−"; }
+.more summary:hover::before { border-color: var(--text); color: var(--text); }
+.more p { margin-top: 12px; color: var(--muted); font-size: 15px; line-height: 1.6; }
+.statement h3 { font-size: clamp(21px, 2vw, 26px); font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
+.statement p { color: var(--muted); font-size: 16px; }
+.statement .tag { font-size: 14px; color: var(--faint); }
+.statement.highlight { background: linear-gradient(180deg, var(--seal-soft), var(--ink) 80%); }
+.statement.highlight .tag { color: var(--seal); }
+.trial-note { font-size: 13px; color: var(--faint); }
+
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 20px; overflow: hidden; }
+.step { background: var(--ink); padding: clamp(24px, 3vw, 36px); display: grid; grid-template-rows: subgrid; grid-row: span 3; row-gap: 12px; align-content: start; }
+.step-num { font-size: 15px; color: var(--faint); }
+.step h3 { font-size: clamp(21px, 2vw, 26px); font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
+.step p { color: var(--muted); font-size: 16px; }
+.step .aside { margin-top: auto; font-size: 14px; color: var(--faint); border-top: 1px solid var(--line); padding-top: 14px; }
+.step .aside b { color: var(--text); font-weight: 500; }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 32px; }
+.tab {
+  font-family: var(--body); font-size: 15px; font-weight: 500; color: var(--muted);
+  background: transparent; border: 1px solid var(--line-strong);
+  padding: 10px 18px; border-radius: 999px; cursor: pointer; transition: all .2s ease;
+}
+.tab[aria-selected="true"] { background: var(--text); color: var(--ink); border-color: var(--text); }
+.tab:hover:not([aria-selected="true"]) { color: var(--text); border-color: var(--text); }
+.cases { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.case {
+  border: 1px solid var(--line); border-radius: 18px; padding: 28px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent);
+  display: flex; flex-direction: column; gap: 14px;
+  animation: rise .5s ease both;
+}
+.case:nth-child(2) { animation-delay: .06s; }
+.case:nth-child(3) { animation-delay: .12s; }
+.case .tag { font-size: 14px; color: var(--muted); }
+.case h3 { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; min-height: 2.4em; }
+.case p { color: var(--muted); font-size: 16px; }
+.case > p:not(.tag) { min-height: 3.2em; }
+.case .before-after { margin-top: auto; display: grid; gap: 8px; font-size: 14px; padding-top: 16px; border-top: 1px solid var(--line); }
+.case .before-after p { font-size: 15px; }
+.case .before-after div { display: grid; grid-template-columns: 72px 1fr; gap: 8px; align-items: baseline; }
+.case .before-after span { font-size: 13px; color: var(--faint); }
+@keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+
+.quantum { position: relative; overflow: hidden; }
+.quantum::after {
+  content: ""; position: absolute; right: -20vw; top: 10%; width: 60vw; height: 60vw; border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(207, 232, 255, 0.07), transparent);
+  pointer-events: none;
 }
 
-.page {
-  max-width: 52rem;
-  margin: 0 auto;
-  padding: 3rem 1.5rem 5rem;
-}
+.timeline { position: relative; display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; padding-top: 36px; margin-top: clamp(48px, 6vw, 72px); }
+.timeline::before { content: ""; position: absolute; top: 8px; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, var(--seal) 0%, var(--seal) 30%, var(--line-strong) 34%, var(--line-strong)); }
+.tick { position: relative; }
+.tick::before { content: ""; position: absolute; top: -34px; left: 0; width: 13px; height: 13px; border-radius: 50%; background: var(--ink); border: 1px solid var(--line-strong); }
+.tick.past::before { background: var(--seal); border-color: var(--seal); }
+.tick.now::before { background: var(--seal); border-color: var(--seal); box-shadow: 0 0 0 6px var(--seal-soft), 0 0 18px var(--seal); }
+.tick .here { font-family: var(--body); font-size: 13px; font-weight: 600; letter-spacing: 0; vertical-align: middle; color: var(--ink); background: var(--seal); padding: 3px 9px; border-radius: 999px; margin-left: 6px; }
+.tick .year { font-family: var(--display); font-size: 34px; font-weight: 700; letter-spacing: -0.03em; }
+.tick p { color: var(--muted); font-size: 15px; margin-top: 6px; }
+.source { margin-top: 40px; font-size: 13px; color: var(--faint); }
+.source a { text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.source a:hover { color: var(--muted); }
 
-/* ── Language nav ── */
-.lang-nav {
-  display: flex;
-  gap: 0.25rem;
-  justify-content: center;
-  margin-bottom: 3rem;
-  flex-wrap: wrap;
+.sign-card {
+  display: grid; grid-template-columns: 1.2fr 1fr; gap: 40px; align-items: center;
+  border: 1px solid var(--line-strong); border-radius: 24px; padding: clamp(28px, 5vw, 56px);
+  background: radial-gradient(120% 140% at 100% 0%, rgba(255, 181, 71, 0.10), transparent 55%), var(--ink-2);
 }
-.lang-btn {
-  background: none;
-  border: 1.5px solid var(--border);
-  color: var(--fg-mid);
-  padding: 0.4rem 1.2rem;
-  font-family: inherit;
-  font-size: 0.85rem;
-  letter-spacing: 0.04em;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.lang-btn:first-child { border-radius: 4px 0 0 4px; }
-.lang-btn:last-child { border-radius: 0 4px 4px 0; }
-.lang-btn:hover { background: var(--bg-alt); }
-.lang-btn.active {
-  background: var(--accent);
-  color: var(--bg);
-  border-color: var(--accent);
-}
-.lang-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
+.sign-card h2 { font-size: clamp(32px, 4.4vw, 54px); margin: 14px 0 18px; }
+.sign-card p { color: var(--muted); }
+.levels { display: grid; gap: 12px; }
+.level { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 18px 20px; border-radius: 14px; border: 1px solid var(--line); }
+.level b { font-weight: 600; }
+.level small { display: block; color: var(--muted); font-size: 14px; }
+.pill { font-size: 13px; font-weight: 500; padding: 5px 12px; border-radius: 999px; white-space: nowrap; }
+.pill-on { color: var(--ink); background: var(--seal); }
+.pill-soon { color: var(--muted); border: 1px solid var(--line-strong); }
 
-/* ── Typography ── */
-h1 {
-  font-size: clamp(1.8rem, 4vw, 2.6rem);
-  font-weight: 700;
-  line-height: 1.15;
-  text-wrap: balance;
-  color: var(--fg);
-  margin-bottom: 0.4em;
-}
-h1 span { color: var(--accent); }
 
-.subtitle {
-  font-size: 1.15rem;
-  color: var(--fg-mid);
-  line-height: 1.5;
-  max-width: 40rem;
-  margin-bottom: 3rem;
-}
+.cta-final { text-align: center; padding: clamp(110px, 14vw, 180px) 0; position: relative; overflow: hidden; }
+.cta-final h2 { font-size: clamp(42px, 7vw, 96px); max-width: 14ch; margin: 0 auto 28px; }
+.cta-final p { color: var(--muted); max-width: 44ch; margin: 0 auto 36px; }
+.cta-final .horizon { bottom: -70vw; }
 
-h2 {
-  font-size: 1.35rem;
-  font-weight: 700;
-  color: var(--fg);
-  margin: 2.8rem 0 0.8rem;
-  text-wrap: balance;
-}
+footer { border-top: 1px solid var(--line); padding: 40px 0; color: var(--faint); font-size: 14px; }
+footer .wrap { display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+footer nav { display: flex; gap: 24px; }
+footer a:hover { color: var(--text); }
 
-h3 {
-  font-size: 1.05rem;
-  font-weight: 700;
-  color: var(--accent);
-  margin: 2rem 0 0.5rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 0.8rem;
-}
+.reveal { opacity: 0; transform: translateY(18px); transition: opacity .8s ease, transform .8s ease; }
+.reveal.in { opacity: 1; transform: none; }
+.load > * { animation: rise .9s cubic-bezier(.2, .7, .2, 1) both; }
+.load > *:nth-child(2) { animation-delay: .08s; }
+.load > *:nth-child(3) { animation-delay: .16s; }
+.load > *:nth-child(4) { animation-delay: .24s; }
+.load > *:nth-child(5) { animation-delay: .32s; }
 
-p { margin-bottom: 1rem; color: var(--fg-mid); }
-p + p { margin-top: 0; }
-
-strong { color: var(--fg); font-weight: 700; }
-
-/* ── Sections ── */
-.section {
-  border-top: 1px solid var(--border);
-  padding-top: 2rem;
+@media (max-width: 900px) {
+  .nav-links { display: none; }
+  .chain { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .statements, .trial-stage, .steps, .cases, .sign-card { grid-template-columns: 1fr; }
+  .timeline { grid-template-columns: 1fr 1fr; row-gap: 56px; }
 }
-
-/* ── Example cards ── */
-.examples {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-  gap: 1rem;
-  margin: 1.2rem 0 1.5rem;
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .reveal { opacity: 1; transform: none; }
+  html { scroll-behavior: auto; }
 }
-.example {
-  background: var(--bg-alt);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 1.2rem 1.3rem;
-}
-.example-label {
-  font-size: 0.75rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--accent);
-  margin-bottom: 0.5rem;
-}
-.example p {
-  font-size: 0.92rem;
-  margin-bottom: 0;
-  line-height: 1.5;
-}
-
-/* ── Negative card ── */
-.negative-card {
-  background: var(--negative-bg);
-  border-left: 3px solid var(--negative);
-  padding: 1.2rem 1.5rem;
-  border-radius: 0 6px 6px 0;
-  margin: 1.2rem 0;
-}
-.negative-card p { color: var(--fg-mid); margin-bottom: 0.5rem; }
-.negative-card p:last-child { margin-bottom: 0; }
-.negative-card strong { color: var(--negative); }
-
-/* ── Comparison table ── */
-.compare {
-  overflow-x: auto;
-  margin: 1.2rem 0;
-}
-.compare table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.88rem;
-  font-variant-numeric: tabular-nums;
-}
-.compare th, .compare td {
-  text-align: left;
-  padding: 0.6rem 0.8rem;
-  border-bottom: 1px solid var(--border);
-}
-.compare th {
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--fg-soft);
-  font-weight: 700;
-}
-.compare td { color: var(--fg-mid); }
-.compare tr:last-child td { border-bottom: none; }
-
-/* ── Hide inactive languages ── */
-.lang { display: none; }
-.lang.active { display: block; }
-
-/* ── Responsive ── */
-@media (max-width: 600px) {
-  .page { padding: 1.5rem 1rem 3rem; }
-  h1 { font-size: 1.5rem; }
-  h2 { font-size: 1.15rem; }
-  .subtitle { font-size: 1rem; }
-  .lang-nav { gap: 0; }
-  .lang-btn { padding: 0.35rem 0.8rem; font-size: 0.78rem; }
-  .examples { grid-template-columns: 1fr; }
-  .compare table { font-size: 0.82rem; }
-  .compare th, .compare td { padding: 0.4rem 0.5rem; }
-  .negative-card { padding: 1rem; }
-  .top-bar { margin-bottom: 0.5rem; }
-  .foot-links { flex-wrap: wrap; gap: 0.8rem; }
-}
-
-/* ── Footer ── */
-.foot {
-  margin-top: 4rem;
-  padding-top: 1.5rem;
-  border-top: 1px solid var(--border);
-  font-size: 0.8rem;
-  color: var(--fg-soft);
-  text-align: center;
-}
-.top-bar {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 1rem;
-}
-.theme-toggle {
-  background: var(--bg-alt);
-  border: 1px solid var(--border);
-  color: var(--fg-mid);
-  padding: 0.35rem 0.8rem;
-  font-family: inherit;
-  font-size: 0.8rem;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.theme-toggle:hover { background: var(--accent-light); color: var(--accent); }
-.theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.foot-links { display: flex; gap: 1.5rem; justify-content: center; margin-top: 0.5rem; }
-.foot-links a { color: var(--fg-soft); text-decoration: none; font-size: 0.8rem; }
-.foot-links a:hover { color: var(--accent); }
 </style>
 </head>
 <body>
 
-<div class="page">
-
-<div class="top-bar">
-  <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle light/dark mode">Light / Dark</button>
-</div>
-
-<nav class="lang-nav" aria-label="Language">
-  <button class="lang-btn active" onclick="switchLang('es')" aria-pressed="true">Espanol</button>
-  <button class="lang-btn" onclick="switchLang('en')" aria-pressed="false">English</button>
-  <button class="lang-btn" onclick="switchLang('fr')" aria-pressed="false">Francais</button>
-</nav>
-
-<!-- ═══════════════════ ESPANOL ═══════════════════ -->
-<div class="lang active" id="lang-es">
-
-<h1>Goya Ledger es una <span>prueba matematica</span> que viaja con tu documento.</h1>
-<p class="subtitle">En el mundo digital no puedes distinguir lo real de lo falso. Goya agrega una firma criptografica que cualquiera puede verificar, sin depender de nadie, para siempre.</p>
-
-<div class="section">
-<h2>Que es</h2>
-<p>Goya Ledger es una infraestructura blockchain que permite <strong>firmar documentos digitales con validez legal</strong> y verificar esas firmas sin depender de un tercero. Funciona como un notario digital automatico: registra quien firmo, cuando, y que el documento no fue alterado despues.</p>
-<p>A diferencia de una firma electronica tradicional, la firma de Goya no depende de que una empresa siga existiendo para ser valida. La prueba matematica es autocontenida — funciona hoy y seguira funcionando en 30 anos.</p>
-</div>
-
-<div class="section">
-<h2>Por que existe</h2>
-<p>Hoy, para firmar un documento con validez legal necesitas un <strong>Prestador de Servicios de Certificacion (PSC)</strong> — empresas como E-certchile o Acepta. Eso implica:</p>
-<p><strong>Dependencia:</strong> Si el PSC cierra o su certificado expira, tu firma pierde verificabilidad. <strong>Costo:</strong> Una firma avanzada cuesta entre $15.000 y $45.000 CLP al ano. <strong>Vulnerabilidad futura:</strong> Todas usan criptografia clasica que los computadores cuanticos podran romper en 10-15 anos.</p>
-<p>Goya existe porque la firma digital deberia ser <strong>independiente, verificable y resistente al futuro</strong>.</p>
-</div>
-
-<div class="section">
-<h2>Para quien es</h2>
-<p><strong>Notarias</strong> que deben digitalizar sus procesos por ley (468 notarias, Ley 21.772, plazo octubre 2026). <strong>Empresas</strong> que firman contratos, acuerdos, ordenes de compra y necesitan prueba legal permanente. <strong>Fintechs</strong> que necesitan firma electronica avanzada para operar bajo regulacion CMF. <strong>Gobiernos</strong> que emiten certificados, licencias o permisos que deben ser verificables. <strong>Cualquier organizacion</strong> que necesite que un documento firmado hoy siga siendo verificable en 2040.</p>
-</div>
-
-<div class="section">
-<h2>Que soluciona</h2>
-<h3>Problema 1 — Verificacion dependiente</h3>
-<p>Hoy verificar una firma requiere contactar al PSC que la emitio. Si ese PSC deja de operar, la firma queda sin forma de verificarse. Goya produce firmas que se verifican con matematica pura — no necesitas llamar a nadie.</p>
-<h3>Problema 2 — Vulnerabilidad cuantica</h3>
-<p>Los computadores cuanticos podran romper las firmas actuales (RSA, ECDSA, Ed25519). Goya usa los 3 estandares NIST post-cuanticos (ML-DSA-65, ML-KEM-768, SLH-DSA-128s), los mismos que el gobierno de EE.UU. exigira para 2035.</p>
-<h3>Problema 3 — Costo de acceso</h3>
-<p>La contraparte de un contrato no deberia necesitar comprar su propia firma electronica para firmar. Con Goya, la contraparte firma via un link — sin instalar nada, sin pagar nada.</p>
-</div>
-
-<div class="section">
-<h2>Como lo soluciona</h2>
-<p>Cada documento firmado recibe una <strong>firma dual</strong>: una clasica (Ed25519, valida hoy) y una post-cuantica (ML-DSA-65, valida contra computadores cuanticos). Ambas deben verificarse para que el documento sea valido.</p>
-<p>Las firmas se registran en una <strong>blockchain inmutable</strong> con consenso BFT (tolerancia a fallas bizantinas) — ni siquiera un nodo malicioso puede falsificar un registro. El sellado de tiempo con TSA (RFC 3161) garantiza la fecha exacta de la firma.</p>
-<p>Todo el sistema esta <strong>verificado contra los vectores de prueba oficiales del NIST</strong> (117 vectores, coincidencia exacta byte a byte) y cumple con las recomendaciones del BSI aleman y la agencia francesa ANSSI.</p>
-</div>
-
-<div class="section">
-<h2>Ejemplos concretos</h2>
-<div class="examples">
-  <div class="example">
-    <div class="example-label">Notaria</div>
-    <p>Un abogado redacta un contrato de compraventa. Ambas partes lo firman desde su celular con Goya. La notaria recibe el contrato con dos firmas criptograficas, sello de tiempo, y un hash registrado en blockchain. En 20 anos, cualquier juez puede verificar que el contrato no fue alterado — sin contactar a nadie.</p>
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="Goya Ledger, inicio">goya ledger</a>
+    <nav class="nav-links" aria-label="Secciones">
+      <a href="#como">Cómo funciona</a>
+      <a href="#casos">En la vida real</a>
+      <a href="#cuantica">Cuántica</a>
+      <a href="#firma">Firma</a>
+    </nav>
+    <a class="btn btn-light btn-sm" href="#prueba">Pruébalo</a>
   </div>
-  <div class="example">
-    <div class="example-label">Fintech</div>
-    <p>Una fintech CMF necesita que sus clientes firmen pagares digitales con Firma Electronica Avanzada (FEA). Con Goya, el pagare se firma con ML-DSA-65 y biometria, cumpliendo Ley 19.799 Art. 2. El pagare tiene validez legal equivalente a firma ante notario — y es resistente a ataques cuanticos.</p>
+</header>
+
+<main id="top">
+
+  <div class="hero">
+    <canvas class="field" id="field" aria-hidden="true"></canvas>
+    <div class="wrap hero-fold">
+      <p class="field-caption" aria-hidden="true">Interferencia de dos ondas.<br>Mueve el cursor: observar cambia el patrón.</p>
+      <div class="load">
+        <p class="eyebrow">Goya Ledger · Registro distribuido (DLT) post-cuántico</p>
+        <h1>Lo que queda registrado en Goya no se puede falsificar. <span class="h1-quiet">Ni siquiera con un computador cuántico.</span></h1>
+        <p class="lede">Goya Ledger es una <strong>DLT</strong>, un registro distribuido: un libro copiado en muchos computadores a la vez, donde solo participantes autorizados pueden anotar. Lo que se registra queda con fecha y nadie puede cambiarlo a escondidas. Así, un contrato o un certificado se puede comprobar sin depender de la palabra de nadie.</p>
+        <div class="hero-actions">
+          <a class="btn btn-light" href="#prueba">Haz la prueba</a>
+          <a class="btn btn-ghost" href="#como">Cómo funciona</a>
+        </div>
+      </div>
+    </div>
   </div>
-  <div class="example">
-    <div class="example-label">Gobierno</div>
-    <p>Un municipio emite patentes comerciales digitales. Cada patente es un certificado X.509 firmado por la CA de Goya con ML-DSA-65. El comerciante puede presentar su patente a cualquier fiscalizador, quien la verifica escaneando un QR — sin conexion al municipio, sin depender de un servidor.</p>
+
+  <section id="prueba" class="trial">
+    <div class="wrap">
+      <h2 class="section-title reveal">Haz la prueba.</h2>
+      <ol class="stepper" aria-label="Pasos de la prueba">
+        <li><button type="button" class="step-tab" data-step="1" aria-current="step"><span>1</span>Crea su huella</button></li>
+        <li><button type="button" class="step-tab" data-step="2" disabled><span>2</span>Regístralo</button></li>
+        <li><button type="button" class="step-tab" data-step="3" disabled><span>3</span>Intenta falsificarlo</button></li>
+      </ol>
+      <div class="trial-stage">
+        <div class="trial-doc">
+          <div class="doc-head"><span id="doc-title">Contrato de ejemplo</span><span class="doc-edit-hint" id="doc-hint">✎ Haz clic y escribe</span></div>
+          <textarea id="doc" class="doc" spellcheck="false" autocomplete="off" aria-label="Contrato de ejemplo, puedes editarlo"></textarea>
+          <div class="demo-actions" id="quick-edits">
+            <button class="chip" type="button" data-edit="monto">Cambiar el arriendo a $990.000</button>
+            <button class="chip" type="button" data-edit="nombre">Cambiar un apellido</button>
+            <button class="chip" type="button" data-edit="reset">Deshacer cambios</button>
+          </div>
+          <p class="trial-note">Todo ocurre en tu pantalla: no se envía ningún dato.</p>
+        </div>
+        <div class="trial-panel">
+          <div class="panel" data-panel="1">
+            <h3>Esta es la huella del contrato.</h3>
+            <p>Como una huella digital: cada documento tiene una sola. Si cambias cualquier cosa, aunque sea una coma, la huella cambia entera.</p>
+            <div class="print" id="print" aria-hidden="true"></div>
+            <details class="print-code"><summary>Ver la huella como código</summary><code id="print-code"></code></details>
+            <p class="status" id="print-status" role="status"></p>
+            <button class="btn btn-light panel-next" type="button" id="to-step-2">Siguiente: registrarlo →</button>
+          </div>
+          <div class="panel" data-panel="2" hidden>
+            <h3>Queda anotado en el libro.</h3>
+            <p>La huella de tu contrato entra en un bloque, con fecha y hora. Cada bloque guarda la huella del anterior, así que quedan encadenados. Y el libro está copiado en muchos computadores.</p>
+            <div class="chain" id="chain-register"></div>
+            <p class="status" id="register-status" role="status"></p>
+            <button class="btn btn-light panel-next" type="button" id="to-step-3">Siguiente: intenta falsificarlo →</button>
+          </div>
+          <div class="panel" data-panel="3" hidden>
+            <h3>Ahora, intenta falsificarlo.</h3>
+            <p>Cambia el contrato que registraste: el monto, un nombre, lo que quieras. Después mira qué pasa con la cadena.</p>
+            <div class="chain" id="chain-forge"></div>
+            <p class="status" id="forge-status" role="status"></p>
+            <button class="btn btn-ghost panel-next" type="button" id="restart">Empezar de nuevo</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="problema">
+    <div class="wrap">
+      <h2 class="section-title reveal">En digital, una copia falsa puede verse idéntica.</h2>
+      <div class="statements">
+        <div class="statement reveal">
+          <h3>Editar un PDF toma segundos.</h3>
+          <p>Si no tiene firma digital, a simple vista no se nota.</p>
+        </div>
+        <div class="statement reveal">
+          <h3>Comprobarlo suele depender de otro.</h3>
+          <p>Del sitio de quien lo emitió, que debe seguir existiendo en diez años.</p>
+        </div>
+        <div class="statement reveal">
+          <h3>La mayoría de las firmas de hoy no resistirá lo cuántico.</h3>
+          <p>Un computador cuántico lo bastante grande podrá romperlas. EE.UU. busca migrar antes de 2035.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="como">
+    <div class="wrap">
+      <h2 class="section-title reveal">Cómo funciona, en tres pasos.</h2>
+      <div class="steps reveal">
+        <article class="step">
+          <span class="step-num">Paso 1</span>
+          <h3>Tu documento genera una huella.</h3>
+          <p>Un código que cambia por completo si cambia cualquier detalle. Se registra la huella, no el documento.</p>
+        </article>
+        <article class="step">
+          <span class="step-num">Paso 2</span>
+          <h3>La huella queda anotada.</h3>
+          <p>Con fecha y hora, en un registro distribuido (DLT): copiado en varios computadores y validado solo por participantes autorizados.</p>
+        </article>
+        <article class="step">
+          <span class="step-num">Paso 3</span>
+          <h3>Cualquiera puede comprobarlo.</h3>
+          <p>Calcula la huella del documento que recibió y la compara con la registrada. Coincide o no coincide.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="casos">
+    <div class="wrap">
+      <h2 class="section-title reveal">En la vida real.</h2>
+      <div class="tabs reveal" role="tablist" aria-label="Para quién">
+        <button class="tab" role="tab" aria-selected="true" data-audience="personas">Personas</button>
+        <button class="tab" role="tab" aria-selected="false" data-audience="pymes">Pymes y profesionales</button>
+        <button class="tab" role="tab" aria-selected="false" data-audience="notarias">Notarías</button>
+        <button class="tab" role="tab" aria-selected="false" data-audience="instituciones">Instituciones</button>
+      </div>
+      <div class="cases" id="cases" role="tabpanel"></div>
+    </div>
+  </section>
+
+  <section id="cuantica" class="quantum">
+    <div class="wrap">
+      <h2 class="section-title reveal">La amenaza cuántica, en simple.</h2>
+      <div class="statements reveal">
+        <div class="statement">
+          <p class="tag">Una máquina distinta</p>
+          <h3>No es un computador más rápido.</h3>
+          <p>Resuelve de otra forma justo el problema matemático que protege la mayoría de las firmas de hoy.</p>
+          <details class="more">
+            <summary>¿Qué es un computador cuántico?</summary>
+            <p>Es un tipo nuevo de computador que calcula de una forma muy distinta a la de tu celular o tu notebook. No sirve para todo: no hará más rápidos tus correos ni tus videos. Pero hay un tipo de problema, justo el que protege las firmas digitales, que un computador normal tardaría miles de millones de años en resolver y uno cuántico lo bastante grande podría resolver en días. Hoy solo existen en laboratorios y todavía son demasiado pequeños para lograrlo.</p>
+          </details>
+        </div>
+        <div class="statement">
+          <p class="tag">Las cerraduras de hoy</p>
+          <h3>Seguras, por ahora.</h3>
+          <p>Un computador cuántico lo bastante grande podrá abrirlas, incluso las de firmas hechas años antes.</p>
+          <details class="more">
+            <summary>¿Qué cerraduras rompe?</summary>
+            <p>Tu firma digital funciona con un par de llaves: una secreta, que solo tienes tú y con la que firmas, y una pública, que cualquiera usa para comprobar que fuiste tú. Hoy es imposible adivinar la secreta a partir de la pública. Un computador cuántico lo bastante grande sí podría, y con ella firmar en tu nombre sin que nadie note la diferencia.</p>
+          </details>
+        </div>
+        <div class="statement highlight">
+          <p class="tag">Las cerraduras nuevas</p>
+          <h3>Diseñadas para resistir a ambos.</h3>
+          <div class="nist-stat">
+            <span class="nist-count">3 de 3</span>
+            <span class="nist-label">estándares post-cuánticos que NIST publicó en 2024, ya implementados en Goya.</span>
+            <span class="nist-badges"><span>FIPS 203</span><span>FIPS 204</span><span>FIPS 205</span></span>
+          </div>
+          <details class="more">
+            <summary>¿Qué es NIST y por qué importa?</summary>
+            <p>Es el organismo del gobierno de EE.UU. que define reglas técnicas de seguridad que después adoptan bancos, gobiernos y empresas de muchos países, incluidas las aplicaciones que usas a diario. Durante ocho años, expertos de todo el mundo pusieron a prueba distintas cerraduras nuevas, y en 2024 NIST publicó tres como estándar. Goya ya las implementa.</p>
+          </details>
+        </div>
+      </div>
+      <div class="timeline reveal" aria-label="Línea de tiempo">
+        <div class="tick past">
+          <p class="year">2024</p>
+          <p>NIST publicó los primeros estándares de criptografía post-cuántica.</p>
+        </div>
+        <div class="tick now">
+          <p class="year">2026 <span class="here">Hoy</span></p>
+          <p>La Unión Europea pide a sus países tener la migración en marcha antes de que termine este año.</p>
+        </div>
+        <div class="tick">
+          <p class="year">2030</p>
+          <p>La Unión Europea espera haber migrado los usos de alto riesgo.</p>
+        </div>
+        <div class="tick">
+          <p class="year">2035</p>
+          <p>Meta del gobierno de EE.UU. para reducir al máximo el riesgo cuántico en sus sistemas.</p>
+        </div>
+      </div>
+      <p class="source reveal">Fuentes: <a href="https://csrc.nist.gov/pubs/fips/204/final" rel="noopener" target="_blank">NIST FIPS 204</a> · <a href="https://digital-strategy.ec.europa.eu/en/library/coordinated-implementation-roadmap-transition-post-quantum-cryptography" rel="noopener" target="_blank">Hoja de ruta PQC de la UE</a> · <a href="https://bidenwhitehouse.archives.gov/briefing-room/statements-releases/2022/05/04/national-security-memorandum-on-promoting-united-states-leadership-in-quantum-computing-while-mitigating-risks-to-vulnerable-cryptographic-systems/" rel="noopener" target="_blank">Memorándum NSM-10 de EE.UU.</a></p>
+    </div>
+  </section>
+
+  <section id="firma">
+    <div class="wrap">
+      <div class="sign-card reveal">
+        <div>
+          <p class="eyebrow">Servicio adicional</p>
+          <h2>¿Además necesitas firmar?</h2>
+          <p>Goya Firma suma tu firma a la huella: quién firmó, cuándo y sobre qué versión exacta del documento. Tu contraparte firma desde un enlace, sin comprar un certificado.</p>
+        </div>
+        <div class="levels">
+          <div class="level">
+            <div><b>Firma electrónica simple</b><small>Identifica a quien firma. Ley 19.799.</small></div>
+            <span class="pill pill-on">Disponible</span>
+          </div>
+          <div class="level">
+            <div><b>Firma electrónica avanzada</b><small>Requiere acreditación como prestador. En trámite.</small></div>
+            <span class="pill pill-soon">Próximamente</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="honesto">
+    <div class="wrap">
+      <h2 class="section-title reveal">Lo que Goya no es. Todavía.</h2>
+      <div class="statements reveal">
+        <div class="statement">
+          <h3>Aún no somos prestador acreditado.</h3>
+          <p>La firma avanzada con validez legal plena llega con la acreditación ante el Ministerio de Economía.</p>
+        </div>
+        <div class="statement">
+          <h3>No guardamos tu documento.</h3>
+          <p>Registramos su huella, que no permite reconstruirlo.</p>
+        </div>
+        <div class="statement">
+          <h3>Somos nuevos.</h3>
+          <p>Sin veinte años de historia, pero con estándares públicos que cualquiera puede revisar.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="cta-final">
+    <div class="horizon" aria-hidden="true"></div>
+    <div class="wrap">
+      <h2 class="reveal">Que la verdad viaje con el documento.</h2>
+      <p class="reveal">Estamos trabajando con los primeros estudios, notarías e instituciones en Chile.</p>
+      <a class="btn btn-light reveal" href="#prueba">Haz la prueba</a>
+    </div>
   </div>
-  <div class="example">
-    <div class="example-label">Exportador</div>
-    <p>Una empresa chilena exporta a la UE. Los documentos de embarque se firman con Goya y reciben un sello eIDAS-compatible. La contraparte europea verifica la firma con su wallet EUDIW (HopaeEUDIWallet verificado). Un solo sistema, dos continentes, sin intermediarios.</p>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Goya Ledger SpA · Santiago, Chile</span>
   </div>
-</div>
-</div>
-
-<div class="section">
-<h2>Aspecto negativo — que no es</h2>
-<div class="negative-card">
-  <p><strong>No es un PSC acreditado todavia.</strong> La acreditacion ante el MinEcon de Chile esta en tramite. Los documentos de acreditacion (17 docs EA-103) estan completos, pero la auditoria independiente y la constitucion legal estan en proceso.</p>
-  <p><strong>No reemplaza al Estado.</strong> La identidad del firmante depende de un proceso de verificacion (RUT, biometria). Goya no es un registro civil — es la infraestructura que le da prueba matematica a la firma.</p>
-  <p><strong>No permite borrar datos.</strong> La blockchain es inmutable. Si necesitas borrar datos personales (GDPR), la arquitectura de Goya no lo permite por diseno — ese es el precio de la inmutabilidad.</p>
-  <p><strong>Es nuevo.</strong> 9 meses de desarrollo. No tiene 20 anos de track record como E-certchile. La ventaja tecnica (PQC, BFT, CAVP) es demostrable; la confianza institucional se construye con el tiempo.</p>
-</div>
-</div>
-
-<div class="section">
-<h2>Numeros verificables</h2>
-<div class="compare"><table>
-  <tr><th>Metrica</th><th>Valor</th></tr>
-  <tr><td>Throughput con PQC real</td><td>10.260 TPS</td></tr>
-  <tr><td>Latencia por bloque</td><td>9,75 ms</td></tr>
-  <tr><td>Vectores NIST CAVP verificados</td><td>117 (byte-exact)</td></tr>
-  <tr><td>Tests automatizados</td><td>2.821 lib + 200+ integracion</td></tr>
-  <tr><td>Documentos regulatorios</td><td>44 (Chile + EU + UAE)</td></tr>
-  <tr><td>Estandares NIST PQC</td><td>3 de 3 (FIPS 203, 204, 205)</td></tr>
-  <tr><td>Tiempo de desarrollo</td><td>9 meses</td></tr>
-</table></div>
-</div>
-
-</div>
-
-<!-- ═══════════════════ ENGLISH ═══════════════════ -->
-<div class="lang" id="lang-en">
-
-<h1>Goya Ledger is a <span>mathematical proof</span> that travels with your document.</h1>
-<p class="subtitle">In the digital world you cannot tell real from fake. Goya adds a cryptographic signature that anyone can verify, without depending on anyone, forever.</p>
-
-<div class="section">
-<h2>What it is</h2>
-<p>Goya Ledger is a blockchain infrastructure that lets you <strong>sign digital documents with legal validity</strong> and verify those signatures without relying on a third party. It works like an automatic digital notary: it records who signed, when, and that the document was not altered afterwards.</p>
-<p>Unlike a traditional electronic signature, a Goya signature does not depend on a company continuing to exist to remain valid. The mathematical proof is self-contained — it works today and will still work in 30 years.</p>
-</div>
-
-<div class="section">
-<h2>Why it exists</h2>
-<p>Today, to sign a document with legal validity you need a <strong>Trust Service Provider (TSP)</strong>. That means:</p>
-<p><strong>Dependency:</strong> If the TSP shuts down or its certificate expires, your signature loses verifiability. <strong>Cost:</strong> An advanced electronic signature costs $15–45 USD/year in Chile, more in Europe. <strong>Future vulnerability:</strong> All current providers use classical cryptography that quantum computers will break in 10–15 years.</p>
-<p>Goya exists because digital signatures should be <strong>independent, verifiable, and future-proof</strong>.</p>
-</div>
-
-<div class="section">
-<h2>Who it is for</h2>
-<p><strong>Notaries</strong> required by law to digitalize their processes. <strong>Companies</strong> signing contracts, purchase orders, and agreements that need permanent legal proof. <strong>Fintechs</strong> needing advanced electronic signatures to operate under financial regulation. <strong>Governments</strong> issuing certificates, licenses, or permits that must be verifiable. <strong>Any organization</strong> that needs a document signed today to remain verifiable in 2040.</p>
-</div>
-
-<div class="section">
-<h2>What it solves</h2>
-<h3>Problem 1 — Dependent verification</h3>
-<p>Today, verifying a signature requires contacting the TSP that issued it. If that TSP stops operating, the signature becomes unverifiable. Goya produces signatures verified by pure mathematics — you don't need to call anyone.</p>
-<h3>Problem 2 — Quantum vulnerability</h3>
-<p>Quantum computers will break current signatures (RSA, ECDSA, Ed25519). Goya uses all 3 NIST post-quantum standards (ML-DSA-65, ML-KEM-768, SLH-DSA-128s) — the same ones the U.S. government will mandate by 2035.</p>
-<h3>Problem 3 — Access cost</h3>
-<p>The counterparty to a contract should not need to buy their own electronic signature to sign. With Goya, the counterparty signs via a link — no installation, no payment.</p>
-</div>
-
-<div class="section">
-<h2>How it works</h2>
-<p>Each signed document receives a <strong>dual signature</strong>: a classical one (Ed25519, valid today) and a post-quantum one (ML-DSA-65, valid against quantum computers). Both must verify for the document to be valid.</p>
-<p>Signatures are recorded on an <strong>immutable blockchain</strong> with BFT consensus (Byzantine fault tolerance) — not even a malicious node can forge a record. RFC 3161 timestamping guarantees the exact date of the signature.</p>
-<p>The entire system is <strong>verified against official NIST test vectors</strong> (117 vectors, byte-exact match) and complies with recommendations from the German BSI and the French ANSSI.</p>
-</div>
-
-<div class="section">
-<h2>Concrete examples</h2>
-<div class="examples">
-  <div class="example">
-    <div class="example-label">Notary</div>
-    <p>A lawyer drafts a purchase agreement. Both parties sign from their phone with Goya. The notary receives the contract with two cryptographic signatures, a timestamp, and a hash on the blockchain. In 20 years, any judge can verify the contract was not altered — without contacting anyone.</p>
-  </div>
-  <div class="example">
-    <div class="example-label">Fintech</div>
-    <p>A regulated fintech needs clients to sign digital promissory notes with Advanced Electronic Signatures. With Goya, the note is signed with ML-DSA-65 and biometrics. The note has legal validity equivalent to a notarized signature — and is resistant to quantum attacks.</p>
-  </div>
-  <div class="example">
-    <div class="example-label">Government</div>
-    <p>A municipality issues digital business licenses. Each license is an X.509 certificate signed by Goya's CA with ML-DSA-65. The business owner can present it to any inspector, who verifies it by scanning a QR code — offline, with no server dependency.</p>
-  </div>
-  <div class="example">
-    <div class="example-label">Exporter</div>
-    <p>A Chilean company exports to the EU. Shipping documents are signed with Goya and receive an eIDAS-compatible seal. The European counterparty verifies the signature with their EUDIW wallet. One system, two continents, no intermediaries.</p>
-  </div>
-</div>
-</div>
-
-<div class="section">
-<h2>What it is not</h2>
-<div class="negative-card">
-  <p><strong>Not yet an accredited TSP.</strong> Accreditation is in progress. The 17 accreditation documents are complete, but the independent audit and legal incorporation are underway.</p>
-  <p><strong>Not a replacement for the State.</strong> Signer identity depends on a verification process (national ID, biometrics). Goya is not a civil registry — it is the infrastructure that gives mathematical proof to the signature.</p>
-  <p><strong>Cannot delete data.</strong> The blockchain is immutable. If you need to erase personal data (GDPR), Goya's architecture does not allow it by design — that is the price of immutability.</p>
-  <p><strong>It is new.</strong> 9 months of development. It does not have 20 years of track record. The technical advantage (PQC, BFT, CAVP) is demonstrable; institutional trust is built over time.</p>
-</div>
-</div>
-
-<div class="section">
-<h2>Verifiable numbers</h2>
-<div class="compare"><table>
-  <tr><th>Metric</th><th>Value</th></tr>
-  <tr><td>Throughput with real PQC</td><td>10,260 TPS</td></tr>
-  <tr><td>Block latency</td><td>9.75 ms</td></tr>
-  <tr><td>NIST CAVP vectors verified</td><td>117 (byte-exact)</td></tr>
-  <tr><td>Automated tests</td><td>2,821 lib + 200+ integration</td></tr>
-  <tr><td>Regulatory documents</td><td>44 (Chile + EU + UAE)</td></tr>
-  <tr><td>NIST PQC standards</td><td>3 of 3 (FIPS 203, 204, 205)</td></tr>
-  <tr><td>Development time</td><td>9 months</td></tr>
-</table></div>
-</div>
-
-</div>
-
-<!-- ═══════════════════ FRANCAIS ═══════════════════ -->
-<div class="lang" id="lang-fr">
-
-<h1>Goya Ledger est une <span>preuve mathematique</span> qui accompagne votre document.</h1>
-<p class="subtitle">Dans le monde numerique, on ne peut pas distinguer le vrai du faux. Goya ajoute une signature cryptographique que n'importe qui peut verifier, sans dependre de personne, pour toujours.</p>
-
-<div class="section">
-<h2>Ce que c'est</h2>
-<p>Goya Ledger est une infrastructure blockchain qui permet de <strong>signer des documents numeriques avec une validite juridique</strong> et de verifier ces signatures sans dependre d'un tiers. Cela fonctionne comme un notaire numerique automatique : il enregistre qui a signe, quand, et que le document n'a pas ete modifie apres.</p>
-<p>Contrairement a une signature electronique traditionnelle, la signature Goya ne depend pas de l'existence continue d'une entreprise. La preuve mathematique est autonome — elle fonctionne aujourd'hui et fonctionnera encore dans 30 ans.</p>
-</div>
-
-<div class="section">
-<h2>Pourquoi il existe</h2>
-<p>Aujourd'hui, pour signer un document avec une validite juridique, il faut un <strong>Prestataire de Services de Confiance (PSC)</strong>. Cela implique :</p>
-<p><strong>Dependance :</strong> Si le PSC ferme ou si son certificat expire, votre signature perd sa verifiabilite. <strong>Cout :</strong> Une signature electronique avancee coute entre 15 et 45 EUR par an. <strong>Vulnerabilite future :</strong> Tous les prestataires actuels utilisent une cryptographie classique que les ordinateurs quantiques pourront casser dans 10 a 15 ans.</p>
-<p>Goya existe parce que la signature numerique devrait etre <strong>independante, verifiable et resistante au futur</strong>.</p>
-</div>
-
-<div class="section">
-<h2>Pour qui</h2>
-<p><strong>Notaires</strong> tenus par la loi de numeriser leurs processus. <strong>Entreprises</strong> signant des contrats, bons de commande et accords necessitant une preuve juridique permanente. <strong>Fintechs</strong> necessitant des signatures electroniques avancees pour operer sous regulation financiere. <strong>Gouvernements</strong> emettant des certificats, licences ou permis devant etre verifiables. <strong>Toute organisation</strong> ayant besoin qu'un document signe aujourd'hui reste verifiable en 2040.</p>
-</div>
-
-<div class="section">
-<h2>Ce qu'il resout</h2>
-<h3>Probleme 1 — Verification dependante</h3>
-<p>Aujourd'hui, verifier une signature necessite de contacter le PSC qui l'a emise. Si ce PSC cesse ses activites, la signature devient inverifiable. Goya produit des signatures verifiees par les mathematiques pures — pas besoin d'appeler qui que ce soit.</p>
-<h3>Probleme 2 — Vulnerabilite quantique</h3>
-<p>Les ordinateurs quantiques casseront les signatures actuelles (RSA, ECDSA, Ed25519). Goya utilise les 3 standards post-quantiques du NIST (ML-DSA-65, ML-KEM-768, SLH-DSA-128s) — les memes que le gouvernement americain exigera d'ici 2035.</p>
-<h3>Probleme 3 — Cout d'acces</h3>
-<p>La contrepartie d'un contrat ne devrait pas avoir besoin d'acheter sa propre signature electronique pour signer. Avec Goya, la contrepartie signe via un lien — sans installation, sans paiement.</p>
-</div>
-
-<div class="section">
-<h2>Comment ca fonctionne</h2>
-<p>Chaque document signe recoit une <strong>double signature</strong> : une classique (Ed25519, valide aujourd'hui) et une post-quantique (ML-DSA-65, valide contre les ordinateurs quantiques). Les deux doivent etre verifiees pour que le document soit valide.</p>
-<p>Les signatures sont enregistrees sur une <strong>blockchain immuable</strong> avec consensus BFT (tolerance aux fautes byzantines) — meme un noeud malveillant ne peut pas falsifier un enregistrement. L'horodatage TSA (RFC 3161) garantit la date exacte de la signature.</p>
-<p>L'ensemble du systeme est <strong>verifie contre les vecteurs de test officiels du NIST</strong> (117 vecteurs, correspondance exacte octet par octet) et conforme aux recommandations du BSI allemand et de l'ANSSI francaise.</p>
-</div>
-
-<div class="section">
-<h2>Exemples concrets</h2>
-<div class="examples">
-  <div class="example">
-    <div class="example-label">Notaire</div>
-    <p>Un avocat redige un contrat de vente. Les deux parties le signent depuis leur telephone avec Goya. Le notaire recoit le contrat avec deux signatures cryptographiques, un horodatage et un hash sur la blockchain. Dans 20 ans, n'importe quel juge peut verifier que le contrat n'a pas ete modifie — sans contacter personne.</p>
-  </div>
-  <div class="example">
-    <div class="example-label">Fintech</div>
-    <p>Une fintech reglementee a besoin que ses clients signent des billets a ordre numeriques avec des Signatures Electroniques Avancees. Avec Goya, le billet est signe avec ML-DSA-65 et biometrie. Le billet a une validite juridique equivalente a une signature notariee — et est resistant aux attaques quantiques.</p>
-  </div>
-  <div class="example">
-    <div class="example-label">Gouvernement</div>
-    <p>Une municipalite emet des licences commerciales numeriques. Chaque licence est un certificat X.509 signe par la CA de Goya avec ML-DSA-65. Le commercant peut la presenter a n'importe quel inspecteur, qui la verifie en scannant un QR code — hors ligne, sans dependance serveur.</p>
-  </div>
-  <div class="example">
-    <div class="example-label">Exportateur</div>
-    <p>Une entreprise chilienne exporte vers l'UE. Les documents d'expedition sont signes avec Goya et recoivent un sceau compatible eIDAS. La contrepartie europeenne verifie la signature avec son portefeuille EUDIW. Un seul systeme, deux continents, sans intermediaires.</p>
-  </div>
-</div>
-</div>
-
-<div class="section">
-<h2>Ce que ce n'est pas</h2>
-<div class="negative-card">
-  <p><strong>Pas encore un PSC accredite.</strong> L'accreditation est en cours. Les 17 documents d'accreditation sont complets, mais l'audit independant et la constitution juridique sont en cours.</p>
-  <p><strong>Ne remplace pas l'Etat.</strong> L'identite du signataire depend d'un processus de verification (carte d'identite, biometrie). Goya n'est pas un registre civil — c'est l'infrastructure qui donne une preuve mathematique a la signature.</p>
-  <p><strong>Ne peut pas supprimer de donnees.</strong> La blockchain est immuable. Si vous devez effacer des donnees personnelles (RGPD), l'architecture de Goya ne le permet pas par conception — c'est le prix de l'immutabilite.</p>
-  <p><strong>C'est nouveau.</strong> 9 mois de developpement. Pas 20 ans d'historique. L'avantage technique (PQC, BFT, CAVP) est demontrable ; la confiance institutionnelle se construit avec le temps.</p>
-</div>
-</div>
-
-<div class="section">
-<h2>Chiffres verifiables</h2>
-<div class="compare"><table>
-  <tr><th>Metrique</th><th>Valeur</th></tr>
-  <tr><td>Debit avec PQC reel</td><td>10 260 TPS</td></tr>
-  <tr><td>Latence par bloc</td><td>9,75 ms</td></tr>
-  <tr><td>Vecteurs NIST CAVP verifies</td><td>117 (octet par octet)</td></tr>
-  <tr><td>Tests automatises</td><td>2 821 lib + 200+ integration</td></tr>
-  <tr><td>Documents reglementaires</td><td>44 (Chili + UE + EAU)</td></tr>
-  <tr><td>Standards NIST PQC</td><td>3 sur 3 (FIPS 203, 204, 205)</td></tr>
-  <tr><td>Temps de developpement</td><td>9 mois</td></tr>
-</table></div>
-</div>
-
-</div>
-
-<div class="foot">
-  Goya Ledger &middot; 2026
-  <div class="foot-links">
-    <a href="/pitch.html">Pitch</a>
-    <a href="/investors.html">Investors</a>
-    <a href="/cps.html">CPS</a>
-    <a href="/privacy.html">Privacy</a>
-    <a href="/terms.html">Terms</a>
-  </div>
-</div>
-
-</div>
+</footer>
 
 <script>
-function switchLang(lang) {
-  document.querySelectorAll('.lang').forEach(el => el.classList.remove('active'));
-  document.getElementById('lang-' + lang).classList.add('active');
-  document.querySelectorAll('.lang-btn').forEach(btn => {
-    const isActive = btn.textContent.toLowerCase().startsWith(lang === 'es' ? 'esp' : lang === 'en' ? 'eng' : 'fra');
-    btn.classList.toggle('active', isActive);
-    btn.setAttribute('aria-pressed', isActive);
+const ORIGINAL = `CONTRATO DE ARRIENDO
+
+Arrendador: María Pérez
+Arrendataria: Camila Soto
+Propiedad: Av. Los Leones 1234, depto 56, Providencia
+
+Renta mensual: $450.000, pagaderos el día 5 de cada mes.
+Duración: 12 meses desde el 1 de noviembre de 2026.`;
+
+const MY_BLOCK = 1043;
+const CHAIN_ENTRIES = [
+  { number: 1041, label: 'Otros registros', content: 'registros-1041' },
+  { number: 1042, label: 'Otros registros', content: 'registros-1042' },
+  { number: MY_BLOCK, label: 'Tu contrato', isMine: true },
+  { number: 1044, label: 'Registros posteriores', content: 'registros-1044' },
+  { number: 1045, label: 'Registros posteriores', content: 'registros-1045' },
+];
+
+const docInput = document.getElementById('doc');
+const docTitle = document.getElementById('doc-title');
+const docHint = document.getElementById('doc-hint');
+const quickEdits = document.getElementById('quick-edits');
+const printGrid = document.getElementById('print');
+const printCode = document.getElementById('print-code');
+const printStatus = document.getElementById('print-status');
+const registerChain = document.getElementById('chain-register');
+const registerStatus = document.getElementById('register-status');
+const forgeChain = document.getElementById('chain-forge');
+const forgeStatus = document.getElementById('forge-status');
+const stepTabs = [...document.querySelectorAll('.step-tab')];
+const panels = [...document.querySelectorAll('.panel')];
+let originalHash = '';
+let registration = null;
+let currentStep = 1;
+let unlockedStep = 1;
+
+async function computeHash(text) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function renderPrint(container, hash) {
+  if (container.children.length !== 64) {
+    container.replaceChildren(...Array.from({ length: 64 }, () => document.createElement('i')));
+  }
+  [...hash].forEach((char, index) => {
+    container.children[index].style.opacity = (0.08 + (parseInt(char, 16) / 15) * 0.85).toFixed(2);
   });
 }
 
-function toggleTheme() {
-  const root = document.documentElement;
-  const current = root.getAttribute('data-theme');
-  if (current === 'dark') {
-    root.setAttribute('data-theme', 'light');
-    localStorage.setItem('goya-theme', 'light');
-  } else {
-    root.setAttribute('data-theme', 'dark');
-    localStorage.setItem('goya-theme', 'dark');
+function setStatus(element, tone, text) {
+  element.className = `status ${tone}`;
+  element.textContent = text;
+}
+
+async function buildChain(contractHash) {
+  const blocks = [];
+  let previousHash = '0'.repeat(64);
+  for (const entry of CHAIN_ENTRIES) {
+    const content = entry.isMine ? contractHash : entry.content;
+    const hash = await computeHash(previousHash + content);
+    blocks.push({ ...entry, hash });
+    previousHash = hash;
+  }
+  return blocks;
+}
+
+function renderBlock(block, brokenNumbers) {
+  const isBroken = brokenNumbers.has(block.number);
+  const element = document.createElement('div');
+  element.className = ['block', block.isMine ? 'mine' : '', isBroken ? 'broken' : ''].join(' ').trim();
+  const title = document.createElement('b');
+  title.textContent = `#${block.number.toLocaleString('es-CL')}`;
+  const label = document.createElement('span');
+  label.className = 'block-label';
+  label.textContent = block.label;
+  const print = document.createElement('div');
+  print.className = 'print-mini';
+  renderPrint(print, block.hash);
+  const state = document.createElement('span');
+  state.className = 'block-state';
+  state.textContent = !isBroken ? '✓ Intacto' : block.isMine ? '✗ Alterado' : '✗ Roto';
+  element.append(title, label, print, state);
+  return element;
+}
+
+function renderChain(container, blocks, brokenNumbers = new Set()) {
+  container.replaceChildren(...blocks.map((block) => renderBlock(block, brokenNumbers)));
+}
+
+function updateStepOne(hash) {
+  renderPrint(printGrid, hash);
+  printCode.textContent = hash;
+  if (docInput.value === ORIGINAL) {
+    setStatus(printStatus, hash === originalHash && docHint.classList.contains('quiet') ? 'ok' : 'info',
+      docHint.classList.contains('quiet')
+        ? 'Volviste al texto original: la huella es exactamente la misma de antes.'
+        : 'Pruébalo: cambia cualquier cosa del contrato y mira cómo cambia la huella.');
+    return;
+  }
+  setStatus(printStatus, 'bad', 'Cambiaste el contrato y su huella ya es otra, completamente distinta. Por eso un documento no se puede editar sin que se note.');
+}
+
+async function updateForgery(hash) {
+  const rebuilt = await buildChain(hash);
+  const brokenNumbers = new Set(rebuilt
+    .filter((block, index) => block.hash !== registration.blocks[index].hash)
+    .map((block) => block.number));
+  renderChain(forgeChain, rebuilt, brokenNumbers);
+  if (brokenNumbers.size === 0) {
+    setStatus(forgeStatus, 'ok', 'El contrato coincide con lo registrado. Es el auténtico.');
+    return;
+  }
+  setStatus(forgeStatus, 'bad', `Falsificación detectada. El contrato ya no coincide con su huella del bloque ${MY_BLOCK.toLocaleString('es-CL')}, y la cadena se rompe desde ahí en adelante. Para esconderlo, alguien tendría que rehacer todos esos bloques en todos los computadores a la vez.`);
+}
+
+async function onDocumentChange() {
+  docHint.classList.add('quiet');
+  docHint.textContent = 'Editando';
+  const hash = await computeHash(docInput.value);
+  if (currentStep === 1) updateStepOne(hash);
+  if (currentStep === 3) await updateForgery(hash);
+}
+
+async function register() {
+  const contractHash = await computeHash(docInput.value);
+  registration = { text: docInput.value, blocks: await buildChain(contractHash) };
+  const visibleBlocks = registration.blocks.filter((block) => block.number <= MY_BLOCK);
+  renderChain(registerChain, visibleBlocks);
+  setStatus(registerStatus, 'ok', `Registrado en el bloque ${MY_BLOCK.toLocaleString('es-CL')} a las ${new Date().toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' })}.`);
+  setTimeout(() => {
+    renderChain(registerChain, registration.blocks);
+    setStatus(registerStatus, 'ok', 'Llegaron registros nuevos y se encadenaron después del tuyo. Cada uno depende del anterior.');
+  }, 1600);
+}
+
+async function goToStep(step) {
+  currentStep = step;
+  unlockedStep = Math.max(unlockedStep, step);
+  stepTabs.forEach((tab) => {
+    const tabStep = Number(tab.dataset.step);
+    if (tabStep === step) tab.setAttribute('aria-current', 'step');
+    else tab.removeAttribute('aria-current');
+    tab.disabled = tabStep > unlockedStep;
+    tab.classList.toggle('done', tabStep < step);
+  });
+  panels.forEach((panel) => { panel.hidden = Number(panel.dataset.panel) !== step; });
+  docInput.readOnly = step === 2;
+  quickEdits.hidden = step === 2;
+  docHint.hidden = step === 2;
+  const titles = { 1: 'Contrato de ejemplo', 2: `Contrato registrado en el bloque ${MY_BLOCK.toLocaleString('es-CL')}`, 3: 'El contrato registrado: cámbialo' };
+  docTitle.textContent = titles[step];
+  if (step === 2 && !registration) await register();
+  if (step === 2 && registration) renderChain(registerChain, registration.blocks);
+  if (step === 3) {
+    docHint.classList.remove('quiet');
+    docHint.textContent = '✎ Haz clic y cámbialo';
+    await updateForgery(await computeHash(docInput.value));
+  }
+  if (step === 1) await onDocumentChangeWithoutHint();
+}
+
+async function onDocumentChangeWithoutHint() {
+  updateStepOne(await computeHash(docInput.value));
+}
+
+const edits = {
+  monto: (text) => text.replace(/\$[\d.]+/, '$990.000'),
+  nombre: (text) => text.replace('Camila Soto', 'Camila Sotomayor'),
+  reset: () => (currentStep === 3 && registration ? registration.text : ORIGINAL),
+};
+
+document.querySelectorAll('[data-edit]').forEach((button) => {
+  button.addEventListener('click', () => {
+    docInput.value = edits[button.dataset.edit](docInput.value);
+    onDocumentChange();
+  });
+});
+docInput.addEventListener('input', onDocumentChange);
+stepTabs.forEach((tab) => tab.addEventListener('click', () => goToStep(Number(tab.dataset.step))));
+document.getElementById('to-step-2').addEventListener('click', () => goToStep(2));
+document.getElementById('to-step-3').addEventListener('click', () => goToStep(3));
+document.getElementById('restart').addEventListener('click', () => {
+  registration = null;
+  unlockedStep = 1;
+  docInput.value = ORIGINAL;
+  docHint.classList.remove('quiet');
+  docHint.textContent = '✎ Haz clic y escribe';
+  goToStep(1);
+});
+
+async function initTrial() {
+  docInput.value = ORIGINAL;
+  originalHash = await computeHash(ORIGINAL);
+  updateStepOne(originalHash);
+}
+
+const audiences = {
+  personas: [
+    { tag: 'Arriendo', title: 'El contrato que firmaste.', body: 'Si aparece una versión con otro monto, su huella no coincide.', before: 'Tu palabra contra otra.', after: 'Una huella con fecha.' },
+    { tag: 'Trabajo', title: 'Tu finiquito, tal cual.', body: 'Pruebas qué documento exacto recibiste, sin depender de la empresa.', before: 'Un PDF en un correo.', after: 'Una prueba comprobable.' },
+    { tag: 'Compraventa', title: 'Vender el auto, sin sorpresas.', body: 'El acuerdo queda con su huella: otra versión no coincidirá.', before: 'Capturas de WhatsApp.', after: 'Un acuerdo comprobable.' },
+  ],
+  pymes: [
+    { tag: 'Cotizaciones', title: 'Lo que ofreciste, tal cual.', body: 'Si el cliente reclama otro precio, la versión registrada lo aclara.', before: 'Discusiones por correo.', after: 'La versión exacta, con fecha.' },
+    { tag: 'Contratos', title: 'Tu cliente firma a distancia.', body: 'Desde un enlace, sin comprar un certificado ni ir a una notaría.', before: 'PDFs y recordatorios.', after: 'Firma ligada al documento.' },
+    { tag: 'Informes', title: 'Entregables comprobables.', body: 'Pruebas qué entregaste y cuándo, sin depender de tu servidor.', before: '"Nunca recibí eso".', after: 'Huella del día de entrega.' },
+  ],
+  notarias: [
+    { tag: 'Copias electrónicas', title: 'Copias que se comprueban.', body: 'Quien recibe una copia la compara con la registrada en segundos.', before: 'Llamar a la notaría.', after: 'Comprobarla uno mismo.' },
+    { tag: 'Repositorio', title: 'Integridad de todo el archivo.', body: 'Cada documento tiene huella y fecha: un cambio posterior no coincide.', before: 'Carpetas y respaldos.', after: 'Integridad comprobable.' },
+    { tag: 'Firmas', title: 'Las partes firman a distancia.', body: 'Sin que cada parte tenga que comprar su propio certificado.', before: 'Coordinar presencialidad.', after: 'Firmas desde un enlace.' },
+  ],
+  instituciones: [
+    { tag: 'Certificados', title: 'Certificados comprobables.', body: 'Títulos o licencias que se comprueban con un enlace o un QR.', before: 'Fáciles de falsificar.', after: 'Comprobables por cualquiera.' },
+    { tag: 'Salud', title: 'Trazabilidad sin exponer datos.', body: 'Se registra la huella del documento clínico, no los datos del paciente.', before: 'Solo un sistema interno.', after: 'Integridad comprobable.' },
+    { tag: 'Cumplimiento', title: 'Evidencia para auditorías.', body: 'Registros con huella y fecha para mostrar controles a un auditor.', before: 'Registros editables.', after: 'Un historial con fecha.' },
+  ],
+};
+
+const casesPanel = document.getElementById('cases');
+function renderCases(audience) {
+  casesPanel.replaceChildren(...audiences[audience].map((item) => {
+    const article = document.createElement('article');
+    article.className = 'case';
+    article.innerHTML = `<p class="tag"></p><h3></h3><p></p><div class="before-after"><div><span>Antes</span><p></p></div><div><span>Con Goya</span><p></p></div></div>`;
+    const [tag, title, body, before, after] = article.querySelectorAll('.tag, h3, article > p:not(.tag), .before-after p');
+    tag.textContent = item.tag;
+    title.textContent = item.title;
+    body.textContent = item.body;
+    before.textContent = item.before;
+    after.textContent = item.after;
+    return article;
+  }));
+}
+document.querySelectorAll('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach((other) => other.setAttribute('aria-selected', String(other === tab)));
+    renderCases(tab.dataset.audience);
+  });
+});
+
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach((entry) => {
+    if (!entry.isIntersecting) return;
+    entry.target.classList.add('in');
+    observer.unobserve(entry.target);
+  });
+}, { threshold: 0.12 });
+document.querySelectorAll('.reveal').forEach((element) => observer.observe(element));
+
+initTrial();
+renderCases('personas');
+
+const field = document.getElementById('field');
+const fieldContext = field.getContext('2d');
+const prefersReducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const DOT_SPACING = 13;
+const WAVE_NUMBER = 0.032;
+const WAVE_SPEED = 0.0016;
+const pointer = { x: 0.92, y: 0.78, targetX: 0.92, targetY: 0.78 };
+let fieldWidth = 0;
+let fieldHeight = 0;
+let isFieldVisible = true;
+
+function resizeField() {
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  fieldWidth = field.clientWidth;
+  fieldHeight = field.clientHeight;
+  field.width = fieldWidth * ratio;
+  field.height = fieldHeight * ratio;
+  fieldContext.setTransform(ratio, 0, 0, ratio, 0, 0);
+}
+
+function drawField(time) {
+  fieldContext.clearRect(0, 0, fieldWidth, fieldHeight);
+  pointer.x += (pointer.targetX - pointer.x) * 0.04;
+  pointer.y += (pointer.targetY - pointer.y) * 0.04;
+  const sourceA = { x: fieldWidth * (0.58 + 0.03 * Math.sin(time * 0.00017)), y: fieldHeight * (0.16 + 0.05 * Math.sin(time * 0.00021)) };
+  const sourceB = { x: fieldWidth * pointer.x, y: fieldHeight * pointer.y };
+  const phase = time * WAVE_SPEED;
+  for (let y = DOT_SPACING / 2; y < fieldHeight; y += DOT_SPACING) {
+    for (let x = DOT_SPACING / 2; x < fieldWidth; x += DOT_SPACING) {
+      const distanceA = Math.hypot(x - sourceA.x, y - sourceA.y);
+      const distanceB = Math.hypot(x - sourceB.x, y - sourceB.y);
+      const amplitude = (Math.sin(distanceA * WAVE_NUMBER - phase) + Math.sin(distanceB * WAVE_NUMBER - phase)) / 2;
+      const intensity = amplitude * amplitude;
+      if (intensity < 0.02) continue;
+      fieldContext.fillStyle = `rgba(207, 232, 255, ${(intensity * 0.75).toFixed(3)})`;
+      fieldContext.beginPath();
+      fieldContext.arc(x, y, 0.5 + intensity * 1.4, 0, Math.PI * 2);
+      fieldContext.fill();
+    }
   }
 }
 
-(function() {
-  const saved = localStorage.getItem('goya-theme');
-  if (saved) document.documentElement.setAttribute('data-theme', saved);
-})();
+function animateField(time) {
+  if (isFieldVisible) drawField(time);
+  requestAnimationFrame(animateField);
+}
+
+window.addEventListener('pointermove', (event) => {
+  const bounds = field.getBoundingClientRect();
+  if (event.clientY > bounds.bottom) return;
+  pointer.targetX = Math.min(Math.max(event.clientX / bounds.width, 0.35), 1);
+  pointer.targetY = Math.min(Math.max((event.clientY - bounds.top) / bounds.height, 0), 1);
+});
+window.addEventListener('resize', () => {
+  resizeField();
+  if (prefersReducedMotion) drawField(0);
+});
+new IntersectionObserver(([entry]) => { isFieldVisible = entry.isIntersecting; }).observe(field);
+
+resizeField();
+if (prefersReducedMotion) drawField(0);
+else requestAnimationFrame(animateField);
 </script>
 </body>
 </html>
