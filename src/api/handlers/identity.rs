@@ -268,6 +268,7 @@ async fn rotate_key(
 pub async fn revoke_identity(
     state: web::Data<AppState>,
     path: web::Path<String>,
+    body: web::Json<OwnerActionRequest>,
     req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let did = path.into_inner();
@@ -278,6 +279,7 @@ pub async fn revoke_identity(
     let mut record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
         resource: format!("identity {did}"),
     })?;
+    verify_owner_signature(&record, &format!("identity:revoke:{did}"), &body.signature)?;
 
     if record.status == "revoked" {
         return Ok(HttpResponse::Ok().json(ApiResponse::success(
@@ -356,6 +358,37 @@ async fn verify_signature(
 pub struct MigrateRequest {
     #[serde(default = "default_target_algorithm")]
     pub target_algorithm: String,
+    pub signature: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct OwnerActionRequest {
+    pub signature: String,
+}
+
+fn verify_owner_signature(
+    record: &crate::storage::traits::IdentityRecord,
+    message: &str,
+    signature_hex: &str,
+) -> Result<(), ApiError> {
+    let is_owner = crate::signature::verify::infer_algorithm_from_key(&record.public_key)
+        .is_some_and(|algorithm| {
+            crate::signature::verify_signature(
+                algorithm,
+                &record.public_key,
+                message.as_bytes(),
+                signature_hex,
+            )
+        });
+    if !is_owner {
+        return Err(ApiError::UnauthorizedWithMessage {
+            message: format!(
+                "signature over {message:?} does not verify against the key registered for {}",
+                record.did
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn default_target_algorithm() -> String {
@@ -402,6 +435,11 @@ pub async fn migrate_did(
     let record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
         resource: format!("identity {did}"),
     })?;
+    verify_owner_signature(
+        &record,
+        &format!("identity:migrate:{did}:{}", body.target_algorithm),
+        &body.signature,
+    )?;
 
     if record.status == "migrated" {
         return Ok(HttpResponse::Conflict().json(ApiResponse::<()>::error(
@@ -880,5 +918,101 @@ mod tests {
             base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, parts[2])
                 .unwrap();
         assert_eq!(sig_bytes.len(), 64);
+    }
+
+    struct RegisteredOwner {
+        state: web::Data<AppState>,
+        did: String,
+        key: crate::identity::signing::SoftwareSigningProvider,
+    }
+
+    fn registered_owner() -> RegisteredOwner {
+        use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
+        let state = web::Data::new(AppState::test_default());
+        let key = SoftwareSigningProvider::generate();
+        let public_key = hex::encode(key.public_key());
+        let did = crate::identity::did::did_from_pubkey_hex(&public_key);
+        get_channel_store(&state, "default")
+            .unwrap()
+            .write_identity(&identity_record(&did, &public_key, "active"))
+            .unwrap();
+        RegisteredOwner { state, did, key }
+    }
+
+    fn sign_hex(key: &crate::identity::signing::SoftwareSigningProvider, message: &str) -> String {
+        use crate::identity::signing::SigningProvider;
+        hex::encode(key.sign(message.as_bytes()).unwrap())
+    }
+
+    async fn post_owner_action(
+        owner: &RegisteredOwner,
+        action: &str,
+        body: serde_json::Value,
+    ) -> actix_web::http::StatusCode {
+        let app = actix_web::test::init_service(
+            actix_web::App::new().app_data(owner.state.clone()).service(
+                web::scope("/api/v1")
+                    .service(revoke_identity)
+                    .service(migrate_did),
+            ),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::post()
+            .uri(&format!("/api/v1/identity/{}/{action}", owner.did))
+            .set_json(body)
+            .to_request();
+        actix_web::test::call_service(&app, req).await.status()
+    }
+
+    fn owner_status(owner: &RegisteredOwner) -> String {
+        get_channel_store(&owner.state, "default")
+            .unwrap()
+            .read_identity(&owner.did)
+            .unwrap()
+            .status
+    }
+
+    #[actix_web::test]
+    async fn revoke_rejects_signature_from_another_key() {
+        let owner = registered_owner();
+        let attacker = crate::identity::signing::SoftwareSigningProvider::generate();
+        let message = format!("identity:revoke:{}", owner.did);
+        let body = serde_json::json!({ "signature": sign_hex(&attacker, &message) });
+        assert_eq!(post_owner_action(&owner, "revoke", body).await, 401);
+        assert_eq!(owner_status(&owner), "active");
+    }
+
+    #[actix_web::test]
+    async fn revoke_with_owner_signature_revokes() {
+        let owner = registered_owner();
+        let message = format!("identity:revoke:{}", owner.did);
+        let body = serde_json::json!({ "signature": sign_hex(&owner.key, &message) });
+        assert_eq!(post_owner_action(&owner, "revoke", body).await, 200);
+        assert_eq!(owner_status(&owner), "revoked");
+    }
+
+    #[actix_web::test]
+    async fn migrate_rejects_signature_from_another_key() {
+        let owner = registered_owner();
+        let attacker = crate::identity::signing::SoftwareSigningProvider::generate();
+        let message = format!("identity:migrate:{}:ml-dsa-65", owner.did);
+        let body = serde_json::json!({
+            "target_algorithm": "ml-dsa-65",
+            "signature": sign_hex(&attacker, &message),
+        });
+        assert_eq!(post_owner_action(&owner, "migrate", body).await, 401);
+        assert_eq!(owner_status(&owner), "active");
+    }
+
+    #[actix_web::test]
+    async fn migrate_with_owner_signature_migrates() {
+        let owner = registered_owner();
+        let message = format!("identity:migrate:{}:ml-dsa-65", owner.did);
+        let body = serde_json::json!({
+            "target_algorithm": "ml-dsa-65",
+            "signature": sign_hex(&owner.key, &message),
+        });
+        assert_eq!(post_owner_action(&owner, "migrate", body).await, 200);
+        assert_eq!(owner_status(&owner), "migrated");
     }
 }
