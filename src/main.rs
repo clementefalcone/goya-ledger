@@ -1173,19 +1173,10 @@ async fn async_main_inner() -> std::io::Result<()> {
                     continue;
                 }
                 let tx_count = txs.len();
-                let entries: Vec<crate::storage::traits::NotarizationEntry> = txs
-                    .iter()
-                    .filter(|tx| tx.id.starts_with("notarize:"))
-                    .filter_map(|tx| serde_json::from_str(&tx.state).ok())
-                    .collect();
                 match mining_service.mine_block("auto-miner", txs) {
                     Ok(height) => {
-                        log::info!(
-                            "⛏ Auto-mined block {height} with {tx_count} tx(s), {} notarization(s)",
-                            entries.len()
-                        );
-                        if let Ok(mut block) = mine_store.read_block(height) {
-                            block.embedded_entries = entries;
+                        log::info!("⛏ Auto-mined block {height} with {tx_count} tx(s)");
+                        if let Ok(block) = mine_store.read_block(height) {
                             let node = mine_node.clone();
                             tokio::spawn(async move {
                                 node.broadcast_ordered_block(&block).await;

@@ -50,9 +50,6 @@ pub struct Block {
     /// BFT commit quorum certificate (absent for solo-ordered blocks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_qc: Option<crate::consensus::bft::types::QuorumCertificate>,
-    /// Notarization entries embedded in this block for cross-node replication.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub embedded_entries: Vec<NotarizationEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transaction_data: Vec<Transaction>,
 }
@@ -103,6 +100,9 @@ pub enum TxPayload {
         record: IdentityRecord,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         civil_anchor: Option<String>,
+    },
+    Notarize {
+        entry: Box<NotarizationEntry>,
     },
 }
 
@@ -1238,7 +1238,6 @@ mod tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         }
     }
@@ -1278,7 +1277,6 @@ mod tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         let json = serde_json::to_string(&block).unwrap();

@@ -1342,16 +1342,6 @@ impl Node {
                             log::warn!("ordered block rejected: {e}");
                             return Ok(None);
                         }
-                        for entry in &block.embedded_entries {
-                            let _ = s.write_notarization(entry);
-                        }
-                        if !block.embedded_entries.is_empty() {
-                            log::info!(
-                                "Replicated {} notarization(s) from block {}",
-                                block.embedded_entries.len(),
-                                block.height
-                            );
-                        }
                     }
                 }
                 Ok(None)
@@ -3085,13 +3075,12 @@ mod tests {
         store
     }
 
-    fn block_signed_by(
-        signing_provider: Arc<dyn crate::identity::signing::SigningProvider>,
-    ) -> crate::storage::traits::Block {
-        let svc = crate::ordering::service::OrderingService::with_config(10, 500)
-            .with_signing_provider(signing_provider);
-        svc.submit_tx(crate::storage::traits::Transaction {
-            id: "tx-1".to_string(),
+    fn transaction(
+        id: &str,
+        payload: Option<crate::storage::traits::TxPayload>,
+    ) -> crate::storage::traits::Transaction {
+        crate::storage::traits::Transaction {
+            id: id.to_string(),
             block_height: 7,
             timestamp: 0,
             input_did: "did:goya:alice".to_string(),
@@ -3099,10 +3088,24 @@ mod tests {
             amount: 1,
             state: "pending".to_string(),
             fee: 0,
-            payload: None,
-        })
-        .unwrap();
+            payload,
+        }
+    }
+
+    fn block_with(
+        tx: crate::storage::traits::Transaction,
+        signing_provider: Arc<dyn crate::identity::signing::SigningProvider>,
+    ) -> crate::storage::traits::Block {
+        let svc = crate::ordering::service::OrderingService::with_config(10, 500)
+            .with_signing_provider(signing_provider);
+        svc.submit_tx(tx).unwrap();
         svc.cut_block(7, [0u8; 32], "ord").unwrap().unwrap()
+    }
+
+    fn block_signed_by(
+        signing_provider: Arc<dyn crate::identity::signing::SigningProvider>,
+    ) -> crate::storage::traits::Block {
+        block_with(transaction("tx-1", None), signing_provider)
     }
 
     fn trusted_provider() -> Arc<dyn crate::identity::signing::SigningProvider> {
@@ -3115,6 +3118,35 @@ mod tests {
         let store = deliver_ordered_block(block_signed_by(signer.clone()), signer).await;
         assert_eq!(store.read_block(7).unwrap().height, 7);
         assert!(store.read_transaction("tx-1").is_ok());
+    }
+
+    #[tokio::test]
+    async fn peer_ordered_block_replicates_notarization_from_transaction() {
+        let entry = crate::storage::traits::NotarizationEntry {
+            id: "nota-1".to_string(),
+            content_hash: "a".repeat(64),
+            signer: "did:goya:alice".to_string(),
+            metadata: None,
+            notarized_at: 1_700_000_000,
+            block_height: 7,
+            signature: "ff".repeat(32),
+            public_key: "aa".repeat(32),
+            cades_der: None,
+            signature_algorithm: Default::default(),
+            signature_level: crate::signature::SignatureLevel::Simple,
+            biometric_evidence: vec![],
+            signer_proof: None,
+        };
+        let payload = crate::storage::traits::TxPayload::Notarize {
+            entry: Box::new(entry.clone()),
+        };
+        let signer = trusted_provider();
+        let block = block_with(
+            transaction("notarize:nota-1", Some(payload)),
+            signer.clone(),
+        );
+        let store = deliver_ordered_block(block, signer).await;
+        assert_eq!(store.read_notarization("nota-1").unwrap(), entry);
     }
 
     #[tokio::test]
@@ -3151,7 +3183,6 @@ mod tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         let msg = Message::OrderedBlock(block);
@@ -3207,7 +3238,6 @@ mod tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         let msg = Message::StateResponse {

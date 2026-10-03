@@ -224,7 +224,6 @@ mod tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         store.write_block(&block).unwrap();
@@ -268,7 +267,6 @@ mod tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         store.write_block(&block).unwrap();
@@ -323,7 +321,6 @@ mod tests {
                 hash_algorithm: Default::default(),
                 orderer_signature: None,
                 commit_qc: None,
-                embedded_entries: Vec::new(),
                 transaction_data: vec![],
             };
             store.write_block(&block).unwrap();
@@ -366,7 +363,6 @@ mod tests {
                 hash_algorithm: Default::default(),
                 orderer_signature: None,
                 commit_qc: None,
-                embedded_entries: Vec::new(),
                 transaction_data: vec![],
             };
             store.write_block(&block).unwrap();

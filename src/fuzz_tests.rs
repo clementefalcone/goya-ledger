@@ -39,7 +39,7 @@ mod tests {
                 secondary_signature: None,
                 secondary_signature_algorithm: None,
                 hash_algorithm: Default::default(),
-                orderer_signature: None, commit_qc: None, embedded_entries: Vec::new(), transaction_data: vec![],
+                orderer_signature: None, commit_qc: None, transaction_data: vec![],
             };
             // Serialize and deserialize roundtrip must not panic
             let json = serde_json::to_string(&block).unwrap();
@@ -268,6 +268,21 @@ mod tests {
                 Some(crate::identity::signing::SigningAlgorithm::MlDsa65)
             } else { None };
             let orderer_signature = if has_orderer { Some(vec![0xEE; 64]) } else { None };
+            let notarization_txs: Vec<crate::storage::traits::Transaction> = entries.iter().map(|entry| {
+                crate::storage::traits::Transaction {
+                    id: format!("notarize:{}", entry.id),
+                    block_height: height,
+                    timestamp: entry.notarized_at,
+                    input_did: entry.signer.clone(),
+                    output_recipient: entry.content_hash.clone(),
+                    amount: 0,
+                    state: "pending".to_string(),
+                    fee: 0,
+                    payload: Some(crate::storage::traits::TxPayload::Notarize {
+                        entry: Box::new(entry.clone()),
+                    }),
+                }
+            }).collect();
 
             let block = crate::storage::traits::Block {
                 height,
@@ -284,8 +299,7 @@ mod tests {
                 hash_algorithm: hash_algo,
                 orderer_signature: orderer_signature.clone(),
                 commit_qc: None,
-                embedded_entries: entries.clone(),
-                transaction_data: vec![],
+                transaction_data: notarization_txs.clone(),
             };
 
             let json = serde_json::to_string(&block).unwrap();
@@ -304,7 +318,10 @@ mod tests {
             prop_assert_eq!(back.secondary_signature_algorithm, secondary_signature_algorithm);
             prop_assert_eq!(&back.orderer_signature, &orderer_signature);
             prop_assert_eq!(back.endorsements.len(), endorsement_count);
-            prop_assert_eq!(back.embedded_entries.len(), entry_count);
+            let replicated: Vec<_> = back.transaction_data.iter().map(|tx| tx.payload.clone()).collect();
+            let expected: Vec<_> = notarization_txs.iter().map(|tx| tx.payload.clone()).collect();
+            prop_assert_eq!(replicated.len(), entry_count);
+            prop_assert_eq!(replicated, expected);
             prop_assert!(back.commit_qc.is_none());
 
             let bytes = serde_json::to_vec(&block).unwrap();
@@ -415,7 +432,6 @@ mod tests {
                 hash_algorithm: Default::default(),
                 orderer_signature: None,
                 commit_qc: None,
-                embedded_entries: vec![],
                 transaction_data: vec![],
             };
 
@@ -517,7 +533,7 @@ mod tests {
             prop_assert!(block.secondary_signature.is_none());
             prop_assert!(block.orderer_signature.is_none());
             prop_assert!(block.commit_qc.is_none());
-            prop_assert!(block.embedded_entries.is_empty());
+            prop_assert!(block.transaction_data.is_empty());
         }
     }
 
@@ -544,7 +560,6 @@ mod tests {
                 hash_algorithm: Default::default(),
                 orderer_signature: None,
                 commit_qc: None,
-                embedded_entries: vec![],
                 transaction_data: vec![],
             };
 
@@ -625,7 +640,6 @@ mod tests {
                 hash_algorithm: Default::default(),
                 orderer_signature: Some(vec![]),
                 commit_qc: None,
-                embedded_entries: vec![],
                 transaction_data: vec![],
             };
             let json = serde_json::to_string(&block).unwrap();
@@ -683,7 +697,6 @@ mod tests {
                 hash_algorithm: Default::default(),
                 orderer_signature: None,
                 commit_qc: Some(qc),
-                embedded_entries: vec![],
                 transaction_data: vec![],
             };
 

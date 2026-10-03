@@ -43,7 +43,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         assert!(store.write_block(&block).is_ok());
@@ -147,7 +146,6 @@ mod comprehensive_storage_tests {
                 hash_algorithm: Default::default(),
                 orderer_signature: None,
                 commit_qc: None,
-                embedded_entries: Vec::new(),
                 transaction_data: vec![],
             };
             assert!(store.write_block(&block).is_ok());
@@ -195,7 +193,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         assert!(store.write_batch(&[block], &[]).is_ok());
@@ -236,7 +233,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         let tx = Transaction {
@@ -278,7 +274,6 @@ mod comprehensive_storage_tests {
                 hash_algorithm: Default::default(),
                 orderer_signature: None,
                 commit_qc: None,
-                embedded_entries: Vec::new(),
                 transaction_data: vec![],
             })
             .collect::<Vec<_>>();
@@ -323,7 +318,6 @@ mod comprehensive_storage_tests {
                 hash_algorithm: Default::default(),
                 orderer_signature: None,
                 commit_qc: None,
-                embedded_entries: Vec::new(),
                 transaction_data: vec![],
             })
             .collect::<Vec<_>>();
@@ -348,7 +342,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         }];
         let txs = vec![Transaction {
@@ -384,7 +377,6 @@ mod comprehensive_storage_tests {
                 hash_algorithm: Default::default(),
                 orderer_signature: None,
                 commit_qc: None,
-                embedded_entries: Vec::new(),
                 transaction_data: vec![],
             };
             assert!(store.write_batch(&[block], &[]).is_ok());
@@ -434,7 +426,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         let block2 = Block {
@@ -452,7 +443,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         assert!(store.write_batch(&[block1, block2], &[]).is_ok());
@@ -478,7 +468,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         assert!(store.write_block(&block).is_ok());
@@ -502,7 +491,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         assert!(store.write_block(&block).is_ok());
@@ -526,7 +514,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         assert!(store.write_block(&block).is_ok());
@@ -550,7 +537,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         assert!(store.write_block(&block).is_ok());
@@ -591,7 +577,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         assert!(store.write_block(&block).is_ok());
@@ -615,7 +600,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         assert!(store.write_block(&block).is_ok());
@@ -772,7 +756,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         assert!(store.write_block(&block).is_ok());
@@ -796,7 +779,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         assert!(store.write_block(&block).is_ok());
@@ -840,7 +822,6 @@ mod comprehensive_storage_tests {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
         let start = Instant::now();
@@ -870,7 +851,6 @@ mod comprehensive_storage_tests {
                 hash_algorithm: Default::default(),
                 orderer_signature: None,
                 commit_qc: None,
-                embedded_entries: Vec::new(),
                 transaction_data: vec![],
             };
             let _ = store.write_block(&block);

@@ -28,6 +28,7 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
             }
             Ok(())
         }
+        Some(TxPayload::Notarize { entry }) => store.write_notarization(entry),
         _ => Ok(()),
     }
 }

@@ -137,7 +137,6 @@ impl MiningService {
             hash_algorithm: HashAlgorithm::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: all_tx_data,
         };
 

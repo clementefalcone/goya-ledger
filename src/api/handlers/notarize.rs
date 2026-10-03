@@ -255,9 +255,11 @@ pub async fn submit_notarization(
             input_did: entry.signer.clone(),
             output_recipient: entry.content_hash.clone(),
             amount: 0,
-            state: serde_json::to_string(&entry).unwrap_or_else(|_| "notarize".to_string()),
+            state: "pending".to_string(),
             fee: 0,
-            payload: None,
+            payload: Some(crate::storage::traits::TxPayload::Notarize {
+                entry: Box::new(entry.clone()),
+            }),
         };
         let mut pool = state.tx_pool.lock().unwrap_or_else(|e| e.into_inner());
         let _ = pool.add(tx);
@@ -436,9 +438,11 @@ pub async fn notarize_pdf(
             input_did: entry.signer.clone(),
             output_recipient: entry.content_hash.clone(),
             amount: 0,
-            state: serde_json::to_string(&entry).unwrap_or_else(|_| "notarize".to_string()),
+            state: "pending".to_string(),
             fee: 0,
-            payload: None,
+            payload: Some(crate::storage::traits::TxPayload::Notarize {
+                entry: Box::new(entry.clone()),
+            }),
         };
         let mut pool = state.tx_pool.lock().unwrap_or_else(|e| e.into_inner());
         let _ = pool.add(tx);

@@ -170,18 +170,12 @@ async fn try_mine_and_propose(
         return;
     }
 
-    let entries: Vec<crate::storage::traits::NotarizationEntry> = txs
-        .iter()
-        .filter(|tx| tx.id.starts_with("notarize:"))
-        .filter_map(|tx| serde_json::from_str(&tx.state).ok())
-        .collect();
     let tx_count = txs.len();
 
     match mining_service.mine_block("auto-miner", txs) {
         Ok(height) => {
             log::info!("⛏ BFT leader mined block {height} with {tx_count} tx(s)");
-            if let Ok(mut block) = store.read_block(height) {
-                block.embedded_entries = entries;
+            if let Ok(block) = store.read_block(height) {
                 let block_hash = crate::mining::block_hash(&block);
                 *pending_block = Some(block.clone());
 

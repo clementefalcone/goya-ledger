@@ -263,7 +263,7 @@ proptest! {
             secondary_signature: None,
             secondary_signature_algorithm: None,
             hash_algorithm: Default::default(),
-            orderer_signature: None, commit_qc: None, embedded_entries: Vec::new(), transaction_data: vec![],
+            orderer_signature: None, commit_qc: None, transaction_data: vec![],
         };
 
         let write_result = store.write_block(&block);

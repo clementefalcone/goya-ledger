@@ -71,7 +71,6 @@ pub fn stress_storage(ops: u64) -> ModuleStressResult {
             hash_algorithm: Default::default(),
             orderer_signature: None,
             commit_qc: None,
-            embedded_entries: Vec::new(),
             transaction_data: vec![],
         };
 
@@ -975,7 +974,6 @@ mod tests {
                             hash_algorithm: Default::default(),
                             orderer_signature: None,
                             commit_qc: None,
-                            embedded_entries: Vec::new(),
                             transaction_data: vec![],
                         };
                         if s.write_block(&block).is_err() {
@@ -1618,7 +1616,6 @@ mod tests {
                             hash_algorithm: Default::default(),
                             orderer_signature: None,
                             commit_qc: None,
-                            embedded_entries: Vec::new(),
                             transaction_data: vec![],
                         };
                         if s.write_block(&block).is_err() {
@@ -1729,7 +1726,6 @@ mod tests {
                         hash_algorithm: Default::default(),
                         orderer_signature: None,
                         commit_qc: None,
-                        embedded_entries: Vec::new(),
                         transaction_data: vec![],
                     };
                     if s.write_block(&block).is_err() {

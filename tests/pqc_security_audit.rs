@@ -400,7 +400,6 @@ fn block_stores_hash_algorithm_field() {
         hash_algorithm: HashAlgorithm::Sha3_256,
         orderer_signature: None,
         commit_qc: None,
-        embedded_entries: Vec::new(),
         transaction_data: vec![],
     };
 
@@ -431,7 +430,6 @@ fn legacy_block_without_hash_algorithm_defaults_to_sha256() {
         hash_algorithm: HashAlgorithm::Sha256,
         orderer_signature: None,
         commit_qc: None,
-        embedded_entries: Vec::new(),
         transaction_data: vec![],
     };
     let full_json = serde_json::to_string(&block).unwrap();

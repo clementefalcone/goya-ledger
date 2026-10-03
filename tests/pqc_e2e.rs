@@ -41,7 +41,6 @@ fn pqc_block_sign_store_retrieve_verify() {
         hash_algorithm: HashAlgorithm::Sha3_256,
         orderer_signature: None,
         commit_qc: None,
-        embedded_entries: Vec::new(),
         transaction_data: vec![],
     };
 
@@ -131,7 +130,6 @@ fn pqc_block_tampered_payload_rejected() {
         hash_algorithm: HashAlgorithm::Sha3_256,
         orderer_signature: None,
         commit_qc: None,
-        embedded_entries: Vec::new(),
         transaction_data: vec![],
     };
 
@@ -185,7 +183,6 @@ fn pqc_block_signature_survives_json_roundtrip() {
         hash_algorithm: HashAlgorithm::Sha3_256,
         orderer_signature: None,
         commit_qc: None,
-        embedded_entries: Vec::new(),
         transaction_data: vec![],
     };
 
