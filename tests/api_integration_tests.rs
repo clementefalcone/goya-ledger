@@ -2,8 +2,7 @@ use chrono::Utc;
 use rust_bc::api::errors::{ApiError, ApiResponse, ErrorDto};
 use rust_bc::api::models::{
     BlockResponse, BlockchainHealthResponse, ConsensusStateResponse, CreateIdentityRequest,
-    CredentialResponse, HealthResponse, IdentityResponse, ProofResponse, RotateKeyRequest,
-    RotateKeyResponse, VersionResponse,
+    CredentialResponse, HealthResponse, IdentityResponse, ProofResponse, VersionResponse,
 };
 
 #[test]
@@ -167,26 +166,6 @@ fn test_version_response() {
     let deserialized: VersionResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.api_version, "1.0.0");
     assert_eq!(deserialized.blockchain_height, 250);
-}
-
-#[test]
-fn test_rotate_key_request_response() {
-    let req = RotateKeyRequest { old_key_index: 0 };
-
-    let resp = RotateKeyResponse {
-        did: "did:bc:test".to_string(),
-        new_key_index: 1,
-        rotated_at: Utc::now(),
-    };
-
-    let req_json = serde_json::to_string(&req).unwrap();
-    let resp_json = serde_json::to_string(&resp).unwrap();
-
-    let des_req: RotateKeyRequest = serde_json::from_str(&req_json).unwrap();
-    let des_resp: RotateKeyResponse = serde_json::from_str(&resp_json).unwrap();
-
-    assert_eq!(des_req.old_key_index, 0);
-    assert_eq!(des_resp.new_key_index, 1);
 }
 
 #[test]

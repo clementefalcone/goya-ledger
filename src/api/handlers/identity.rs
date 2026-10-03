@@ -224,45 +224,6 @@ pub async fn get_identity_methods(
     )))
 }
 
-/// POST /identity/{did}/rotate-key - Key rotation (generates new keypair).
-#[post("/identity/{did}/rotate-key")]
-async fn rotate_key(
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-    _body: web::Json<RotateKeyRequest>,
-    req: HttpRequest,
-) -> ApiResult<HttpResponse> {
-    let did = path.into_inner();
-    let trace_id = uuid::Uuid::new_v4().to_string();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    // Verify DID exists
-    let _channel = channel_id_from_req(&req);
-    let store = get_channel_store(&state, _channel)?;
-    let mut record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
-        resource: format!("identity {did}"),
-    })?;
-
-    // Update timestamp to reflect rotation
-    record.updated_at = now;
-    store
-        .write_identity(&record)
-        .map_err(|e| ApiError::StorageError {
-            reason: e.to_string(),
-        })?;
-
-    let response = RotateKeyResponse {
-        did,
-        new_key_index: _body.old_key_index + 1,
-        rotated_at: Utc::now(),
-    };
-    Ok(HttpResponse::Ok().json(ApiResponse::success(response, trace_id)))
-}
-
 /// POST /identity/{did}/revoke - Revoke a DID (mark as revoked, not deleted).
 #[post("/identity/{did}/revoke")]
 pub async fn revoke_identity(

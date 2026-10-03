@@ -40,20 +40,6 @@ pub struct IdentityResponse {
     pub created_at: DateTime<Utc>,
 }
 
-/// Key rotation request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RotateKeyRequest {
-    pub old_key_index: usize,
-}
-
-/// Key rotation response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RotateKeyResponse {
-    pub did: String,
-    pub new_key_index: usize,
-    pub rotated_at: DateTime<Utc>,
-}
-
 /// Signature verification request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifySignatureRequest {
