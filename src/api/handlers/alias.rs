@@ -123,6 +123,12 @@ pub async fn alias_register(
         )));
     }
 
+    if !crate::identity::did::did_matches_pubkey(&body.did, &body.public_key) {
+        return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
+            err_dto("SIGNER_MISMATCH", "public_key does not derive the DID"),
+            401,
+        )));
+    }
     // Verify signature over register payload
     let base_payload = format!("alias:register:{}", body.commitment);
     let register_msg = match body.signature_level {
@@ -359,6 +365,12 @@ pub async fn alias_revoke(
             400,
         )));
     }
+    if !crate::identity::did::did_matches_pubkey(&body.did, &body.public_key) {
+        return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
+            err_dto("SIGNER_MISMATCH", "public_key does not derive the DID"),
+            401,
+        )));
+    }
     let base_payload = format!("alias:revoke:{}", body.commitment);
     let revoke_msg = match body.signature_level {
         SignatureLevel::Simple => base_payload,
@@ -542,5 +554,81 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 404);
+    }
+
+    fn ed25519_identity() -> (String, crate::identity::signing::SoftwareSigningProvider) {
+        use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
+        let key = SoftwareSigningProvider::generate();
+        let did = crate::identity::did::did_from_pubkey_hex(&hex::encode(key.public_key()));
+        (did, key)
+    }
+
+    fn signed_alias_body(
+        did: &str,
+        key: &crate::identity::signing::SoftwareSigningProvider,
+        action: &str,
+        commitment: &str,
+    ) -> serde_json::Value {
+        use crate::identity::signing::SigningProvider;
+        let message = format!("alias:{action}:{commitment}");
+        serde_json::json!({
+            "did": did,
+            "public_key": hex::encode(key.public_key()),
+            "commitment": commitment,
+            "salt": "bb".repeat(16),
+            "encrypted_alias": "ciphertext",
+            "signature": hex::encode(key.sign(message.as_bytes()).unwrap()),
+            "signature_algorithm": "Ed25519",
+        })
+    }
+
+    async fn post_alias(
+        state: &web::Data<AppState>,
+        action: &str,
+        body: serde_json::Value,
+    ) -> actix_web::http::StatusCode {
+        let app = test::init_service(
+            App::new().app_data(state.clone()).service(
+                web::scope("/api/v1")
+                    .service(alias_register)
+                    .service(alias_revoke),
+            ),
+        )
+        .await;
+        let req = test::TestRequest::post()
+            .uri(&format!("/api/v1/alias/{action}"))
+            .set_json(body)
+            .to_request();
+        test::call_service(&app, req).await.status()
+    }
+
+    #[actix_web::test]
+    async fn register_accepts_owner_key() {
+        let state = make_app_data();
+        let (did, key) = ed25519_identity();
+        let body = signed_alias_body(&did, &key, "register", &"cc".repeat(32));
+        assert_eq!(post_alias(&state, "register", body).await, 200);
+    }
+
+    #[actix_web::test]
+    async fn register_rejects_key_not_bound_to_did() {
+        let state = make_app_data();
+        let (victim_did, _) = ed25519_identity();
+        let (_, attacker) = ed25519_identity();
+        let body = signed_alias_body(&victim_did, &attacker, "register", &"cc".repeat(32));
+        assert_eq!(post_alias(&state, "register", body).await, 401);
+    }
+
+    #[actix_web::test]
+    async fn revoke_rejects_key_not_bound_to_did() {
+        let state = make_app_data();
+        let (owner_did, owner_key) = ed25519_identity();
+        let commitment = "cc".repeat(32);
+        let register = signed_alias_body(&owner_did, &owner_key, "register", &commitment);
+        assert_eq!(post_alias(&state, "register", register).await, 200);
+
+        let (_, attacker) = ed25519_identity();
+        let revoke = signed_alias_body(&owner_did, &attacker, "revoke", &commitment);
+        assert_eq!(post_alias(&state, "revoke", revoke).await, 401);
     }
 }
