@@ -1,7 +1,5 @@
 //! Genesis block creation for new channels.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crate::channel::config::ChannelConfig;
 use crate::private_data::sha256;
 use crate::storage::traits::Block;
@@ -17,14 +15,9 @@ pub fn create_genesis_block(channel_id: &str, config: &ChannelConfig) -> Block {
 
     let merkle_root = sha256(config_json.as_bytes());
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
     Block {
         height: 0,
-        timestamp,
+        timestamp: 0,
         parent_hash: [0u8; 32],
         merkle_root,
         transactions: vec![config_json],
@@ -88,5 +81,17 @@ mod tests {
         let config_json = serde_json::to_string(&cfg).unwrap();
         let expected_root = sha256(config_json.as_bytes());
         assert_eq!(block.merkle_root, expected_root);
+    }
+
+    #[test]
+    fn genesis_block_is_identical_on_every_node() {
+        let cfg = ChannelConfig::default();
+        let first = create_genesis_block("default", &cfg);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = create_genesis_block("default", &cfg);
+        assert_eq!(
+            crate::mining::block_hash(&first),
+            crate::mining::block_hash(&second)
+        );
     }
 }
