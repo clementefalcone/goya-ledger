@@ -4,6 +4,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) · Versioning: 
 
 ---
 
+## [0.19.0] — 2026-10-04
+
+### Security
+- Incoming blocks are validated before commit: merkle root over transaction data, parent hash, and a signature from `TRUSTED_BLOCK_SIGNERS` or this node
+- Notarizations prove the signer key belongs to the claimed DID and fail when unverified; FEA needs a signer proof from the holder's key
+- LexChain binds each party's signer key to its DID
+- Identity: registered DID must derive from its key; `POST /store/identities` needs the key holder's signature over `identity:register:{did}` instead of an mTLS ACL; revoke and migrate need the owner's signature, and migration targets an owner-generated key
+- Alias register/revoke bind the signer key to the alias DID
+
+### Changed
+- Notarizations replicate as a transaction payload; `embedded_entries` removed
+- Genesis is deterministic; on `mainnet` it reproduces the production chain's block 0
+- Public node endpoints on the VPS are exposed only at `server1.useremotion.com/goya/api/v1/{health,store/identities}` with nginx rate limits (`deploy/vps/goya-node-server1.locations.nginx`); `node.goyaledger.com` was retired
+- Cargo builds bounded in memory via `.cargo/config.toml`
+
+### Removed
+- Dead `rotate-key` endpoint
+
 ## [0.18.0] — 2026-09-24
 
 ### Changed — DID Hardening + Identity Federation (P0–P6)

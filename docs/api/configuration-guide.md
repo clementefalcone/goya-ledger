@@ -9,7 +9,7 @@ All configuration is via environment variables. No config files needed.
 | `API_PORT` | `8080` | HTTP API listen port |
 | `P2P_PORT` | `8081` | P2P gossip listen port |
 | `BIND_ADDR` | `127.0.0.1` | HTTP bind address (`0.0.0.0` in Docker) |
-| `NETWORK_ID` | `mainnet` | Network identifier (peers reject mismatched IDs) |
+| `NETWORK_ID` | `mainnet` | Network identifier (peers reject mismatched IDs). Also selects the genesis: `mainnet` builds the production genesis (hash `0e1eec13…`, pinned by a test); any other network starts at timestamp 0 and forms a separate chain |
 | `DIFFICULTY` | `1` | Mining difficulty |
 | `NODE_ROLE` | `peerandorderer` | Node role: `peer`, `orderer`, `peerandorderer` |
 | `ORG_ID` | `default` | This node's organization ID |
@@ -91,7 +91,7 @@ mTLS (`TLS_MUTUAL=true` + `TLS_CA_CERT_PATH`) is the only supported authenticati
 API_PORT=8080
 P2P_PORT=8081
 BIND_ADDR=0.0.0.0
-NETWORK_ID=production
+NETWORK_ID=mainnet
 ORG_ID=org1
 NODE_ROLE=peerandorderer
 STORAGE_BACKEND=rocksdb
