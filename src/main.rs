@@ -808,8 +808,10 @@ async fn async_main_inner() -> std::io::Result<()> {
             // Write genesis block for the default channel if store is empty.
             if !default_store.block_exists(0).unwrap_or(true) {
                 let genesis_config = crate::channel::config::ChannelConfig::default();
-                let genesis =
-                    crate::channel::genesis::create_genesis_block("default", &genesis_config);
+                let genesis = crate::storage::traits::Block {
+                    timestamp: crate::channel::genesis::network_genesis_timestamp(&network_id),
+                    ..crate::channel::genesis::create_genesis_block("default", &genesis_config)
+                };
                 if let Err(e) = default_store.write_block(&genesis) {
                     log::error!("Failed to write default channel genesis block: {e}");
                 } else {

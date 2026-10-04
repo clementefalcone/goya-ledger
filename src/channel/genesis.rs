@@ -4,6 +4,15 @@ use crate::channel::config::ChannelConfig;
 use crate::private_data::sha256;
 use crate::storage::traits::Block;
 
+const NETWORK_GENESIS_TIMESTAMPS: [(&str, u64); 1] = [("mainnet", 1_790_258_251)];
+
+pub fn network_genesis_timestamp(network_id: &str) -> u64 {
+    NETWORK_GENESIS_TIMESTAMPS
+        .iter()
+        .find(|(known_network, _)| *known_network == network_id)
+        .map_or(0, |(_, timestamp)| *timestamp)
+}
+
 /// Create the genesis block for a new channel.
 ///
 /// The block has height 0, `parent_hash = [0u8; 32]`, and `proposer = "genesis"`.
@@ -48,6 +57,23 @@ mod tests {
             endorsement_policy: EndorsementPolicy::AnyOf(vec!["org1".to_string()]),
             ..ChannelConfig::default()
         }
+    }
+
+    #[test]
+    fn mainnet_default_genesis_matches_the_production_chain() {
+        let genesis = Block {
+            timestamp: network_genesis_timestamp("mainnet"),
+            ..create_genesis_block("default", &ChannelConfig::default())
+        };
+        assert_eq!(
+            hex::encode(crate::mining::block_hash(&genesis)),
+            "0e1eec13edd44cb64447c1466e19612c17e91c1e6d5990f253dce26806942e6d"
+        );
+    }
+
+    #[test]
+    fn unknown_networks_start_at_timestamp_zero() {
+        assert_eq!(network_genesis_timestamp("testnet"), 0);
     }
 
     #[test]
