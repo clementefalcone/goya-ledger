@@ -438,27 +438,34 @@ pub async fn migrate_did(
 
 // ── Store-backed identity endpoints ──────────────────────────────────────────
 
+#[derive(Debug, serde::Deserialize)]
+pub struct RegisterIdentityRequest {
+    #[serde(flatten)]
+    pub record: crate::storage::traits::IdentityRecord,
+    pub signature: String,
+}
+
 /// POST /api/v1/store/identities — persiste un IdentityRecord en el store.
 #[post("/store/identities")]
 pub async fn store_write_identity(
     state: web::Data<AppState>,
-    body: web::Json<crate::storage::traits::IdentityRecord>,
+    body: web::Json<RegisterIdentityRequest>,
     req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
-    enforce_acl(
-        state.acl_provider.as_deref(),
-        state.policy_store.as_deref(),
-        "peer/Identity",
-        &req,
-    )?;
-    super::validation::validate_store_identity(&body)?;
+    let RegisterIdentityRequest { record, signature } = body.into_inner();
+    super::validation::validate_store_identity(&record)?;
     let trace_id = uuid::Uuid::new_v4().to_string();
     let _channel = channel_id_from_req(&req);
     enforce_channel_membership(&state, _channel, &req)?;
     let store = get_channel_store(&state, _channel)?;
-    validate_new_identity(store.as_ref(), &body)?;
+    validate_new_identity(store.as_ref(), &record)?;
+    verify_owner_signature(
+        &record,
+        &format!("identity:register:{}", record.did),
+        &signature,
+    )?;
     store
-        .write_identity(&body)
+        .write_identity(&record)
         .map_err(|e| ApiError::StorageError {
             reason: e.to_string(),
         })?;
@@ -469,9 +476,9 @@ pub async fn store_write_identity(
             .get("X-Org-Id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("unknown"),
-        Some(format!("did={}", body.did)),
+        Some(format!("did={}", record.did)),
     );
-    Ok(HttpResponse::Created().json(ApiResponse::success(body.into_inner(), trace_id)))
+    Ok(HttpResponse::Created().json(ApiResponse::success(record, trace_id)))
 }
 
 fn validate_new_identity(
@@ -932,6 +939,59 @@ mod tests {
             .read_identity(&owner.did)
             .unwrap()
             .status
+    }
+
+    async fn post_registration(
+        state: &web::Data<AppState>,
+        key: &crate::identity::signing::SoftwareSigningProvider,
+        signer: &crate::identity::signing::SoftwareSigningProvider,
+    ) -> (actix_web::http::StatusCode, String) {
+        use crate::identity::signing::SigningProvider;
+        let public_key = hex::encode(key.public_key());
+        let did = crate::identity::did::did_from_pubkey_hex(&public_key);
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(state.clone())
+                .service(web::scope("/api/v1").service(store_write_identity)),
+        )
+        .await;
+        let req = actix_web::test::TestRequest::post()
+            .uri("/api/v1/store/identities")
+            .set_json(serde_json::json!({
+                "did": did,
+                "public_key": public_key,
+                "created_at": 1,
+                "updated_at": 1,
+                "status": "active",
+                "signature": sign_hex(signer, &format!("identity:register:{did}")),
+            }))
+            .to_request();
+        (actix_web::test::call_service(&app, req).await.status(), did)
+    }
+
+    #[actix_web::test]
+    async fn register_rejects_signature_from_another_key() {
+        let state = web::Data::new(AppState::test_default());
+        let key = crate::identity::signing::SoftwareSigningProvider::generate();
+        let attacker = crate::identity::signing::SoftwareSigningProvider::generate();
+        let (status, did) = post_registration(&state, &key, &attacker).await;
+        assert_eq!(status, 401);
+        assert!(get_channel_store(&state, "default")
+            .unwrap()
+            .read_identity(&did)
+            .is_err());
+    }
+
+    #[actix_web::test]
+    async fn register_with_key_holder_signature_stores_identity() {
+        let state = web::Data::new(AppState::test_default());
+        let key = crate::identity::signing::SoftwareSigningProvider::generate();
+        let (status, did) = post_registration(&state, &key, &key).await;
+        assert_eq!(status, 201);
+        assert!(get_channel_store(&state, "default")
+            .unwrap()
+            .read_identity(&did)
+            .is_ok());
     }
 
     #[actix_web::test]

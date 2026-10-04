@@ -178,15 +178,24 @@ fn p2p_identity_and_credentials_cross_check() {
         .unwrap()
         .as_secs();
 
-    let issuer_key = "11".repeat(32);
-    let subject_key = "22".repeat(32);
+    use rust_bc::identity::signing::{SigningProvider, SoftwareSigningProvider};
+    let issuer_signer = SoftwareSigningProvider::generate();
+    let subject_signer = SoftwareSigningProvider::generate();
+    let issuer_key = hex::encode(issuer_signer.public_key());
+    let subject_key = hex::encode(subject_signer.public_key());
     let issuer_did = rust_bc::identity::did::did_from_pubkey_hex(&issuer_key);
     let subject_did = rust_bc::identity::did::did_from_pubkey_hex(&subject_key);
+    let register_signature = |key: &SoftwareSigningProvider, did: &str| {
+        hex::encode(
+            key.sign(format!("identity:register:{did}").as_bytes())
+                .unwrap(),
+        )
+    };
 
     // Create issuer DID
     let issuer = post_json(
         &node1.api_url("/store/identities"),
-        serde_json::json!({"did": issuer_did, "public_key": issuer_key, "status": "active", "created_at": now, "updated_at": now}),
+        serde_json::json!({"did": issuer_did, "public_key": issuer_key, "status": "active", "created_at": now, "updated_at": now, "signature": register_signature(&issuer_signer, &issuer_did)}),
     );
     assert_eq!(
         issuer["status"], "Success",
@@ -196,7 +205,7 @@ fn p2p_identity_and_credentials_cross_check() {
     // Create subject DID
     let subject = post_json(
         &node1.api_url("/store/identities"),
-        serde_json::json!({"did": subject_did, "public_key": subject_key, "status": "active", "created_at": now, "updated_at": now}),
+        serde_json::json!({"did": subject_did, "public_key": subject_key, "status": "active", "created_at": now, "updated_at": now, "signature": register_signature(&subject_signer, &subject_did)}),
     );
     assert_eq!(
         subject["status"], "Success",

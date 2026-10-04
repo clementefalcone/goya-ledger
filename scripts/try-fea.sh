@@ -56,15 +56,17 @@ ok "Attorney: ${attorney_did:0:30}..."
 step "Registering identities"
 now=$(date +%s)
 
+grantor_reg_sig=$($SIGN_BIN sign ml-dsa-65 "$grantor_sk" "identity:register:$grantor_did" | jq_ "print(d['signature'])")
 curl -sf -X POST "$API/store/identities" \
   -H "Content-Type: application/json" \
-  -d "{\"did\":\"$grantor_did\",\"public_key\":\"$grantor_pk\",\"created_at\":$now,\"updated_at\":$now,\"status\":\"active\"}" >/dev/null \
+  -d "{\"did\":\"$grantor_did\",\"public_key\":\"$grantor_pk\",\"created_at\":$now,\"updated_at\":$now,\"status\":\"active\",\"signature\":\"$grantor_reg_sig\"}" >/dev/null \
   || fail "Failed to register grantor"
 ok "Grantor registered"
 
+attorney_reg_sig=$($SIGN_BIN sign ml-dsa-65 "$attorney_sk" "identity:register:$attorney_did" | jq_ "print(d['signature'])")
 curl -sf -X POST "$API/store/identities" \
   -H "Content-Type: application/json" \
-  -d "{\"did\":\"$attorney_did\",\"public_key\":\"$attorney_pk\",\"created_at\":$now,\"updated_at\":$now,\"status\":\"active\"}" >/dev/null \
+  -d "{\"did\":\"$attorney_did\",\"public_key\":\"$attorney_pk\",\"created_at\":$now,\"updated_at\":$now,\"status\":\"active\",\"signature\":\"$attorney_reg_sig\"}" >/dev/null \
   || fail "Failed to register attorney"
 ok "Attorney registered"
 

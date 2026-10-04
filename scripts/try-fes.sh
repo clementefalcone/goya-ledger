@@ -28,11 +28,12 @@ step() { echo -e "\n${B}── $1${N}"; }
 field() { python3 -c "import sys,json; print(json.load(sys.stdin)$1)"; }
 
 register() {
-  local did="$1" pk="$2" now
+  local did="$1" pk="$2" sk="$3" now sig
   now=$(date +%s)
+  sig=$($SIGN_BIN sign ed25519 "$sk" "identity:register:$did" | field "['signature']")
   curl -sf -X POST "$API/store/identities" \
     -H "Content-Type: application/json" \
-    -d "{\"did\":\"$did\",\"public_key\":\"$pk\",\"created_at\":$now,\"updated_at\":$now,\"status\":\"active\"}" >/dev/null
+    -d "{\"did\":\"$did\",\"public_key\":\"$pk\",\"created_at\":$now,\"updated_at\":$now,\"status\":\"active\",\"signature\":\"$sig\"}" >/dev/null
 }
 
 sign_body() {
@@ -59,9 +60,9 @@ bob_did=$(echo "$bob_kp" | field "['did']")
 bob_pk=$(echo "$bob_kp" | field "['public_key']")
 bob_sk=$(echo "$bob_kp" | field "['private_key']")
 
-register "$alice_did" "$alice_pk" || fail "Failed to register Alice"
+register "$alice_did" "$alice_pk" "$alice_sk" || fail "Failed to register Alice"
 ok "Alice: ${alice_did:0:30}..."
-register "$bob_did" "$bob_pk" || fail "Failed to register Bob"
+register "$bob_did" "$bob_pk" "$bob_sk" || fail "Failed to register Bob"
 ok "Bob:   ${bob_did:0:30}..."
 
 # ── 3. Deploy NDA contract ──────────────────────────────────

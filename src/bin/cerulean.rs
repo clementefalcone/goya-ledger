@@ -10,7 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use pqc_crypto_module::legacy::ed25519::{SigningKey, VerifyingKey};
+use pqc_crypto_module::legacy::ed25519::{Signer, SigningKey, VerifyingKey};
 use pqc_crypto_module::legacy::rng::OsRng;
 use pqc_crypto_module::legacy::sha256::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
@@ -147,7 +147,8 @@ fn cmd_init(node: &str, name: &str, org: &str) -> Result<(), String> {
         "public_key": public_hex,
         "created_at": now_ts,
         "updated_at": now_ts,
-        "status": "active"
+        "status": "active",
+        "signature": hex::encode(signing_key.sign(format!("identity:register:{did}").as_bytes()).to_bytes())
     });
 
     let resp = client
@@ -198,7 +199,6 @@ fn cmd_sign(node: &str, file: &PathBuf, description: Option<&str>) -> Result<(),
     let hash_hex = hex::encode(file_hash);
 
     // Sign the hash with private key
-    use pqc_crypto_module::legacy::ed25519::Signer;
     let signature = signing_key.sign(&file_hash[..]);
     let sig_hex = hex::encode(signature.to_bytes());
 

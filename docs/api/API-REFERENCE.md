@@ -329,7 +329,7 @@ Fetch DID document.
 
 ### POST /store/identities
 
-Persist identity record.
+Persist identity record. `did` must be derived from `public_key`, and `signature` must be the key holder's signature over `identity:register:{did}`. Wrong signature returns 401.
 
 ### GET /store/identities/{did}
 
