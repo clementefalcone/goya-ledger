@@ -8,19 +8,19 @@
 #
 # Usage:
 #   ./scripts/try-fea.sh                    # default: localhost:8080
-#   ./scripts/try-fea.sh https://goya-node.fly.dev
+#   ./scripts/try-fea.sh http://127.0.0.1:8080
 #
-# Requires: goya-sign binary (cargo build --release --bin goya-sign)
+# Requires: goya-sign binary (cargo build --bin goya-sign)
 # ─────────────────────────────────────────────────────────────
 set -euo pipefail
 
 NODE="${1:-http://localhost:8080}"
 API="$NODE/api/v1"
-SIGN_BIN="./target/release/goya-sign"
+SIGN_BIN="${SIGN_BIN:-./target/debug/goya-sign}"
 
 command -v curl >/dev/null || { echo "curl required"; exit 1; }
 command -v python3 >/dev/null || { echo "python3 required"; exit 1; }
-[ -x "$SIGN_BIN" ] || { echo "goya-sign not found. Run: cargo build --release --bin goya-sign"; exit 1; }
+[ -x "$SIGN_BIN" ] || { echo "goya-sign not found. Run: cargo build --bin goya-sign"; exit 1; }
 
 G='\033[0;32m'; R='\033[0;31m'; B='\033[1m'; C='\033[0;36m'; N='\033[0m'
 ok()   { echo -e "${G}✓${N} $1"; }
@@ -41,16 +41,16 @@ step "Generating ML-DSA-65 keypairs (FIPS 204)"
 grantor_kp=$($SIGN_BIN keygen ml-dsa-65)
 grantor_pk=$(echo "$grantor_kp" | jq_ "print(d['public_key'])")
 grantor_sk=$(echo "$grantor_kp" | jq_ "print(d['private_key'])")
-grantor_did="did:goya:${grantor_pk:0:16}"
+grantor_did=$(echo "$grantor_kp" | jq_ "print(d['did'])")
 info "Grantor PK: ${grantor_pk:0:24}... (1952 bytes)"
-ok "Grantor: $grantor_did"
+ok "Grantor: ${grantor_did:0:30}..."
 
 attorney_kp=$($SIGN_BIN keygen ml-dsa-65)
 attorney_pk=$(echo "$attorney_kp" | jq_ "print(d['public_key'])")
 attorney_sk=$(echo "$attorney_kp" | jq_ "print(d['private_key'])")
-attorney_did="did:goya:${attorney_pk:0:16}"
+attorney_did=$(echo "$attorney_kp" | jq_ "print(d['did'])")
 info "Attorney PK: ${attorney_pk:0:24}... (1952 bytes)"
-ok "Attorney: $attorney_did"
+ok "Attorney: ${attorney_did:0:30}..."
 
 # ── 3. Register DIDs ────────────────────────────────────────
 step "Registering identities"
@@ -145,6 +145,18 @@ print(json.dumps({
 }))
 ")
 
+forged_body=$(echo "$sign_grantor_body" | python3 -c "
+import sys, json
+body = json.load(sys.stdin)
+body['public_key'] = '$attorney_pk'
+body['signature'] = '$($SIGN_BIN sign ml-dsa-65 "$attorney_sk" "$grantor_payload" | jq_ "print(d['signature'])")'
+print(json.dumps(body))
+")
+forged_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/lexchain/$contract_id/sign" \
+  -H "Content-Type: application/json" -d "$forged_body")
+[ "$forged_code" = "400" ] || fail "Attorney impersonating grantor not rejected (HTTP $forged_code)"
+ok "Attorney signing as grantor with own key rejected (HTTP $forged_code)"
+
 sign_grantor_resp=$(curl -sf -X POST "$API/lexchain/$contract_id/sign" \
   -H "Content-Type: application/json" \
   -d "$sign_grantor_body") || fail "Grantor sign failed: $(curl -s -X POST "$API/lexchain/$contract_id/sign" -H "Content-Type: application/json" -d "$sign_grantor_body")"
@@ -216,7 +228,7 @@ for p in c['parties']:
     env = p.get('envelope') or {}
     algo = env.get('signature_algorithm', '—')
     bio = len(env.get('biometric_evidence', []))
-    print(f'    {p[\"role\"]:12} {p[\"did\"]:30} algo={algo}  biometrics={bio}')
+    print(f'    {p[\"role\"]:12} {p[\"did\"][:30]}... algo={algo}  biometrics={bio}')
 if c.get('tsa_token'):
     t = c['tsa_token']['tst_info']
     print(f'  TSA:       serial={t[\"serial_number\"]}  time={t[\"gen_time\"]}')

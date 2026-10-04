@@ -44,6 +44,7 @@ fn keygen(algo: &str) {
                 "{}",
                 serde_json::json!({
                     "algorithm": "Ed25519",
+                    "did": rust_bc::identity::did::did_from_pubkey_hex(&hex::encode(pk.to_bytes())),
                     "public_key": hex::encode(pk.to_bytes()),
                     "private_key": hex::encode(sk.to_bytes()),
                 })
@@ -55,6 +56,7 @@ fn keygen(algo: &str) {
                 "{}",
                 serde_json::json!({
                     "algorithm": "ML-DSA-65",
+                    "did": rust_bc::identity::did::did_from_pubkey_hex(&hex::encode(kp.public_key.as_bytes())),
                     "public_key": hex::encode(kp.public_key.as_bytes()),
                     "private_key": hex::encode(kp.private_key.as_bytes()),
                 })
