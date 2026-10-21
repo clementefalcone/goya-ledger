@@ -10,11 +10,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) · Versioning: 
 - `POST /transactions` verifies the sender's signature over `transfer:{from}:{to}:{amount}:{nonce}` against the public key in the identity registry; invalid signature → 401, unregistered DID → 404
 - Nonce is mandatory and must equal the account's next signed-operation count (committed + pending); replays → 409. `GET /accounts/{did}` returns that nonce
 - Minting from `from="0"` requires a signature from the DID in `NOTA_ISSUER_DID`; disabled when unset (403)
-- `POST /blocks` requires the `peer/Propose` ACL and admits every transaction through the same signed validation; the reward goes to `auto-miner`
+- `POST /blocks` requires the `peer/Propose` ACL and admits every transaction through the same signed validation
+- Block rewards credit the unspendable `block-rewards` account on every mining path; `POST /mine` no longer takes `miner_address` and no longer runs PoS validator selection or airdrop tracking for a caller-chosen address
 - `POST /store/transactions` rejects transactions that move value or carry a payload
 
 ### Added
 - Time-locked savings: `POST /savings/lock` (signed `savings_lock:{did}:{amount}:{unlock_at}:{nonce}`) moves funds to `savings:{lock_id}`; `POST /savings/release` (signed `savings_release:{did}:{lock_id}:{nonce}`) returns them to the owner only after `unlock_at` by node clock. Locks are confirmed transactions and persist in RocksDB
+- `GET /savings/{did}` lists a DID's locks with `lock_id`, `amount`, `locked_amount`, `unlock_at`, `locked_at` and `status` (`pending`, `locked`, `unlockable`, `released`)
 - `TxPayload::SignedTransfer`, `SavingsLock`, `SavingsRelease`
 
 ### Changed
