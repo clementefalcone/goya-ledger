@@ -38,6 +38,12 @@ impl TransactionPool {
 
     /// Add a transaction to the pool. Rejects duplicates and full pool.
     pub fn add(&mut self, tx: Transaction) -> Result<(), String> {
+        if tx.amount > 0 {
+            return Err(format!(
+                "transaction {} moves {} without a balance check; use add_checked",
+                tx.id, tx.amount
+            ));
+        }
         if self.transactions.len() >= self.max_size {
             return Err("Mempool full".to_string());
         }
@@ -135,8 +141,8 @@ mod tests {
     #[test]
     fn add_and_drain() {
         let mut pool = TransactionPool::new();
-        pool.add(sample_tx("tx1", "alice", "bob", 10)).unwrap();
-        pool.add(sample_tx("tx2", "bob", "carol", 5)).unwrap();
+        pool.add(sample_tx("tx1", "alice", "bob", 0)).unwrap();
+        pool.add(sample_tx("tx2", "bob", "carol", 0)).unwrap();
         assert_eq!(pool.len(), 2);
 
         let batch = pool.drain_for_block(1);
@@ -145,16 +151,23 @@ mod tests {
     }
 
     #[test]
+    fn unchecked_add_rejects_value_transfers() {
+        let mut pool = TransactionPool::new();
+        assert!(pool.add(sample_tx("tx1", "alice", "bob", 1)).is_err());
+        assert!(pool.is_empty());
+    }
+
+    #[test]
     fn rejects_duplicate() {
         let mut pool = TransactionPool::new();
-        pool.add(sample_tx("tx1", "alice", "bob", 10)).unwrap();
-        assert!(pool.add(sample_tx("tx1", "alice", "bob", 10)).is_err());
+        pool.add(sample_tx("tx1", "alice", "bob", 0)).unwrap();
+        assert!(pool.add(sample_tx("tx1", "alice", "bob", 0)).is_err());
     }
 
     #[test]
     fn remove_by_id() {
         let mut pool = TransactionPool::new();
-        pool.add(sample_tx("tx1", "alice", "bob", 10)).unwrap();
+        pool.add(sample_tx("tx1", "alice", "bob", 0)).unwrap();
         assert!(pool.remove("tx1"));
         assert!(pool.is_empty());
         assert!(!pool.remove("tx1"));
@@ -166,8 +179,8 @@ mod tests {
             transactions: Vec::new(),
             max_size: 1,
         };
-        pool.add(sample_tx("tx1", "a", "b", 1)).unwrap();
-        assert!(pool.add(sample_tx("tx2", "a", "b", 1)).is_err());
+        pool.add(sample_tx("tx1", "a", "b", 0)).unwrap();
+        assert!(pool.add(sample_tx("tx2", "a", "b", 0)).is_err());
     }
 
     #[test]
@@ -193,9 +206,9 @@ mod tests {
     #[test]
     fn with_custom_max_size() {
         let mut pool = TransactionPool::with_max_size(2);
-        pool.add(sample_tx("tx1", "a", "b", 1)).unwrap();
-        pool.add(sample_tx("tx2", "a", "b", 1)).unwrap();
-        assert!(pool.add(sample_tx("tx3", "a", "b", 1)).is_err());
+        pool.add(sample_tx("tx1", "a", "b", 0)).unwrap();
+        pool.add(sample_tx("tx2", "a", "b", 0)).unwrap();
+        assert!(pool.add(sample_tx("tx3", "a", "b", 0)).is_err());
         assert_eq!(pool.max_size(), 2);
     }
 

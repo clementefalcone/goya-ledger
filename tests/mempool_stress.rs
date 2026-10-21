@@ -24,12 +24,12 @@ fn backpressure_rejects_at_capacity() {
     let mut pool = TransactionPool::with_max_size(max);
 
     for i in 0..max {
-        pool.add(make_tx(&format!("tx-{i}"), "alice", "bob", 1))
+        pool.add(make_tx(&format!("tx-{i}"), "alice", "bob", 0))
             .unwrap();
     }
     assert_eq!(pool.len(), max);
 
-    let rejected = pool.add(make_tx("tx-overflow", "alice", "bob", 1));
+    let rejected = pool.add(make_tx("tx-overflow", "alice", "bob", 0));
     assert!(rejected.is_err());
     assert!(rejected.unwrap_err().contains("full"));
     assert_eq!(pool.len(), max);
@@ -53,7 +53,7 @@ fn concurrent_add_no_lost_transactions() {
                         &format!("tx-{t}-{i}"),
                         &format!("sender-{t}"),
                         "recipient",
-                        1,
+                        0,
                     );
                     let mut p = pool.lock().unwrap_or_else(|e| e.into_inner());
                     match p.add(tx) {
@@ -98,7 +98,7 @@ fn concurrent_add_no_duplicates() {
                         &format!("tx-{t}-{i}"),
                         &format!("sender-{t}"),
                         "recipient",
-                        1,
+                        0,
                     );
                     let mut p = pool.lock().unwrap_or_else(|e| e.into_inner());
                     let _ = p.add(tx);
@@ -124,7 +124,7 @@ fn drain_under_contention() {
     for i in 0..1000 {
         pool.lock()
             .unwrap()
-            .add(make_tx(&format!("seed-{i}"), "alice", "bob", 1))
+            .add(make_tx(&format!("seed-{i}"), "alice", "bob", 0))
             .unwrap();
     }
 
@@ -134,7 +134,7 @@ fn drain_under_contention() {
     let adder = std::thread::spawn(move || {
         let mut added = 0u64;
         for i in 0..500 {
-            let tx = make_tx(&format!("new-{i}"), "carol", "dave", 1);
+            let tx = make_tx(&format!("new-{i}"), "carol", "dave", 0);
             let mut p = pool_add.lock().unwrap_or_else(|e| e.into_inner());
             if p.add(tx).is_ok() {
                 added += 1;
@@ -220,28 +220,28 @@ fn saturate_then_drain_then_refill() {
     let mut pool = TransactionPool::with_max_size(max);
 
     for i in 0..max {
-        pool.add(make_tx(&format!("batch1-{i}"), "a", "b", 1))
+        pool.add(make_tx(&format!("batch1-{i}"), "a", "b", 0))
             .unwrap();
     }
-    assert!(pool.add(make_tx("overflow", "a", "b", 1)).is_err());
+    assert!(pool.add(make_tx("overflow", "a", "b", 0)).is_err());
 
     let drained = pool.drain_for_block(max);
     assert_eq!(drained.len(), max);
     assert!(pool.is_empty());
 
     for i in 0..max {
-        pool.add(make_tx(&format!("batch2-{i}"), "a", "b", 1))
+        pool.add(make_tx(&format!("batch2-{i}"), "a", "b", 0))
             .unwrap();
     }
     assert_eq!(pool.len(), max);
-    assert!(pool.add(make_tx("overflow2", "a", "b", 1)).is_err());
+    assert!(pool.add(make_tx("overflow2", "a", "b", 0)).is_err());
 }
 
 #[test]
 fn drain_more_than_available() {
     let mut pool = TransactionPool::with_max_size(100);
     for i in 0..5 {
-        pool.add(make_tx(&format!("tx-{i}"), "a", "b", 1)).unwrap();
+        pool.add(make_tx(&format!("tx-{i}"), "a", "b", 0)).unwrap();
     }
     let drained = pool.drain_for_block(999);
     assert_eq!(drained.len(), 5);
@@ -255,7 +255,7 @@ fn remove_under_contention() {
     for i in 0..1000 {
         pool.lock()
             .unwrap()
-            .add(make_tx(&format!("tx-{i}"), "alice", "bob", 1))
+            .add(make_tx(&format!("tx-{i}"), "alice", "bob", 0))
             .unwrap();
     }
 
@@ -276,7 +276,7 @@ fn remove_under_contention() {
     let adder = std::thread::spawn(move || {
         let mut added = 0u64;
         for i in 0..500 {
-            let tx = make_tx(&format!("fresh-{i}"), "carol", "dave", 1);
+            let tx = make_tx(&format!("fresh-{i}"), "carol", "dave", 0);
             let mut p = pool_add.lock().unwrap_or_else(|e| e.into_inner());
             if p.add(tx).is_ok() {
                 added += 1;

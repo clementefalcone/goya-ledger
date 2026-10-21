@@ -239,10 +239,7 @@ impl ApiRoutes {
             .service(inference::get_claim)
             .service(inference::list_models);
         // Staking (validator registration, unstaking, queries)
-        cfg.service(staking::stake)
-            .service(staking::request_unstake)
-            .service(staking::complete_unstake)
-            .service(staking::get_validators)
+        cfg.service(staking::get_validators)
             .service(staking::get_validator)
             .service(staking::get_my_stake);
         // Tokenomics (supply, fees, inflation)
@@ -343,8 +340,7 @@ impl ApiRoutes {
             .service(contracts::get_nft_tokens_of_owner)
             .service(contracts::get_nft_token_by_index);
         // Airdrop
-        cfg.service(airdrop::claim_airdrop)
-            .service(airdrop::get_node_tracking)
+        cfg.service(airdrop::get_node_tracking)
             .service(airdrop::get_airdrop_statistics)
             .service(airdrop::get_eligible_nodes)
             .service(airdrop::get_eligibility_info)
