@@ -11,6 +11,8 @@ use crate::tokenomics::economics::EconomicsState;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub const BLOCK_REWARD_ACCOUNT: &str = "block-rewards";
+
 /// Configuration for the mining service.
 #[derive(Debug, Clone)]
 pub struct MiningConfig {
@@ -104,7 +106,7 @@ impl MiningService {
             block_height: new_height,
             timestamp: now(),
             input_did: "coinbase".to_string(),
-            output_recipient: miner_address.to_string(),
+            output_recipient: BLOCK_REWARD_ACCOUNT.to_string(),
             amount: total_reward,
             state: "confirmed".to_string(),
             fee: 0,
@@ -263,6 +265,17 @@ mod tests {
         let block = store.read_block(0).unwrap();
         assert_eq!(block.proposer, "miner1");
         assert_eq!(block.transactions.len(), 1); // coinbase only
+    }
+
+    #[test]
+    fn block_reward_never_credits_the_proposer() {
+        let store = Arc::new(MemoryStore::new());
+        let service = MiningService::new(store.clone(), MiningConfig::default());
+
+        service.mine_block("miner1", vec![]).unwrap();
+
+        assert_eq!(store.calculate_balance("miner1").unwrap(), 0);
+        assert!(store.calculate_balance(BLOCK_REWARD_ACCOUNT).unwrap() > 0);
     }
 
     #[test]

@@ -105,7 +105,6 @@ pub async fn sync_blockchain(
 
 #[derive(Deserialize)]
 pub struct MineBlockRequest {
-    pub miner_address: String,
     #[serde(default)]
     pub max_transactions: Option<usize>,
 }
@@ -115,8 +114,6 @@ struct MineResponse {
     hash: String,
     reward: u64,
     transactions_count: usize,
-    validator: Option<String>,
-    consensus: String,
 }
 
 /// POST /api/v1/mine
@@ -166,13 +163,8 @@ pub async fn mine_block(
         pool.drain_for_block(max_txs)
     };
 
-    // PoS validator selection
-    let validator_address = state.staking_manager.select_validator(&body.miner_address);
-    let address_to_use = validator_address.as_deref().unwrap_or(&body.miner_address);
-
-    // Mine via MiningService (writes block + txs to BlockStore)
     let height = mining_service
-        .mine_block(address_to_use, pool_txs)
+        .mine_block("auto-miner", pool_txs)
         .map_err(|e| ApiError::InternalError {
             reason: format!("Mining error: {e}"),
         })?;
@@ -187,30 +179,6 @@ pub async fn mine_block(
             econ.total_minted,
         )
     };
-
-    // Staking: record validation
-    if let Some(ref validator_addr) = validator_address {
-        let block_hash = format!("block-{height}");
-        if state
-            .staking_manager
-            .detect_and_slash_double_sign(validator_addr, height, &block_hash)
-        {
-            eprintln!("⚠️  Validation not recorded due to double-sign slashing");
-        } else {
-            state
-                .staking_manager
-                .record_validation(validator_addr, height, reward);
-        }
-    }
-
-    // Airdrop tracking
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    state
-        .airdrop_manager
-        .record_block_validation(address_to_use, height, now);
 
     // P2P broadcast via ordered block
     if let Some(node) = &state.node {
@@ -239,16 +207,10 @@ pub async fn mine_block(
         0
     };
 
-    let consensus = if validator_address.is_some() {
-        "PoS"
-    } else {
-        "PoW"
-    };
-
     crate::audit::emit_if_present(
         &state.audit_store,
         crate::audit::AuditAction::BlockMined,
-        &body.miner_address,
+        "auto-miner",
         Some(format!("height={height}")),
     );
 
@@ -257,8 +219,6 @@ pub async fn mine_block(
             hash: format!("block-{height}"),
             reward,
             transactions_count: tx_count,
-            validator: validator_address,
-            consensus: consensus.to_string(),
         },
         trace,
     )))
