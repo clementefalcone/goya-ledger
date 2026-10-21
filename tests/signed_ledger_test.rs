@@ -470,3 +470,102 @@ async fn savings_lock_survives_node_restart() {
     .await;
     assert_eq!(status, 403, "{body}");
 }
+
+#[actix_web::test]
+async fn mine_never_pays_the_caller() {
+    let alice = ed25519_account();
+    let ledger = ledger_with_funded(&alice, 100);
+    let (status, body) = post(
+        ledger.state,
+        "/api/v1/mine",
+        serde_json::json!({ "miner_address": "attacker" }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(ledger.store.calculate_balance("attacker").unwrap(), 0);
+}
+
+async fn list_savings(state: AppState, did: &str) -> serde_json::Value {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .configure(ApiRoutes::configure),
+    )
+    .await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/api/v1/savings/{did}"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    test::read_body_json(resp).await
+}
+
+#[actix_web::test]
+async fn savings_listing_reports_each_lock_status() {
+    let alice = ed25519_account();
+    let ledger = ledger_with_funded(&alice, 100);
+    let lock = |id: &str, amount: u64, unlock_at: u64, nonce: u64| {
+        committed_tx(
+            id,
+            &alice.did,
+            &format!("savings:{id}"),
+            amount,
+            Some(TxPayload::SavingsLock { unlock_at, nonce }),
+        )
+    };
+    ledger
+        .store
+        .write_transaction(&lock("locked", 10, FAR_FUTURE, 0))
+        .unwrap();
+    ledger
+        .store
+        .write_transaction(&lock("matured", 20, 1, 1))
+        .unwrap();
+    ledger
+        .store
+        .write_transaction(&lock("spent", 30, 1, 2))
+        .unwrap();
+    ledger
+        .store
+        .write_transaction(&committed_tx(
+            "spent-release",
+            "savings:spent",
+            &alice.did,
+            30,
+            Some(TxPayload::SavingsRelease {
+                owner: alice.did.clone(),
+                lock_id: "spent".to_string(),
+                nonce: 3,
+            }),
+        ))
+        .unwrap();
+    let (status, body) = post(
+        ledger.state.clone(),
+        "/api/v1/savings/lock",
+        lock_body(&alice, 5, 4),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let listing = list_savings(ledger.state, &alice.did).await;
+    let status_of = |lock_id: &str| {
+        listing["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["lock_id"] == lock_id)
+            .map(|entry| (entry["status"].clone(), entry["locked_amount"].clone()))
+            .unwrap()
+    };
+    assert_eq!(listing["data"].as_array().unwrap().len(), 4);
+    assert_eq!(status_of("locked"), ("locked".into(), 10.into()));
+    assert_eq!(status_of("matured"), ("unlockable".into(), 20.into()));
+    assert_eq!(status_of("spent"), ("released".into(), 0.into()));
+    assert_eq!(
+        status_of(body["data"]["id"].as_str().unwrap()),
+        ("pending".into(), 5.into())
+    );
+}

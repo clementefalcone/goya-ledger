@@ -120,6 +120,7 @@ impl ApiRoutes {
         cfg.service(transactions::create_transaction)
             .service(savings::lock_savings)
             .service(savings::release_savings)
+            .service(savings::list_savings)
             .service(transactions::get_mempool)
             .service(transactions::get_tx_by_id)
             .service(blocks::explorer_list_blocks)

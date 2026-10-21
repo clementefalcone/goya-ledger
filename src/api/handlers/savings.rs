@@ -1,5 +1,5 @@
-use actix_web::{post, web, HttpRequest, HttpResponse};
-use serde::Deserialize;
+use actix_web::{get, post, web, HttpRequest, HttpResponse};
+use serde::{Deserialize, Serialize};
 
 use crate::api::errors::{enforce_acl, ApiError, ApiResponse, ApiResult};
 use crate::api::handlers::channels::get_channel_store;
@@ -22,6 +22,25 @@ pub struct SavingsReleaseRequest {
     pub lock_id: String,
     pub nonce: u64,
     pub signature: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavingsStatus {
+    Pending,
+    Locked,
+    Unlockable,
+    Released,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SavingsEntry {
+    pub lock_id: String,
+    pub amount: u64,
+    pub locked_amount: u64,
+    pub unlock_at: u64,
+    pub locked_at: u64,
+    pub status: SavingsStatus,
 }
 
 fn vault_address(lock_id: &str) -> String {
@@ -163,4 +182,57 @@ pub async fn release_savings(
     let tx = admit_signed_transaction(&state, operation, tx)?;
     let trace_id = uuid::Uuid::new_v4().to_string();
     Ok(HttpResponse::Created().json(ApiResponse::success(tx, trace_id)))
+}
+
+fn savings_entry(lock: &Transaction, locked_amount: u64, is_pending: bool) -> Option<SavingsEntry> {
+    let Some(TxPayload::SavingsLock { unlock_at, .. }) = lock.payload else {
+        return None;
+    };
+    let status = match (is_pending, locked_amount, now_secs() >= unlock_at) {
+        (true, _, _) => SavingsStatus::Pending,
+        (false, 0, _) => SavingsStatus::Released,
+        (false, _, true) => SavingsStatus::Unlockable,
+        (false, _, false) => SavingsStatus::Locked,
+    };
+    Some(SavingsEntry {
+        lock_id: lock.id.clone(),
+        amount: lock.amount,
+        locked_amount,
+        unlock_at,
+        locked_at: lock.timestamp,
+        status,
+    })
+}
+
+#[get("/savings/{did}")]
+pub async fn list_savings(
+    state: web::Data<AppState>,
+    did: web::Path<String>,
+) -> ApiResult<HttpResponse> {
+    let store = get_channel_store(&state, "default")?;
+    let owned_by_did = |tx: &&Transaction| tx.input_did == did.as_str();
+    let mut entries = store
+        .transactions_for_address(&did)
+        .map_err(|e| ApiError::StorageError {
+            reason: format!("transactions of {did}: {e}"),
+        })?
+        .iter()
+        .filter(owned_by_did)
+        .filter_map(|lock| {
+            let locked = store.calculate_balance(&vault_address(&lock.id)).ok()?;
+            savings_entry(lock, locked, false)
+        })
+        .collect::<Vec<_>>();
+    let pending = state
+        .tx_pool
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .all()
+        .iter()
+        .filter(owned_by_did)
+        .filter_map(|lock| savings_entry(lock, lock.amount, true))
+        .collect::<Vec<_>>();
+    entries.extend(pending);
+    let trace_id = uuid::Uuid::new_v4().to_string();
+    Ok(HttpResponse::Ok().json(ApiResponse::success(entries, trace_id)))
 }
