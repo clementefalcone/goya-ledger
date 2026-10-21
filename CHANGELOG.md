@@ -13,6 +13,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) · Versioning: 
 - `POST /blocks` requires the `peer/Propose` ACL and admits every transaction through the same signed validation
 - Block rewards credit the unspendable `block-rewards` account on every mining path; `POST /mine` no longer takes `miner_address` and no longer runs PoS validator selection or airdrop tracking for a caller-chosen address
 - `POST /store/transactions` rejects transactions that move value or carry a payload
+- Removed `POST /staking/{stake,unstake,complete-unstake}` and `POST /airdrop/claim`, which moved balances without the owner's signature; the unchecked mempool `add` rejects any transaction with `amount > 0`
 - `POST /transactions` and `POST /savings/{lock,release}` are authorized by the owner's signature, not the `peer/Propose` mTLS ACL, so clients can call them in strict ACL mode; operator endpoints keep the ACL
 
 ### Added
