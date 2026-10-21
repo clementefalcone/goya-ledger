@@ -20,7 +20,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) · Versioning: 
 - Time-locked savings: `POST /savings/lock` (signed `savings_lock:{did}:{amount}:{unlock_at}:{nonce}`) moves funds to `savings:{lock_id}`; `POST /savings/release` (signed `savings_release:{did}:{lock_id}:{nonce}`) returns them to the owner only after `unlock_at` by node clock. Locks are confirmed transactions and persist in RocksDB
 - `GET /savings/{did}` lists a DID's locks with `lock_id`, `amount`, `locked_amount`, `unlock_at`, `locked_at` and `status` (`pending`, `locked`, `unlockable`, `released`)
 - `TxPayload::SignedTransfer`, `SavingsLock`, `SavingsRelease`
-- `deploy/vps/nota-issuer`: generates the ML-DSA-65 issuer seed on the host, registers it and mints (`node issuer.mjs keygen|register|mint <did> <amount>`)
+- `scripts/ledger-account`: ML-DSA-65 account tool (`SEED_PATH=… node account.mjs keygen|did|register|mint|transfer`); seeds are generated on the host (mode 600, never overwritten). `scripts/e2e-test.sh` uses it for signed transfers; mint-dependent checks run when `E2E_ISSUER_SEED` points at the seed of node1's `NOTA_ISSUER_DID`
 
 ### Changed
 - `/transactions` no longer uses the legacy validator, whose content-hash replay check rejected repeated identical transfers and whose pending counter capped accounts at 100 transactions
