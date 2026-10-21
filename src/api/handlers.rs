@@ -48,6 +48,7 @@ pub mod proposals;
 pub mod ra;
 pub mod registry;
 pub mod regulatory;
+pub mod savings;
 pub mod security_txt;
 pub mod snapshots;
 pub mod staking;

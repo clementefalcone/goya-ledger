@@ -1,42 +1,39 @@
+use crate::api::errors::ApiError;
+use crate::api::handlers::transactions::admit_transfer;
 use crate::api::models::CreateBlockRequest;
 use crate::app_state::AppState;
+use crate::storage::traits::Transaction;
 
-/// Builds transactions, mines a block via MiningService, broadcasts.
-/// Returns the new block height as string on success.
-pub fn try_create_block(state: &AppState, req: &CreateBlockRequest) -> Result<String, String> {
+fn withdraw_from_pool(state: &AppState, admitted: Vec<Transaction>) -> Vec<Transaction> {
+    let mut pool = state.tx_pool.lock().unwrap_or_else(|e| e.into_inner());
+    admitted
+        .into_iter()
+        .filter(|tx| pool.remove(&tx.id))
+        .collect()
+}
+
+pub fn try_create_block(state: &AppState, req: &CreateBlockRequest) -> Result<String, ApiError> {
     let mining_service = state
         .mining_service
         .as_ref()
-        .ok_or_else(|| "MiningService not available".to_string())?;
+        .ok_or_else(|| ApiError::InternalError {
+            reason: "MiningService not available".to_string(),
+        })?;
 
-    let txs: Vec<crate::storage::traits::Transaction> = req
-        .transactions
-        .iter()
-        .map(|tx_req| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            crate::storage::traits::Transaction {
-                id: uuid::Uuid::new_v4().to_string(),
-                block_height: 0,
-                timestamp: now,
-                input_did: tx_req.from.clone(),
-                output_recipient: tx_req.to.clone(),
-                amount: tx_req.amount,
-                state: "pending".to_string(),
-                fee: 0,
-                payload: None,
+    let mut admitted = Vec::new();
+    for tx_req in &req.transactions {
+        match admit_transfer(state, tx_req) {
+            Ok(tx) => admitted.push(tx),
+            Err(e) => {
+                withdraw_from_pool(state, admitted);
+                return Err(e);
             }
-        })
-        .collect();
+        }
+    }
 
-    let miner = req
-        .transactions
-        .first()
-        .map(|t| t.from.as_str())
-        .unwrap_or("system");
-
-    let height = mining_service.mine_block(miner, txs)?;
+    let txs = withdraw_from_pool(state, admitted);
+    let height = mining_service
+        .mine_block("auto-miner", txs)
+        .map_err(|reason| ApiError::InternalError { reason })?;
     Ok(format!("block-{height}"))
 }

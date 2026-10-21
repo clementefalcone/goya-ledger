@@ -7,13 +7,11 @@ pub struct CreateTransactionRequest {
     pub from: String,
     pub to: String,
     pub amount: u64,
-    #[serde(default)]
-    pub nonce: Option<u64>,
+    pub nonce: u64,
     #[serde(default)]
     pub fee: Option<u64>,
     pub data: Option<String>,
-    #[serde(default)]
-    pub signature: Option<String>,
+    pub signature: String,
 }
 
 /// Request body for `POST /api/v1/blocks`.

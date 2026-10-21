@@ -8,8 +8,8 @@ use crate::api::handlers::{
     gateway, governance, governance_entities, identity, inference, intelligence, interop,
     invitations, legal_oracle, lexchain, msp, network, notarize, ocsp, oid4vci, oid4vp, oracle,
     organizations, pentest, pin, policy, private_data, proposals, ra, registry, regulatory,
-    snapshots, staking, stats, stress, stripe, tokenization, tokenomics, transactions, tsa, tsl,
-    utilities, vault, wallets, zkp,
+    savings, snapshots, staking, stats, stress, stripe, tokenization, tokenomics, transactions,
+    tsa, tsl, utilities, vault, wallets, zkp,
 };
 
 /// API routes configuration
@@ -118,6 +118,8 @@ impl ApiRoutes {
 
     fn register_tx_handlers(cfg: &mut web::ServiceConfig) {
         cfg.service(transactions::create_transaction)
+            .service(savings::lock_savings)
+            .service(savings::release_savings)
             .service(transactions::get_mempool)
             .service(transactions::get_tx_by_id)
             .service(blocks::explorer_list_blocks)

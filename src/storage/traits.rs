@@ -104,6 +104,30 @@ pub enum TxPayload {
     Notarize {
         entry: Box<NotarizationEntry>,
     },
+    SignedTransfer {
+        nonce: u64,
+    },
+    SavingsLock {
+        unlock_at: u64,
+        nonce: u64,
+    },
+    SavingsRelease {
+        owner: String,
+        lock_id: String,
+        nonce: u64,
+    },
+}
+
+impl Transaction {
+    pub fn signed_author(&self) -> Option<&str> {
+        match &self.payload {
+            Some(TxPayload::SignedTransfer { .. }) | Some(TxPayload::SavingsLock { .. }) => {
+                Some(&self.input_did)
+            }
+            Some(TxPayload::SavingsRelease { owner, .. }) => Some(owner),
+            _ => None,
+        }
+    }
 }
 
 /// Transaction structure

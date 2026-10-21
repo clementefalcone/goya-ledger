@@ -9,7 +9,7 @@ use actix_web::{test, web, App};
 use rust_bc::{
     api::routes::ApiRoutes,
     storage::{
-        traits::{Block, Transaction},
+        traits::{Block, Transaction, TxPayload},
         BlockStore, MemoryStore,
     },
     AppState,
@@ -99,11 +99,15 @@ async fn accounts_returns_balance_and_nonce() {
     store
         .write_transaction(&tx("t1", "genesis", "alice", 100, 0))
         .unwrap();
+    let signed = |id: &str, to: &str, amount: u64, nonce: u64| Transaction {
+        payload: Some(TxPayload::SignedTransfer { nonce }),
+        ..tx(id, "alice", to, amount, nonce + 1)
+    };
     store
-        .write_transaction(&tx("t2", "alice", "bob", 30, 1))
+        .write_transaction(&signed("t2", "bob", 30, 0))
         .unwrap();
     store
-        .write_transaction(&tx("t3", "alice", "carol", 20, 2))
+        .write_transaction(&signed("t3", "carol", 20, 1))
         .unwrap();
 
     let state = make_state(store);
@@ -114,7 +118,6 @@ async fn accounts_returns_balance_and_nonce() {
     )
     .await;
 
-    // alice: balance = 100 - 30 - 20 = 50, nonce = 2 (two outbound txs)
     let req = test::TestRequest::get()
         .uri("/api/v1/accounts/alice")
         .to_request();
@@ -125,7 +128,6 @@ async fn accounts_returns_balance_and_nonce() {
     assert_eq!(body["data"]["balance"], 50);
     assert_eq!(body["data"]["nonce"], 2);
 
-    // bob: balance = 30, nonce = 0 (no outbound txs)
     let req = test::TestRequest::get()
         .uri("/api/v1/accounts/bob")
         .to_request();

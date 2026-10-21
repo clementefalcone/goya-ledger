@@ -1,6 +1,6 @@
 use actix_web::{get, post, web, HttpRequest, HttpResponse};
 
-use crate::api::errors::{ApiError, ApiResponse, ApiResult};
+use crate::api::errors::{enforce_acl, ApiError, ApiResponse, ApiResult};
 use crate::api::handlers::chain::{compute_block_hash, hex_hash};
 use crate::api::handlers::channels::{
     channel_id_from_req, enforce_channel_membership, get_channel_store,
@@ -14,18 +14,17 @@ use crate::block_creation;
 pub async fn create_block(
     state: web::Data<AppState>,
     req: web::Json<CreateBlockRequest>,
+    http_req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
+    enforce_acl(
+        state.acl_provider.as_deref(),
+        state.policy_store.as_deref(),
+        "peer/Propose",
+        &http_req,
+    )?;
     let trace_id = uuid::Uuid::new_v4().to_string();
-    match block_creation::try_create_block(state.get_ref(), &req) {
-        Ok(hash) => {
-            let body = ApiResponse::success(hash, trace_id);
-            Ok(HttpResponse::Created().json(body))
-        }
-        Err(reason) => Err(ApiError::ValidationError {
-            field: "block".to_string(),
-            reason,
-        }),
-    }
+    let hash = block_creation::try_create_block(state.get_ref(), &req)?;
+    Ok(HttpResponse::Created().json(ApiResponse::success(hash, trace_id)))
 }
 
 /// GET /api/v1/blocks — list blocks from store.

@@ -20,21 +20,6 @@ pub(crate) fn store_balance(state: &AppState, address: &str) -> u64 {
     0
 }
 
-/// Derive nonce (outbound transaction count) for an address.
-pub(crate) fn store_nonce(state: &AppState, address: &str) -> u64 {
-    if let Ok(store_map) = state.store.read() {
-        if let Some(store) = store_map.get("default") {
-            return store
-                .transactions_for_address(address)
-                .unwrap_or_default()
-                .iter()
-                .filter(|tx| tx.input_did == address)
-                .count() as u64;
-        }
-    }
-    0
-}
-
 /// GET /api/v1/accounts/{address}
 ///
 /// Wallet-compatible endpoint returning balance and nonce.
@@ -45,7 +30,7 @@ pub async fn get_account(
 ) -> ApiResult<HttpResponse> {
     let trace = uuid::Uuid::new_v4().to_string();
     let balance = store_balance(&state, &address);
-    let nonce = store_nonce(&state, &address);
+    let nonce = super::transactions::account_nonce(&state, &address)?;
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         serde_json::json!({

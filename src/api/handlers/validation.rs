@@ -36,6 +36,15 @@ pub fn validate_store_transaction(
     validate_string_field("input_did", &tx.input_did)?;
     validate_string_field("output_recipient", &tx.output_recipient)?;
     validate_string_field("state", &tx.state)?;
+    if tx.amount != 0 || tx.payload.is_some() {
+        return Err(ApiError::ValidationError {
+            field: "transaction".to_string(),
+            reason: format!(
+                "transaction {} moves value or carries a payload; use POST /transactions or /savings",
+                tx.id
+            ),
+        });
+    }
     Ok(())
 }
 
