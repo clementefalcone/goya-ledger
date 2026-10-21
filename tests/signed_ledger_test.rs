@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use actix_web::{test, web, App};
 use rust_bc::{
@@ -88,13 +88,17 @@ fn committed_tx(
     }
 }
 
+static PROCESS_ENV: Mutex<()> = Mutex::new(());
+
 struct Ledger {
     store: Arc<dyn BlockStore>,
     pool: Arc<Mutex<TransactionPool>>,
     state: AppState,
+    _env_guard: MutexGuard<'static, ()>,
 }
 
 fn ledger_on(store: Arc<dyn BlockStore>) -> Ledger {
+    let env_guard = PROCESS_ENV.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACL_MODE", "permissive");
     let mut state = AppState::test_default();
     let stores = std::collections::HashMap::from([("default".to_string(), store.clone())]);
@@ -107,6 +111,7 @@ fn ledger_on(store: Arc<dyn BlockStore>) -> Ledger {
         store,
         pool: state.tx_pool.clone(),
         state,
+        _env_guard: env_guard,
     }
 }
 
@@ -568,4 +573,36 @@ async fn savings_listing_reports_each_lock_status() {
         status_of(body["data"]["id"].as_str().unwrap()),
         ("pending".into(), 5.into())
     );
+}
+
+#[actix_web::test]
+async fn signed_operations_work_under_strict_acl_but_operator_endpoints_do_not() {
+    let alice = ed25519_account();
+    let ledger = ledger_with_funded(&alice, 100);
+    std::env::remove_var("ACL_MODE");
+
+    let (transfer, transfer_body_json) = post(
+        ledger.state.clone(),
+        "/api/v1/transactions",
+        transfer_body(&alice, "bob", 10, 0),
+    )
+    .await;
+    let (lock, lock_json) = post(
+        ledger.state.clone(),
+        "/api/v1/savings/lock",
+        lock_body(&alice, 20, 1),
+    )
+    .await;
+    let (mine, _) = post(ledger.state.clone(), "/api/v1/mine", serde_json::json!({})).await;
+    let (blocks, _) = post(
+        ledger.state,
+        "/api/v1/blocks",
+        serde_json::json!({ "transactions": [] }),
+    )
+    .await;
+
+    assert_eq!(transfer, 201, "{transfer_body_json}");
+    assert_eq!(lock, 201, "{lock_json}");
+    assert_eq!(mine, 403);
+    assert_eq!(blocks, 403);
 }

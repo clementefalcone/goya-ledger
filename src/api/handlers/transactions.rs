@@ -189,12 +189,6 @@ pub async fn create_transaction(
     req: web::Json<CreateTransactionRequest>,
     http_req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
-    enforce_acl(
-        state.acl_provider.as_deref(),
-        state.policy_store.as_deref(),
-        "peer/Propose",
-        &http_req,
-    )?;
     let trace_id = uuid::Uuid::new_v4().to_string();
     let api_key = http_req
         .headers()

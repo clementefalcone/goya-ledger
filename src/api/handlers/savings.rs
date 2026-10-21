@@ -1,7 +1,7 @@
-use actix_web::{get, post, web, HttpRequest, HttpResponse};
+use actix_web::{get, post, web, HttpResponse};
 use serde::{Deserialize, Serialize};
 
-use crate::api::errors::{enforce_acl, ApiError, ApiResponse, ApiResult};
+use crate::api::errors::{ApiError, ApiResponse, ApiResult};
 use crate::api::handlers::channels::get_channel_store;
 use crate::api::handlers::transactions::{admit_signed_transaction, now_secs, SignedOperation};
 use crate::app_state::AppState;
@@ -70,14 +70,7 @@ fn pending_transaction(
 pub async fn lock_savings(
     state: web::Data<AppState>,
     req: web::Json<SavingsLockRequest>,
-    http_req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
-    enforce_acl(
-        state.acl_provider.as_deref(),
-        state.policy_store.as_deref(),
-        "peer/Propose",
-        &http_req,
-    )?;
     if req.amount == 0 {
         return Err(ApiError::ValidationError {
             field: "amount".to_string(),
@@ -119,14 +112,7 @@ pub async fn lock_savings(
 pub async fn release_savings(
     state: web::Data<AppState>,
     req: web::Json<SavingsReleaseRequest>,
-    http_req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
-    enforce_acl(
-        state.acl_provider.as_deref(),
-        state.policy_store.as_deref(),
-        "peer/Propose",
-        &http_req,
-    )?;
     let store = get_channel_store(&state, "default")?;
     let lock = store
         .read_transaction(&req.lock_id)
