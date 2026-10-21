@@ -44,33 +44,6 @@ assert_json() {
 echo "==> Smoke testing Optimistic ML Oracle at $API"
 echo ""
 
-# ── Prerequisites: create wallet, stake oracle + challenger ──────────────────
-
-echo "── Setup: wallet + staking ──"
-
-# Create wallets for oracle and challenger
-curl -s -X POST "$API/wallets/create" -H "Content-Type: application/json" > /dev/null 2>&1 || true
-
-# Mine a block to fund wallets
-curl -s -X POST "$API/mine" -H "Content-Type: application/json" \
-    -d '{"miner_address":"oracle-smoke-test","max_transactions":0}' > /dev/null 2>&1 || true
-curl -s -X POST "$API/mine" -H "Content-Type: application/json" \
-    -d '{"miner_address":"challenger-smoke-test","max_transactions":0}' > /dev/null 2>&1 || true
-
-# Stake oracle (needs enough for min 5000)
-HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/staking/stake" \
-    -H "Content-Type: application/json" \
-    -d '{"address":"oracle-smoke-test","amount":10000}')
-echo "   Stake oracle: HTTP $HTTP"
-
-# Stake challenger
-HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$API/staking/stake" \
-    -H "Content-Type: application/json" \
-    -d '{"address":"challenger-smoke-test","amount":5000}')
-echo "   Stake challenger: HTTP $HTTP"
-
-echo ""
-
 # ── Generate Ed25519 keypair + signatures using python ───────────────────────
 
 # We use python3 + hashlib for signing since bash can't do Ed25519

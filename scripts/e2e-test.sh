@@ -114,6 +114,42 @@ assert_not_empty() {
     fi
 }
 
+ACCOUNT_TOOL="$(cd "$(dirname "$0")" && pwd)/ledger-account/account.mjs"
+ACCOUNT_DIR=$(mktemp -d)
+trap 'rm -rf "$ACCOUNT_DIR"' EXIT
+ISSUER_SEED="${E2E_ISSUER_SEED:-}"
+[[ -d "$(dirname "$ACCOUNT_TOOL")/node_modules" ]] || npm ci --silent --prefix "$(dirname "$ACCOUNT_TOOL")"
+
+ledger_tool() {
+    local seed="$1"
+    shift
+    NODE_URL="$NODE1/api/v1" NODE_TLS_REJECT_UNAUTHORIZED=0 SEED_PATH="$seed" node "$ACCOUNT_TOOL" "$@"
+}
+
+account() {
+    local name="$1"
+    shift
+    ledger_tool "$ACCOUNT_DIR/$name.hex" "$@"
+}
+
+new_account() {
+    account "$1" keygen > /dev/null && account "$1" register
+}
+
+http_code() {
+    local method="$1" url="$2"
+    shift 2
+    $CURL -o /dev/null -w '%{http_code}' -X "$method" "$url" -H 'Content-Type: application/json' "$@"
+}
+
+ensure_issuer_registered() {
+    local did
+    did=$(ledger_tool "$ISSUER_SEED" did)
+    [[ "$(http_code GET "$NODE1/api/v1/store/identities/$did")" == "200" ]] || ledger_tool "$ISSUER_SEED" register > /dev/null
+}
+
+ISSUER_HINT="set E2E_ISSUER_SEED to the seed of node1's NOTA_ISSUER_DID"
+
 # ── Pre-flight ───────────────────────────────────────────────────────────────
 echo ""
 bold "═══ rust-bc E2E Test Suite ═══"
@@ -266,29 +302,27 @@ assert_eq "$n1_count" "$expected_count" "Block count incremented ($initial_block
 echo ""
 echo "$(bold '6. Transaction lifecycle (mempool -> block)')"
 
-# Create a second wallet as recipient
-wallet2_resp=$(api POST "$NODE1/api/v1/wallets/create" -d '{}')
-ADDR2=$(echo "$wallet2_resp" | jq -r '.data.address // empty' 2>/dev/null)
+SENDER=$(new_account sender)
+assert_not_empty "$SENDER" "Register sender identity"
+RECEIVER=$(account receiver keygen)
 
-# Submit transaction from miner wallet (has balance from mining) to wallet2
-resp=$(api POST "$NODE1/api/v1/transactions" -d "{
-    \"from\": \"$ADDR\",
-    \"to\": \"$ADDR2\",
-    \"amount\": 1,
-    \"fee\": 1,
-    \"data\": \"e2e-test-tx\"
-}")
-assert_status "$resp" 200 "Submit transaction to mempool"
+code=$(http_code POST "$NODE1/api/v1/transactions" -d "{\"from\":\"$SENDER\",\"to\":\"$RECEIVER\",\"amount\":1,\"nonce\":0}")
+assert_eq "$code" "400" "Transfer without signature is rejected"
 
-# Check mempool
-resp=$(api GET "$NODE1/api/v1/mempool")
-mempool_count=$(echo "$resp" | jq '.data.transactions | length' 2>/dev/null || echo "0")
-log "Mempool has $mempool_count pending transactions"
+code=$(http_code POST "$NODE1/api/v1/transactions" -d "{\"from\":\"$SENDER\",\"to\":\"$RECEIVER\",\"amount\":1,\"nonce\":0,\"signature\":\"00\"}")
+assert_eq "$code" "401" "Transfer with forged signature is rejected"
 
-# Mine to include mempool txs
-resp=$(api POST "$NODE1/api/v1/mine" -d "{\"miner_address\":\"$ADDR\"}")
-tx_count=$(echo "$resp" | jq -r '.data.transactions_count // 0' 2>/dev/null)
-assert_gt "$tx_count" 0 "Mined block includes transactions ($tx_count)"
+if [[ -n "$ISSUER_SEED" ]]; then
+    ensure_issuer_registered
+    ledger_tool "$ISSUER_SEED" mint "$SENDER" 10 > /dev/null
+    assert_eq "$?" "0" "Issuer mints 10 NOTA to sender"
+    api POST "$NODE1/api/v1/mine" -d '{}' > /dev/null
+    sleep 2
+    sender_bal=$(api GET "$NODE1/api/v1/accounts/$SENDER" | jq -r '.data.balance // 0' 2>/dev/null)
+    assert_eq "$sender_bal" "10" "Minted balance confirmed in a block"
+else
+    skip "Mint and mine ($ISSUER_HINT)"
+fi
 
 # ── Test 7: Private Data ─────────────────────────────────────────────────────
 echo ""
@@ -781,48 +815,18 @@ assert_not_empty "$resp3" "Orderer3 health responds"
 # ── Test 21: Token Transfer Cycle (wallet → mine → transfer → verify) ───────
 section "21. Token transfer cycle"
 
-# Create sender and receiver wallets
-w_send=$(api POST "$NODE1/api/v1/wallets/create" -d '{}' -H "X-Org-Id: org1" -H "X-Msp-Role: client")
-SENDER=$(echo "$w_send" | jq -r '.data.address // empty' 2>/dev/null)
-assert_not_empty "$SENDER" "Create sender wallet"
-
-w_recv=$(api POST "$NODE1/api/v1/wallets/create" -d '{}' -H "X-Org-Id: org1" -H "X-Msp-Role: client")
-RECEIVER=$(echo "$w_recv" | jq -r '.data.address // empty' 2>/dev/null)
-assert_not_empty "$RECEIVER" "Create receiver wallet"
-
-# Mine to give sender a balance
-mine_resp=$(api POST "$NODE1/api/v1/mine" -d "{\"miner_address\":\"$SENDER\"}" -H "X-Org-Id: org1" -H "X-Msp-Role: client")
-mine_ok=$(echo "$mine_resp" | jq -r '.success // empty' 2>/dev/null)
-assert_eq "$mine_ok" "true" "Mine block for sender"
-
-# Verify sender has balance
-bal_resp=$(api GET "$NODE1/api/v1/wallets/$SENDER")
-sender_bal=$(echo "$bal_resp" | jq -r '.data.balance // 0' 2>/dev/null)
-assert_gt "$sender_bal" 0 "Sender has balance ($sender_bal)"
-
-# Transfer from sender to receiver
-xfer_resp=$(api POST "$NODE1/api/v1/transactions" -d "{
-    \"from\": \"$SENDER\",
-    \"to\": \"$RECEIVER\",
-    \"amount\": 5,
-    \"fee\": 1,
-    \"data\": \"e2e-transfer-cycle\"
-}" -H "X-Org-Id: org1" -H "X-Msp-Role: client")
-xfer_ok=$(echo "$xfer_resp" | jq -r '.success // .status // empty' 2>/dev/null)
-if [[ "$xfer_ok" == "true" || "$xfer_ok" == "Success" ]]; then
-    echo "  $(green "PASS") Submit transfer tx"
-    PASSED=$((PASSED + 1))
+if [[ -n "$ISSUER_SEED" ]]; then
+    account sender transfer "$RECEIVER" 5 > /dev/null
+    assert_eq "$?" "0" "Sender signs and submits transfer"
+    api POST "$NODE1/api/v1/mine" -d '{}' -H "X-Org-Id: org1" -H "X-Msp-Role: client" > /dev/null
+    sleep 2
+    recv_bal=$(api GET "$NODE1/api/v1/accounts/$RECEIVER" | jq -r '.data.balance // 0' 2>/dev/null)
+    assert_eq "$recv_bal" "5" "Receiver balance after signed transfer"
+    sender_bal=$(api GET "$NODE1/api/v1/accounts/$SENDER" | jq -r '.data.balance // 0' 2>/dev/null)
+    assert_eq "$sender_bal" "5" "Sender balance after signed transfer"
 else
-    echo "  $(red "FAIL") Submit transfer tx"
-    FAILED=$((FAILED + 1))
+    skip "Signed transfer cycle ($ISSUER_HINT)"
 fi
-
-# Mine to confirm the transfer
-api POST "$NODE1/api/v1/mine" -d "{\"miner_address\":\"$SENDER\"}" -H "X-Org-Id: org1" -H "X-Msp-Role: client" > /dev/null
-
-# Verify receiver balance
-recv_bal=$(api GET "$NODE1/api/v1/wallets/$RECEIVER" | jq -r '.data.balance // 0' 2>/dev/null)
-assert_gt "$recv_bal" 0 "Receiver has balance after transfer ($recv_bal)"
 
 # ── Test 22: ERC-20 Contract Flow ───────────────────────────────────────────
 section "22. ERC-20 contract flow"
@@ -1000,69 +1004,16 @@ tiers_ok=$(echo "$tiers_resp" | jq -r '.success // empty' 2>/dev/null)
 assert_eq "$tiers_ok" "true" "Get airdrop tiers"
 
 # ── Test 26: Staking Cycle ──────────────────────────────────────────────────
-section "26. Staking cycle"
+section "26. Staking queries"
 
-# Mine enough blocks to build up balance for staking (need 1000+, reward=50/block)
-# Create a dedicated staking wallet so balance is clean
-STK_ADDR=$($CURL -X POST "$NODE1/api/v1/wallets/create" -H 'Content-Type: application/json' -d '{}' 2>/dev/null | jq -r '.data.address // empty')
-assert_not_empty "$STK_ADDR" "Create staking wallet ($STK_ADDR)"
+validators=$($CURL "$NODE1/api/v1/staking/validators" 2>/dev/null)
+assert_not_empty "$validators" "Staking validators endpoint responds"
 
-# Mine blocks for staking. Use a while loop that checks balance to
-# avoid over-mining or under-mining due to PoW timing variance.
-stake_bal=0
-mine_attempts=0
-# Create fresh wallet and mine blocks dedicated to staking
-STK_ADDR=$($CURL -X POST "$NODE1/api/v1/wallets/create" \
-    -H 'Content-Type: application/json' -d '{}' 2>/dev/null | jq -r '.data.address')
-log "Staking wallet: $STK_ADDR"
+my_stake=$($CURL "$NODE1/api/v1/staking/my-stake/$SENDER" 2>/dev/null)
+assert_not_empty "$my_stake" "Staking my-stake endpoint responds"
 
-# Mine 25 blocks (reward 50 each = 1250 target)
-for i in $(seq 1 25); do
-    $CURL -X POST "$NODE1/api/v1/mine" -H 'Content-Type: application/json' \
-        -d "{\"miner_address\":\"$STK_ADDR\"}" > /dev/null 2>&1
-done
-
-stake_bal=$($CURL "$NODE1/api/v1/wallets/$STK_ADDR" 2>/dev/null | jq -r '.data.balance // 0')
-[[ -z "$stake_bal" ]] && stake_bal=0
-log "Balance after mining: $stake_bal"
-
-if [[ "$stake_bal" -ge 1000 ]]; then
-    assert_gt "$stake_bal" 999 "Staker has enough ($stake_bal)"
-
-    # Stake
-    stake_resp=$($CURL -X POST "$NODE1/api/v1/staking/stake" \
-        -H 'Content-Type: application/json' \
-        -d "{\"address\":\"$STK_ADDR\",\"amount\":1000}" 2>/dev/null)
-    stake_ok=$(echo "$stake_resp" | jq -r '.success // empty' 2>/dev/null)
-    assert_eq "$stake_ok" "true" "Stake 1000 tokens"
-
-    # Verify validator appears
-    validators=$($CURL "$NODE1/api/v1/staking/validators" 2>/dev/null)
-    val_count=$(echo "$validators" | jq -r '.data | length // 0' 2>/dev/null)
-    assert_gt "$val_count" 0 "Validator registered ($val_count validators)"
-
-    # Check my stake
-    my_stake=$($CURL "$NODE1/api/v1/staking/my-stake/$STK_ADDR" 2>/dev/null \
-        | jq -r '.data.staked_amount // .data // 0')
-    assert_gt "$my_stake" 0 "My stake visible ($my_stake)"
-
-    # Request unstake
-    unstake_resp=$($CURL -X POST "$NODE1/api/v1/staking/unstake" \
-        -H 'Content-Type: application/json' \
-        -d "{\"address\":\"$STK_ADDR\",\"amount\":1000}" 2>/dev/null)
-    unstake_ok=$(echo "$unstake_resp" | jq -r '.success // empty' 2>/dev/null)
-    assert_eq "$unstake_ok" "true" "Request unstake"
-else
-    # Not enough balance due to Docker PoW performance — test API reachability only
-    skip "Staking balance insufficient ($stake_bal < 1000, Docker PoW slow)"
-
-    # Verify staking endpoints respond correctly
-    validators=$($CURL "$NODE1/api/v1/staking/validators" 2>/dev/null)
-    assert_not_empty "$validators" "Staking validators endpoint responds"
-
-    my_stake=$($CURL "$NODE1/api/v1/staking/my-stake/$STK_ADDR" 2>/dev/null)
-    assert_not_empty "$my_stake" "Staking my-stake endpoint responds"
-fi
+code=$(http_code POST "$NODE1/api/v1/staking/stake" -d "{\"address\":\"$SENDER\",\"amount\":1}")
+assert_eq "$code" "404" "Unsigned staking move is not exposed"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
