@@ -4,6 +4,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) · Versioning: 
 
 ---
 
+## [Unreleased]
+
+### Security
+- `POST /transactions` verifies the sender's signature over `transfer:{from}:{to}:{amount}:{nonce}` against the public key in the identity registry; invalid signature → 401, unregistered DID → 404
+- Nonce is mandatory and must equal the account's next signed-operation count (committed + pending); replays → 409. `GET /accounts/{did}` returns that nonce
+- Minting from `from="0"` requires a signature from the DID in `NOTA_ISSUER_DID`; disabled when unset (403)
+- `POST /blocks` requires the `peer/Propose` ACL and admits every transaction through the same signed validation; the reward goes to `auto-miner`
+- `POST /store/transactions` rejects transactions that move value or carry a payload
+
+### Added
+- Time-locked savings: `POST /savings/lock` (signed `savings_lock:{did}:{amount}:{unlock_at}:{nonce}`) moves funds to `savings:{lock_id}`; `POST /savings/release` (signed `savings_release:{did}:{lock_id}:{nonce}`) returns them to the owner only after `unlock_at` by node clock. Locks are confirmed transactions and persist in RocksDB
+- `TxPayload::SignedTransfer`, `SavingsLock`, `SavingsRelease`
+
+### Changed
+- `/transactions` no longer uses the legacy validator, whose content-hash replay check rejected repeated identical transfers and whose pending counter capped accounts at 100 transactions
+- Removed unsigned-transfer tests (`transaction_nonce_test`, `wallet_e2e_test`), replaced by `signed_ledger_test`
+
+### Breaking
+- Unsigned transfers and unsigned `from="0"` minting are rejected: the tauri-app faucet and `scripts/{e2e-test,try-it,pentest}.sh` transfer calls need the issuer key or signed payloads
+
 ## [0.19.0] — 2026-10-04
 
 ### Security
