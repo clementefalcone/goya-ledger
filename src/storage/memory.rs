@@ -994,6 +994,7 @@ mod tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         };
         store.write_identity(&id).unwrap();
         let fetched = store.read_identity("did:goya:alice").unwrap();

@@ -394,6 +394,7 @@ mod tests {
                 migrated_from: migrated_from.clone(),
                 signature_algorithm: None,
                 civil_anchor: None,
+                recovery_commitment: None,
             };
 
             let json = serde_json::to_string(&record).unwrap();

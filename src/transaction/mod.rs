@@ -27,21 +27,25 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
             revoked_at,
             owner_signature,
         }) => operations::apply_revoke(store, did, *revoked_at, owner_signature),
-        Some(TxPayload::MigrateIdentity {
+        Some(TxPayload::RotateIdentity {
             did,
             new_public_key,
-            migrated_at,
-            owner_signature,
+            recovery_public_key,
+            new_recovery_commitment,
+            rotated_at,
+            recovery_signature,
             new_key_signature,
-        }) => operations::apply_migrate(
+        }) => operations::apply_rotate(
             store,
-            &operations::MigrateRequest {
+            &operations::RotateRequest {
                 did,
                 new_public_key,
-                owner_signature,
+                recovery_public_key,
+                new_recovery_commitment,
+                recovery_signature,
                 new_key_signature,
             },
-            *migrated_at,
+            *rotated_at,
         ),
         Some(TxPayload::Notarize { entry }) => store.write_notarization(entry),
         _ => Ok(()),
@@ -52,7 +56,7 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
 mod tests {
     use super::*;
     use crate::identity::did::did_from_pubkey_hex;
-    use crate::identity::operations::{migrate_message, register_message, revoke_message};
+    use crate::identity::operations::{register_message, revoke_message, rotate_message};
     use crate::identity::signing::{MlDsaSigningProvider, SigningProvider};
     use crate::storage::traits::IdentityRecord;
     use crate::storage::MemoryStore;
@@ -81,6 +85,13 @@ mod tests {
     }
 
     fn register_tx(provider: &MlDsaSigningProvider) -> Transaction {
+        register_tx_with_recovery(provider, None)
+    }
+
+    fn register_tx_with_recovery(
+        provider: &MlDsaSigningProvider,
+        recovery_commitment: Option<&str>,
+    ) -> Transaction {
         let (did, public_key) = identity_of(provider);
         tx_with(TxPayload::RegisterIdentity {
             record: IdentityRecord {
@@ -92,9 +103,10 @@ mod tests {
                 migrated_from: None,
                 signature_algorithm: None,
                 civil_anchor: None,
+                recovery_commitment: recovery_commitment.map(str::to_string),
             },
             civil_anchor: None,
-            owner_signature: Some(sign(provider, &register_message(&did))),
+            owner_signature: Some(sign(provider, &register_message(&did, recovery_commitment))),
         })
     }
 
@@ -125,29 +137,42 @@ mod tests {
     }
 
     #[test]
-    fn migration_in_a_block_reaches_every_node() {
+    fn rotation_in_a_block_reaches_every_node_and_kills_old_key() {
         let (node_a, node_b) = (MemoryStore::new(), MemoryStore::new());
         let owner = MlDsaSigningProvider::generate();
+        let recovery = MlDsaSigningProvider::generate();
         let successor = MlDsaSigningProvider::generate();
+        let next = MlDsaSigningProvider::generate();
         let (did, _) = identity_of(&owner);
-        let (new_did, new_public_key) = identity_of(&successor);
-        apply_on_both([&node_a, &node_b], &register_tx(&owner));
+        let (recovery_did, recovery_public_key) = identity_of(&recovery);
+        let (_, new_public_key) = identity_of(&successor);
+        let (next_did, _) = identity_of(&next);
+        apply_on_both(
+            [&node_a, &node_b],
+            &register_tx_with_recovery(&owner, Some(&recovery_did)),
+        );
 
-        let message = migrate_message(&did, &new_did);
-        let migrate = tx_with(TxPayload::MigrateIdentity {
+        let message = rotate_message(&did, &new_public_key, &next_did);
+        let rotate = tx_with(TxPayload::RotateIdentity {
             did: did.clone(),
-            new_public_key,
-            migrated_at: 300,
-            owner_signature: sign(&owner, &message),
+            new_public_key: new_public_key.clone(),
+            recovery_public_key,
+            new_recovery_commitment: next_did,
+            rotated_at: 300,
+            recovery_signature: sign(&recovery, &message),
             new_key_signature: sign(&successor, &message),
         });
-        apply_on_both([&node_a, &node_b], &migrate);
+        apply_on_both([&node_a, &node_b], &rotate);
 
-        assert_eq!(node_b.read_identity(&did).unwrap().status, "migrated");
-        assert_eq!(
-            node_a.read_identity(&new_did).unwrap(),
-            node_b.read_identity(&new_did).unwrap()
-        );
+        let on_b = node_b.read_identity(&did).unwrap();
+        assert_eq!(on_b.public_key, new_public_key);
+        assert_eq!(node_a.read_identity(&did).unwrap(), on_b);
+        let stolen_key_revocation = tx_with(TxPayload::RevokeIdentity {
+            did: did.clone(),
+            revoked_at: 400,
+            owner_signature: sign(&owner, &revoke_message(&did)),
+        });
+        assert!(apply_tx_payload(&node_b, &stolen_key_revocation).is_err());
     }
 
     #[test]
@@ -178,7 +203,7 @@ mod tests {
             owner_signature, ..
         }) = &mut tx.payload
         {
-            *owner_signature = Some(sign(&attacker, &register_message(&did)));
+            *owner_signature = Some(sign(&attacker, &register_message(&did, None)));
         }
         assert!(apply_tx_payload(&node, &tx).is_err());
         assert!(node.read_identity(&did).is_err());

@@ -53,6 +53,7 @@ impl ApiRoutes {
             .service(identity::create_identity)
             .service(identity::resolve_by_document)
             .service(identity::revoke_identity)
+            .service(identity::rotate_key)
             .service(identity::get_identity_methods)
             .service(identity::store_write_identity)
             .service(identity::store_list_identities)
@@ -425,7 +426,7 @@ impl LightRoutes {
         cfg.service(identity::store_write_identity)
             .service(identity::store_list_identities)
             .service(identity::store_get_identity)
-            .service(identity::migrate_did)
+            .service(identity::rotate_key)
             .service(identity::auth_challenge)
             .service(identity::auth_verify);
         // Tokenomics

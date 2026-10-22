@@ -49,15 +49,17 @@ FIPS 140-3 Known Answer Tests run at startup via `run_crypto_self_tests()`.
 ## Key Lifecycle
 
 ```
-generate → active → rotate_key (same algo)
-                  → rotate_algorithm (cross-algo, e.g. Ed25519 → ML-DSA-65)
-                  → migrate_identity (new DID, old DID marked "migrated")
-                  → split (Shamir SSS for backup)
+register (DID fixed by first key, commits SHA3-512 of an ML-DSA-65 recovery key)
+  → active ⇄ revoked (revoke: signed by current key)
+  → rotate (signed by the committed recovery key + the new key; same DID,
+            new signing key, fresh recovery commitment; restores revoked)
+  → split (Shamir SSS for backup)
 ```
 
 - `KeyManager` tracks active + retired keys with timestamps
-- `migrate_identity()` writes migration chain in store: old DID → "migrated", new DID → "active" with `migrated_from`
-- `resolve_identity()` follows migration chain to find current active DID
+- Register, revoke and rotate are `TxPayload` transactions: every node re-verifies signatures when it applies the block (`identity::operations`)
+- Rotation is the PQC migration path: an Ed25519 identity rotates to an ML-DSA-65 key and keeps its DID; the recovery key must be ML-DSA-65 so a broken classical algorithm cannot authorize it
+- A stolen device cannot rotate: it holds the current key, not the recovery key; after rotation the stolen key fails every identity operation on every node
 - `key_recovery::split(secret, threshold, total)` produces N shares; any K reconstruct via Lagrange interpolation over GF(256)
 
 ### HSM Support
@@ -166,8 +168,9 @@ External verification via `IdentityVerificationProvider` trait. Smart-ID integra
 | did | String | `did:goya:{...}` |
 | public_key | String | Hex-encoded public key |
 | signature_algorithm | Option\<String\> | Ed25519, MlDsa65, etc. |
-| status | String | active, migrated, revoked |
-| migrated_from | Option\<String\> | Previous DID (migration chain) |
+| status | String | active, revoked, migrated (legacy DID format only) |
+| migrated_from | Option\<String\> | Previous legacy-format DID |
+| recovery_commitment | Option\<String\> | `did_from_pubkey_hex` of the committed recovery key |
 | created_at | u64 | Unix timestamp |
 | updated_at | u64 | Unix timestamp |
 
@@ -179,9 +182,9 @@ Light client: `LocalIdentityStore` persists identities as JSON in `~/.goya/ident
 |--------|------|-------------|
 | POST | /identity/create | Create DID + keypair |
 | GET | /identity/{did} | Fetch identity |
-| POST | /identity/{did}/rotate-key | Key rotation |
 | POST | /identity/{did}/verify-signature | Verify signature |
-| POST | /identity/{did}/migrate | PQC migration |
+| POST | /identity/{did}/revoke | Revoke (current key) |
+| POST | /identity/{did}/rotate | Rotate key with recovery key (same DID) |
 | POST | /identity/auth/challenge | DID Auth: get nonce |
 | POST | /identity/auth/verify | DID Auth: verify signature |
 | GET | /did/{did} | W3C DID Resolution |

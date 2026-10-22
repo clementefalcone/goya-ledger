@@ -5,7 +5,9 @@ use rust_bc::consensus::bft::types::{BftPhase, QcError, QuorumCertificate, VoteM
 use rust_bc::consensus::bft::validator_registry::{RegistryVerifier, ValidatorRegistry};
 use rust_bc::identity::did::did_from_pubkey_hex;
 use rust_bc::identity::dual_signing::{dual_sign, verify_dual, DualVerifyMode};
-use rust_bc::identity::keys::{migrate_identity, resolve_identity};
+use rust_bc::identity::operations::{
+    apply_rotate, check_revoke, revoke_message, rotate_message, IdentityOpError, RotateRequest,
+};
 use rust_bc::identity::signing::{
     MlDsaSigningProvider, SigningAlgorithm, SigningProvider, SoftwareSigningProvider,
 };
@@ -67,6 +69,7 @@ fn register_did(store: &dyn BlockStore, id: &Identity) {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         })
         .unwrap();
 }
@@ -273,55 +276,67 @@ fn phase2_ed25519_signatures_rejected_post_compromise() {
 fn phase3_identity_migration_ed25519_to_mldsa65() {
     let store = Arc::new(MemoryStore::new());
     let num_identities: usize = 50;
-    let mut ed_identities: Vec<Identity> = Vec::with_capacity(num_identities);
+    let mut ed_identities: Vec<(Identity, Identity)> = Vec::with_capacity(num_identities);
 
     for _ in 0..num_identities {
         let id = make_identity(SigningAlgorithm::Ed25519);
+        let recovery = make_identity(SigningAlgorithm::MlDsa65);
         register_did(store.as_ref(), &id);
-        ed_identities.push(id);
+        let record = store.read_identity(&id.did).unwrap();
+        store
+            .write_identity(&IdentityRecord {
+                recovery_commitment: Some(recovery.did.clone()),
+                ..record
+            })
+            .unwrap();
+        ed_identities.push((id, recovery));
     }
 
     let migration_start = Instant::now();
-    let mut results = Vec::new();
-
-    for old_id in &ed_identities {
-        let result = migrate_identity(
+    for (old_id, recovery) in &ed_identities {
+        let new_key = make_identity(SigningAlgorithm::MlDsa65);
+        let next_recovery = make_identity(SigningAlgorithm::MlDsa65);
+        let message = rotate_message(&old_id.did, &new_key.pubkey_hex, &next_recovery.did);
+        let sign =
+            |signer: &Identity| hex::encode(signer.provider.sign(message.as_bytes()).unwrap());
+        apply_rotate(
             store.as_ref(),
-            &old_id.did,
-            &hex::encode(MlDsaSigningProvider::generate().public_key()),
+            &RotateRequest {
+                did: &old_id.did,
+                new_public_key: &new_key.pubkey_hex,
+                recovery_public_key: &recovery.pubkey_hex,
+                new_recovery_commitment: &next_recovery.did,
+                recovery_signature: &sign(recovery),
+                new_key_signature: &sign(&new_key),
+            },
             1000,
         )
         .unwrap();
 
-        assert_ne!(result.old_did, result.new_did);
-        assert_eq!(result.new_algorithm, SigningAlgorithm::MlDsa65);
-        assert_eq!(result.new_public_key_hex.len(), 1952 * 2);
+        let record = store.read_identity(&old_id.did).unwrap();
+        assert_eq!(record.did, old_id.did);
+        assert_eq!(record.status, "active");
+        assert_eq!(record.public_key.len(), 1952 * 2);
+        assert_eq!(record.signature_algorithm.as_deref(), Some("MlDsa65"));
 
-        let old_record = store.read_identity(&result.old_did).unwrap();
-        assert_eq!(old_record.status, "migrated");
-
-        let new_record = store.read_identity(&result.new_did).unwrap();
-        assert_eq!(new_record.status, "active");
-        assert_eq!(
-            new_record.migrated_from.as_deref(),
-            Some(result.old_did.as_str())
+        let ed25519_signature = hex::encode(
+            old_id
+                .provider
+                .sign(revoke_message(&old_id.did).as_bytes())
+                .unwrap(),
         );
-
-        let resolved = resolve_identity(store.as_ref(), &old_id.did).unwrap();
-        assert_eq!(resolved.did, result.new_did);
-        assert_eq!(resolved.status, "active");
-
-        results.push(result);
+        assert!(matches!(
+            check_revoke(store.as_ref(), &old_id.did, &ed25519_signature),
+            Err(IdentityOpError::BadSignature(_))
+        ));
     }
-
     let migration_duration = migration_start.elapsed();
 
-    assert_eq!(results.len(), num_identities);
     eprintln!(
-        "  MIGRATION: {} identities migrated in {:?} ({:.1} ids/ms)",
-        results.len(),
+        "  MIGRATION: {} identities rotated to ML-DSA-65 keeping their DID in {:?} ({:.1} ids/ms)",
+        num_identities,
         migration_duration,
-        results.len() as f64 / migration_duration.as_secs_f64() / 1000.0
+        num_identities as f64 / migration_duration.as_secs_f64() / 1000.0
     );
 }
 
@@ -1350,6 +1365,7 @@ fn phase7_migration_during_partition_then_rejoin() {
                 migrated_from: None,
                 signature_algorithm: None,
                 civil_anchor: None,
+                recovery_commitment: None,
             })
             .unwrap();
     }
@@ -1365,26 +1381,37 @@ fn phase7_migration_during_partition_then_rejoin() {
     let decided_r1 = run_round_with_partition(&validators, &mut managers, 1, partitioned);
     assert_eq!(decided_r1, 0);
 
-    // While partitioned, migrate C and D's identities to ML-DSA-65
+    // While partitioned, rotate C and D's identities to ML-DSA-65 keys
+    let mut rotated_keys = Vec::new();
     for v_id in partitioned {
-        let old_did = format!("did:goya:{v_id}");
-        let result = migrate_identity(
+        let did = format!("did:goya:{v_id}");
+        let recovery = make_identity(SigningAlgorithm::MlDsa65);
+        let record = store.read_identity(&did).unwrap();
+        store
+            .write_identity(&IdentityRecord {
+                recovery_commitment: Some(recovery.did.clone()),
+                ..record
+            })
+            .unwrap();
+        let new_key = make_identity(SigningAlgorithm::MlDsa65);
+        let next_recovery = make_identity(SigningAlgorithm::MlDsa65);
+        let message = rotate_message(&did, &new_key.pubkey_hex, &next_recovery.did);
+        let sign =
+            |signer: &Identity| hex::encode(signer.provider.sign(message.as_bytes()).unwrap());
+        apply_rotate(
             store.as_ref(),
-            &old_did,
-            &hex::encode(MlDsaSigningProvider::generate().public_key()),
+            &RotateRequest {
+                did: &did,
+                new_public_key: &new_key.pubkey_hex,
+                recovery_public_key: &recovery.pubkey_hex,
+                new_recovery_commitment: &next_recovery.did,
+                recovery_signature: &sign(&recovery),
+                new_key_signature: &sign(&new_key),
+            },
             1000,
         )
         .unwrap();
-
-        let old_rec = store.read_identity(&old_did).unwrap();
-        assert_eq!(old_rec.status, "migrated");
-
-        let new_rec = store.read_identity(&result.new_did).unwrap();
-        assert_eq!(new_rec.status, "active");
-        assert_eq!(new_rec.migrated_from.as_deref(), Some(old_did.as_str()));
-
-        let resolved = resolve_identity(store.as_ref(), &old_did).unwrap();
-        assert_eq!(resolved.did, result.new_did);
+        rotated_keys.push((did, new_key.pubkey_hex));
     }
 
     // Timeout to advance past stalled round
@@ -1411,12 +1438,11 @@ fn phase7_migration_during_partition_then_rejoin() {
     assert_eq!(commits.len(), 4);
     assert!(commits.windows(2).all(|w| w[0] == w[1]));
 
-    // Verify migration persisted correctly for both partitioned nodes
-    for v_id in partitioned {
-        let old_did = format!("did:goya:{v_id}");
-        let resolved = resolve_identity(store.as_ref(), &old_did).unwrap();
-        assert_eq!(resolved.status, "active");
-        assert_eq!(resolved.migrated_from.as_deref(), Some(old_did.as_str()));
+    // Verify rotation persisted for both partitioned nodes under the same DID
+    for (did, new_public_key) in &rotated_keys {
+        let record = store.read_identity(did).unwrap();
+        assert_eq!(record.status, "active");
+        assert_eq!(&record.public_key, new_public_key);
     }
 }
 

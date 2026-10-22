@@ -477,6 +477,7 @@ pub fn stress_identity(ops: u64) -> ModuleStressResult {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         };
 
         if store.write_identity(&record).is_err() {
@@ -531,6 +532,7 @@ pub fn stress_credential(ops: u64) -> ModuleStressResult {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         })
         .unwrap();
 
@@ -767,6 +769,7 @@ mod tests {
                             migrated_from: None,
                             signature_algorithm: None,
                             civil_anchor: None,
+                            recovery_commitment: None,
                         };
                         if s.write_identity(&rec).is_err() {
                             errors += 1;
@@ -825,6 +828,7 @@ mod tests {
                 migrated_from: None,
                 signature_algorithm: None,
                 civil_anchor: None,
+                recovery_commitment: None,
             })
             .unwrap();
 
@@ -1082,6 +1086,7 @@ mod tests {
                             migrated_from: None,
                             signature_algorithm: None,
                             civil_anchor: None,
+                            recovery_commitment: None,
                         };
                         if s.write_identity(&rec).is_err() {
                             e.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1497,6 +1502,7 @@ mod tests {
                             migrated_from: None,
                             signature_algorithm: None,
                             civil_anchor: None,
+                            recovery_commitment: None,
                         };
                         if s.write_identity(&rec).is_err() {
                             errors += 1;
@@ -1541,6 +1547,7 @@ mod tests {
                 migrated_from: None,
                 signature_algorithm: None,
                 civil_anchor: None,
+                recovery_commitment: None,
             })
             .unwrap();
 
@@ -1668,6 +1675,7 @@ mod tests {
                             migrated_from: None,
                             signature_algorithm: None,
                             civil_anchor: None,
+                            recovery_commitment: None,
                         };
                         if s.write_identity(&rec).is_err() {
                             e.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -27,16 +27,19 @@ impl From<IdentityOpError> for StorageError {
     }
 }
 
-pub fn register_message(did: &str) -> String {
-    format!("identity:register:{did}")
+pub fn register_message(did: &str, recovery_commitment: Option<&str>) -> String {
+    match recovery_commitment {
+        Some(commitment) => format!("identity:register:{did}:{commitment}"),
+        None => format!("identity:register:{did}"),
+    }
 }
 
 pub fn revoke_message(did: &str) -> String {
     format!("identity:revoke:{did}")
 }
 
-pub fn migrate_message(did: &str, new_did: &str) -> String {
-    format!("identity:migrate:{did}:{new_did}")
+pub fn rotate_message(did: &str, new_public_key: &str, new_recovery_commitment: &str) -> String {
+    format!("identity:rotate:{did}:{new_public_key}:{new_recovery_commitment}")
 }
 
 pub fn is_signed_by(public_key_hex: &str, message: &str, signature_hex: &str) -> bool {
@@ -94,10 +97,16 @@ pub fn check_register(
             record.status
         )));
     }
+    if record.recovery_commitment.as_deref() == Some(record.did.as_str()) {
+        return Err(IdentityOpError::Invalid(format!(
+            "recovery commitment of {} must not be its own signing key",
+            record.did
+        )));
+    }
     if let Some(signature) = owner_signature {
         require_signature(
             &record.public_key,
-            &register_message(&record.did),
+            &register_message(&record.did, record.recovery_commitment.as_deref()),
             signature,
             &record.did,
         )?;
@@ -139,46 +148,77 @@ pub fn check_revoke(
     Ok(Change::Write)
 }
 
-pub struct MigrateRequest<'a> {
+pub struct RotateRequest<'a> {
     pub did: &'a str,
     pub new_public_key: &'a str,
-    pub owner_signature: &'a str,
+    pub recovery_public_key: &'a str,
+    pub new_recovery_commitment: &'a str,
+    pub recovery_signature: &'a str,
     pub new_key_signature: &'a str,
 }
 
-pub fn check_migrate(
+pub fn check_rotate(
     store: &dyn BlockStore,
-    request: &MigrateRequest,
+    request: &RotateRequest,
 ) -> Result<Change, IdentityOpError> {
     let record = read_existing(store, request.did)?;
-    let new_did = did_from_pubkey_hex(request.new_public_key);
-    let message = migrate_message(request.did, &new_did);
-    require_signature(
-        &record.public_key,
-        &message,
-        request.owner_signature,
+    if record.public_key == request.new_public_key
+        && record.recovery_commitment.as_deref() == Some(request.new_recovery_commitment)
+    {
+        return Ok(Change::AlreadyApplied);
+    }
+    if record.status != "active" && record.status != "revoked" {
+        return Err(IdentityOpError::Conflict(format!(
+            "identity {} is {}; only active or revoked identities can rotate",
+            request.did, record.status
+        )));
+    }
+    let commitment = record.recovery_commitment.as_deref().ok_or_else(|| {
+        IdentityOpError::Conflict(format!(
+            "identity {} has no recovery key committed",
+            request.did
+        ))
+    })?;
+    let recovery_algorithm =
+        crate::signature::verify::infer_algorithm_from_key(request.recovery_public_key);
+    if recovery_algorithm != Some(crate::identity::signing::SigningAlgorithm::MlDsa65) {
+        return Err(IdentityOpError::Invalid(format!(
+            "recovery key of {} must be ML-DSA-65, got {recovery_algorithm:?}",
+            request.did
+        )));
+    }
+    if did_from_pubkey_hex(request.recovery_public_key) != commitment {
+        return Err(IdentityOpError::BadSignature(format!(
+            "recovery key does not match the commitment registered for {}",
+            request.did
+        )));
+    }
+    if request.new_recovery_commitment == commitment
+        || request.new_recovery_commitment == did_from_pubkey_hex(request.new_public_key)
+    {
+        return Err(IdentityOpError::Invalid(format!(
+            "rotation of {} must commit a fresh recovery key distinct from the new signing key",
+            request.did
+        )));
+    }
+    let message = rotate_message(
         request.did,
+        request.new_public_key,
+        request.new_recovery_commitment,
+    );
+    require_signature(
+        request.recovery_public_key,
+        &message,
+        request.recovery_signature,
+        &format!("the recovery key of {}", request.did),
     )?;
     require_signature(
         request.new_public_key,
         &message,
         request.new_key_signature,
-        &new_did,
+        &format!("the new key of {}", request.did),
     )?;
-    let successor = store.read_identity(&new_did).ok();
-    match (record.status.as_str(), successor) {
-        ("migrated", Some(next)) if next.migrated_from.as_deref() == Some(request.did) => {
-            Ok(Change::AlreadyApplied)
-        }
-        ("active", None) => Ok(Change::Write),
-        ("active", Some(_)) => Err(IdentityOpError::Conflict(format!(
-            "identity {new_did} already registered"
-        ))),
-        (status, _) => Err(IdentityOpError::Conflict(format!(
-            "identity {} is {status}; only active identities can migrate",
-            request.did
-        ))),
-    }
+    Ok(Change::Write)
 }
 
 pub fn apply_register(
@@ -214,21 +254,24 @@ pub fn apply_revoke(
     })
 }
 
-pub fn apply_migrate(
+pub fn apply_rotate(
     store: &dyn BlockStore,
-    request: &MigrateRequest,
-    migrated_at: u64,
+    request: &RotateRequest,
+    rotated_at: u64,
 ) -> StorageResult<()> {
-    if check_migrate(store, request)? == Change::AlreadyApplied {
+    if check_rotate(store, request)? == Change::AlreadyApplied {
         return Ok(());
     }
-    crate::identity::keys::migrate_identity(
-        store,
-        request.did,
-        request.new_public_key,
-        migrated_at,
-    )?;
-    Ok(())
+    let record = store.read_identity(request.did)?;
+    let new_algorithm = crate::signature::verify::infer_algorithm_from_key(request.new_public_key);
+    store.write_identity(&IdentityRecord {
+        public_key: request.new_public_key.to_string(),
+        recovery_commitment: Some(request.new_recovery_commitment.to_string()),
+        status: "active".to_string(),
+        updated_at: rotated_at,
+        signature_algorithm: new_algorithm.map(|algorithm| format!("{algorithm:?}")),
+        ..record
+    })
 }
 
 #[cfg(test)]
@@ -278,38 +321,64 @@ mod tests {
                 migrated_from: None,
                 signature_algorithm: None,
                 civil_anchor: None,
+                recovery_commitment: None,
             }
         }
 
         fn register_on(&self, store: &dyn BlockStore) {
-            let signature = self.sign(&register_message(&self.did));
+            let signature = self.sign(&register_message(&self.did, None));
             apply_register(store, &self.record(), None, Some(&signature)).unwrap();
         }
     }
 
-    fn migrate_request<'a>(
-        owner: &'a Owner,
-        successor: &'a Owner,
-        signatures: &'a (String, String),
-    ) -> MigrateRequest<'a> {
-        MigrateRequest {
-            did: &owner.did,
-            new_public_key: &successor.public_key,
-            owner_signature: &signatures.0,
-            new_key_signature: &signatures.1,
+    struct Rotation {
+        did: String,
+        new_public_key: String,
+        recovery_public_key: String,
+        new_recovery_commitment: String,
+        recovery_signature: String,
+        new_key_signature: String,
+    }
+
+    impl Rotation {
+        fn signed(owner: &Owner, recovery: &Owner, successor: &Owner, next: &Owner) -> Self {
+            let message = rotate_message(&owner.did, &successor.public_key, &next.did);
+            Self {
+                did: owner.did.clone(),
+                new_public_key: successor.public_key.clone(),
+                recovery_public_key: recovery.public_key.clone(),
+                new_recovery_commitment: next.did.clone(),
+                recovery_signature: recovery.sign(&message),
+                new_key_signature: successor.sign(&message),
+            }
+        }
+
+        fn request(&self) -> RotateRequest<'_> {
+            RotateRequest {
+                did: &self.did,
+                new_public_key: &self.new_public_key,
+                recovery_public_key: &self.recovery_public_key,
+                new_recovery_commitment: &self.new_recovery_commitment,
+                recovery_signature: &self.recovery_signature,
+                new_key_signature: &self.new_key_signature,
+            }
         }
     }
 
-    fn migrate_signatures(owner: &Owner, successor: &Owner) -> (String, String) {
-        let message = migrate_message(&owner.did, &successor.did);
-        (owner.sign(&message), successor.sign(&message))
+    fn register_with_recovery(store: &dyn BlockStore, owner: &Owner, recovery: &Owner) {
+        let record = IdentityRecord {
+            recovery_commitment: Some(recovery.did.clone()),
+            ..owner.record()
+        };
+        let signature = owner.sign(&register_message(&owner.did, Some(&recovery.did)));
+        apply_register(store, &record, None, Some(&signature)).unwrap();
     }
 
     #[test]
     fn signature_check_accepts_owner_and_rejects_stranger() {
         let owner = Owner::ml_dsa();
         let stranger = Owner::ml_dsa();
-        let message = register_message(&owner.did);
+        let message = register_message(&owner.did, None);
         assert!(is_signed_by(
             &owner.public_key,
             &message,
@@ -327,7 +396,7 @@ mod tests {
         let store = MemoryStore::new();
         let owner = Owner::ed25519();
         let attacker = Owner::ed25519();
-        let forged = attacker.sign(&register_message(&owner.did));
+        let forged = attacker.sign(&register_message(&owner.did, None));
         let result = apply_register(&store, &owner.record(), None, Some(&forged));
         assert!(result.is_err());
         assert!(store.read_identity(&owner.did).is_err());
@@ -342,7 +411,7 @@ mod tests {
             public_key: attacker.public_key.clone(),
             ..victim.record()
         };
-        let signature = attacker.sign(&register_message(&victim.did));
+        let signature = attacker.sign(&register_message(&victim.did, None));
         assert!(apply_register(&store, &record, None, Some(&signature)).is_err());
     }
 
@@ -354,7 +423,7 @@ mod tests {
             status: "revoked".to_string(),
             ..owner.record()
         };
-        let signature = owner.sign(&register_message(&owner.did));
+        let signature = owner.sign(&register_message(&owner.did, None));
         assert!(matches!(
             check_register(&store, &record, None, Some(&signature)),
             Err(IdentityOpError::Invalid(_))
@@ -379,7 +448,7 @@ mod tests {
             created_at: 99,
             ..owner.record()
         };
-        let signature = owner.sign(&register_message(&owner.did));
+        let signature = owner.sign(&register_message(&owner.did, None));
         assert!(matches!(
             check_register(&store, &altered, None, Some(&signature)),
             Err(IdentityOpError::Conflict(_))
@@ -435,82 +504,228 @@ mod tests {
     }
 
     #[test]
-    fn migrate_moves_identity_to_successor_key() {
+    fn register_signature_must_cover_recovery_commitment() {
         let store = MemoryStore::new();
         let owner = Owner::ml_dsa();
-        let successor = Owner::ml_dsa();
-        owner.register_on(&store);
-        let signatures = migrate_signatures(&owner, &successor);
-        apply_migrate(
-            &store,
-            &migrate_request(&owner, &successor, &signatures),
-            700,
-        )
-        .unwrap();
-        assert_eq!(store.read_identity(&owner.did).unwrap().status, "migrated");
-        let new_record = store.read_identity(&successor.did).unwrap();
-        assert_eq!(new_record.status, "active");
-        assert_eq!(
-            new_record.migrated_from.as_deref(),
-            Some(owner.did.as_str())
-        );
-        assert_eq!(new_record.created_at, 700);
-    }
-
-    #[test]
-    fn migrate_twice_is_idempotent() {
-        let store = MemoryStore::new();
-        let owner = Owner::ed25519();
-        let successor = Owner::ed25519();
-        owner.register_on(&store);
-        let signatures = migrate_signatures(&owner, &successor);
-        let request = migrate_request(&owner, &successor, &signatures);
-        apply_migrate(&store, &request, 700).unwrap();
-        apply_migrate(&store, &request, 800).unwrap();
-        assert_eq!(store.read_identity(&successor.did).unwrap().created_at, 700);
-    }
-
-    #[test]
-    fn migrate_rejects_when_successor_did_not_sign() {
-        let store = MemoryStore::new();
-        let owner = Owner::ed25519();
-        let successor = Owner::ed25519();
-        owner.register_on(&store);
-        let message = migrate_message(&owner.did, &successor.did);
-        let signatures = (owner.sign(&message), owner.sign(&message));
+        let swapped_in = Owner::ml_dsa();
+        let record = IdentityRecord {
+            recovery_commitment: Some(swapped_in.did.clone()),
+            ..owner.record()
+        };
+        let signature_without_commitment = owner.sign(&register_message(&owner.did, None));
         assert!(matches!(
-            check_migrate(&store, &migrate_request(&owner, &successor, &signatures)),
+            check_register(&store, &record, None, Some(&signature_without_commitment)),
             Err(IdentityOpError::BadSignature(_))
         ));
     }
 
     #[test]
-    fn migrate_rejects_revoked_identity() {
+    fn register_rejects_recovery_commitment_to_own_signing_key() {
         let store = MemoryStore::new();
-        let owner = Owner::ed25519();
-        let successor = Owner::ed25519();
-        owner.register_on(&store);
-        let revocation = owner.sign(&revoke_message(&owner.did));
-        apply_revoke(&store, &owner.did, 500, &revocation).unwrap();
-        let signatures = migrate_signatures(&owner, &successor);
+        let owner = Owner::ml_dsa();
+        let record = IdentityRecord {
+            recovery_commitment: Some(owner.did.clone()),
+            ..owner.record()
+        };
+        let signature = owner.sign(&register_message(&owner.did, Some(&owner.did)));
         assert!(matches!(
-            check_migrate(&store, &migrate_request(&owner, &successor, &signatures)),
-            Err(IdentityOpError::Conflict(_))
+            check_register(&store, &record, None, Some(&signature)),
+            Err(IdentityOpError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn rotate_replaces_key_and_keeps_did() {
+        let store = MemoryStore::new();
+        let (owner, recovery, successor, next) = (
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+        );
+        register_with_recovery(&store, &owner, &recovery);
+        let rotation = Rotation::signed(&owner, &recovery, &successor, &next);
+        apply_rotate(&store, &rotation.request(), 700).unwrap();
+
+        let record = store.read_identity(&owner.did).unwrap();
+        assert_eq!(record.did, owner.did);
+        assert_eq!(record.public_key, successor.public_key);
+        assert_eq!(
+            record.recovery_commitment.as_deref(),
+            Some(next.did.as_str())
+        );
+        assert_eq!(record.status, "active");
+        assert_eq!(record.updated_at, 700);
         assert!(store.read_identity(&successor.did).is_err());
     }
 
     #[test]
-    fn migrate_rejects_successor_already_registered() {
+    fn rotate_kills_the_previous_key() {
         let store = MemoryStore::new();
-        let owner = Owner::ed25519();
-        let successor = Owner::ed25519();
-        owner.register_on(&store);
-        successor.register_on(&store);
-        let signatures = migrate_signatures(&owner, &successor);
+        let (owner, recovery, successor, next) = (
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+        );
+        register_with_recovery(&store, &owner, &recovery);
+        apply_rotate(
+            &store,
+            &Rotation::signed(&owner, &recovery, &successor, &next).request(),
+            700,
+        )
+        .unwrap();
+        let stolen_key_revocation = owner.sign(&revoke_message(&owner.did));
         assert!(matches!(
-            check_migrate(&store, &migrate_request(&owner, &successor, &signatures)),
+            check_revoke(&store, &owner.did, &stolen_key_revocation),
+            Err(IdentityOpError::BadSignature(_))
+        ));
+    }
+
+    #[test]
+    fn rotate_rejects_thief_holding_the_current_key() {
+        let store = MemoryStore::new();
+        let (owner, recovery, thief_key, thief_next) = (
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+        );
+        register_with_recovery(&store, &owner, &recovery);
+        let rotation = Rotation::signed(&owner, &owner, &thief_key, &thief_next);
+        assert!(matches!(
+            check_rotate(&store, &rotation.request()),
+            Err(IdentityOpError::BadSignature(_))
+        ));
+        assert_eq!(
+            store.read_identity(&owner.did).unwrap().public_key,
+            owner.public_key
+        );
+    }
+
+    #[test]
+    fn rotate_rejects_recovery_key_that_was_not_committed() {
+        let store = MemoryStore::new();
+        let (owner, recovery, impostor, successor, next) = (
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+        );
+        register_with_recovery(&store, &owner, &recovery);
+        let rotation = Rotation::signed(&owner, &impostor, &successor, &next);
+        assert!(matches!(
+            check_rotate(&store, &rotation.request()),
+            Err(IdentityOpError::BadSignature(_))
+        ));
+    }
+
+    #[test]
+    fn rotate_rejects_identity_without_recovery_commitment() {
+        let store = MemoryStore::new();
+        let (owner, recovery, successor, next) = (
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+        );
+        owner.register_on(&store);
+        let rotation = Rotation::signed(&owner, &recovery, &successor, &next);
+        assert!(matches!(
+            check_rotate(&store, &rotation.request()),
             Err(IdentityOpError::Conflict(_))
         ));
+    }
+
+    #[test]
+    fn rotate_rejects_classical_recovery_key() {
+        let store = MemoryStore::new();
+        let (owner, recovery, successor, next) = (
+            Owner::ml_dsa(),
+            Owner::ed25519(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+        );
+        register_with_recovery(&store, &owner, &recovery);
+        let rotation = Rotation::signed(&owner, &recovery, &successor, &next);
+        assert!(matches!(
+            check_rotate(&store, &rotation.request()),
+            Err(IdentityOpError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn rotate_requires_a_fresh_recovery_commitment() {
+        let store = MemoryStore::new();
+        let (owner, recovery, successor) = (Owner::ml_dsa(), Owner::ml_dsa(), Owner::ml_dsa());
+        register_with_recovery(&store, &owner, &recovery);
+        let reused = Rotation::signed(&owner, &recovery, &successor, &recovery);
+        assert!(matches!(
+            check_rotate(&store, &reused.request()),
+            Err(IdentityOpError::Invalid(_))
+        ));
+        let self_recovering = Rotation::signed(&owner, &recovery, &successor, &successor);
+        assert!(matches!(
+            check_rotate(&store, &self_recovering.request()),
+            Err(IdentityOpError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn rotate_rejects_successor_that_did_not_sign() {
+        let store = MemoryStore::new();
+        let (owner, recovery, successor, next) = (
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+        );
+        register_with_recovery(&store, &owner, &recovery);
+        let mut rotation = Rotation::signed(&owner, &recovery, &successor, &next);
+        rotation.new_key_signature = rotation.recovery_signature.clone();
+        assert!(matches!(
+            check_rotate(&store, &rotation.request()),
+            Err(IdentityOpError::BadSignature(_))
+        ));
+    }
+
+    #[test]
+    fn rotate_restores_a_revoked_identity() {
+        let store = MemoryStore::new();
+        let (owner, recovery, successor, next) = (
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+        );
+        register_with_recovery(&store, &owner, &recovery);
+        let revocation = owner.sign(&revoke_message(&owner.did));
+        apply_revoke(&store, &owner.did, 500, &revocation).unwrap();
+        apply_rotate(
+            &store,
+            &Rotation::signed(&owner, &recovery, &successor, &next).request(),
+            700,
+        )
+        .unwrap();
+        let record = store.read_identity(&owner.did).unwrap();
+        assert_eq!(record.status, "active");
+        assert_eq!(record.public_key, successor.public_key);
+    }
+
+    #[test]
+    fn rotate_twice_is_idempotent() {
+        let store = MemoryStore::new();
+        let (owner, recovery, successor, next) = (
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+        );
+        register_with_recovery(&store, &owner, &recovery);
+        let rotation = Rotation::signed(&owner, &recovery, &successor, &next);
+        apply_rotate(&store, &rotation.request(), 700).unwrap();
+        apply_rotate(&store, &rotation.request(), 800).unwrap();
+        assert_eq!(store.read_identity(&owner.did).unwrap().updated_at, 700);
     }
 }

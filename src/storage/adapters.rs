@@ -2731,6 +2731,7 @@ mod tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         };
         store.write_identity(&identity).unwrap();
         let loaded = store.read_identity("did:goya:123").unwrap();

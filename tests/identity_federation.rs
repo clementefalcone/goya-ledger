@@ -26,6 +26,7 @@ fn identity_tx(pubkey: &str, doc_type: &str, doc_number: &str) -> Transaction {
                 migrated_from: None,
                 signature_algorithm: None,
                 civil_anchor: Some(anchor.clone()),
+                recovery_commitment: None,
             },
             civil_anchor: Some(anchor),
             owner_signature: None,

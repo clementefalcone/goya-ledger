@@ -563,6 +563,7 @@ mod tests {
                 migrated_from: None,
                 signature_algorithm: None,
                 civil_anchor: None,
+                recovery_commitment: None,
             })
             .unwrap();
     }

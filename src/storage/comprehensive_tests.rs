@@ -77,6 +77,7 @@ mod comprehensive_storage_tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         };
         assert!(store.write_identity(&identity).is_ok());
     }
@@ -167,6 +168,7 @@ mod comprehensive_storage_tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         };
         assert!(store.write_identity(&identity).is_ok());
         identity.status = "revoked".to_string();
@@ -555,6 +557,7 @@ mod comprehensive_storage_tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         };
         assert!(store.write_identity(&identity).is_ok());
     }
@@ -716,6 +719,7 @@ mod comprehensive_storage_tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         };
         assert!(store.write_identity(&identity).is_ok());
     }
@@ -732,6 +736,7 @@ mod comprehensive_storage_tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         };
         assert!(store.write_identity(&identity).is_ok());
     }

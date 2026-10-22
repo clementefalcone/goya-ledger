@@ -83,6 +83,7 @@ mod tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         }
     }
 
@@ -115,6 +116,7 @@ mod tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         };
         store.write_identity(&rec).unwrap();
 
@@ -135,6 +137,7 @@ mod tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         };
         store.write_identity(&rec).unwrap();
 
@@ -175,6 +178,7 @@ mod tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         };
         store.write_identity(&existing).unwrap();
 

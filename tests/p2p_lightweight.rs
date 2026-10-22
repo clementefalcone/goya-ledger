@@ -321,3 +321,100 @@ fn p2p_identity_registration_and_revocation_reach_second_node() {
         "revocation on node1 never reached node2"
     );
 }
+
+fn wait_for_identity_key(node: &TestNode, did: &str, public_key: &str, timeout_secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let url = node.api_url(&format!("/store/identities/{did}"));
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = reqwest::blocking::get(&url) {
+            let body: serde_json::Value = resp.json().unwrap_or_default();
+            if body["data"]["public_key"] == public_key {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+#[test]
+#[ignore]
+fn p2p_key_rotation_reaches_second_node_and_kills_stolen_key() {
+    use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider};
+    let node1 = TestNode::spawn(19130, 19131, None);
+    assert!(node1.wait_ready(30), "node1 failed to start");
+    let node2 = TestNode::spawn(19132, 19133, Some(&node1));
+    assert!(node2.wait_ready(30), "node2 failed to start");
+
+    let key_of = |provider: &MlDsaSigningProvider| hex::encode(provider.public_key());
+    let did_of = |provider: &MlDsaSigningProvider| {
+        rust_bc::identity::did::did_from_pubkey_hex(&key_of(provider))
+    };
+    let sign = |provider: &MlDsaSigningProvider, message: &str| {
+        hex::encode(provider.sign(message.as_bytes()).unwrap())
+    };
+    let (phone, recovery, new_phone, next_recovery) = (
+        MlDsaSigningProvider::generate(),
+        MlDsaSigningProvider::generate(),
+        MlDsaSigningProvider::generate(),
+        MlDsaSigningProvider::generate(),
+    );
+    let did = did_of(&phone);
+    let commitment = did_of(&recovery);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let registered = post_json(
+        &node1.api_url("/store/identities"),
+        serde_json::json!({
+            "did": did, "public_key": key_of(&phone), "status": "active",
+            "created_at": now, "updated_at": now, "recovery_commitment": commitment,
+            "signature": sign(&phone, &format!("identity:register:{did}:{commitment}")),
+        }),
+    );
+    assert_eq!(
+        registered["status"], "Success",
+        "register failed: {registered}"
+    );
+    assert!(
+        wait_for_identity_status(&node2, &did, "active", 30),
+        "registration never reached node2"
+    );
+
+    let rotate_message = rust_bc::identity::operations::rotate_message(
+        &did,
+        &key_of(&new_phone),
+        &did_of(&next_recovery),
+    );
+    let rotated = post_json(
+        &node1.api_url(&format!("/identity/{did}/rotate")),
+        serde_json::json!({
+            "new_public_key": key_of(&new_phone),
+            "recovery_public_key": key_of(&recovery),
+            "new_recovery_commitment": did_of(&next_recovery),
+            "recovery_signature": sign(&recovery, &rotate_message),
+            "new_key_signature": sign(&new_phone, &rotate_message),
+        }),
+    );
+    assert_eq!(rotated["status"], "Success", "rotate failed: {rotated}");
+    assert!(
+        wait_for_identity_key(&node2, &did, &key_of(&new_phone), 30),
+        "rotation on node1 never reached node2"
+    );
+
+    let revoke_with = |provider: &MlDsaSigningProvider| {
+        post_json(
+            &node2.api_url(&format!("/identity/{did}/revoke")),
+            serde_json::json!({ "signature": sign(provider, &format!("identity:revoke:{did}")) }),
+        )
+    };
+    let stolen = revoke_with(&phone);
+    assert_ne!(
+        stolen["status"], "Success",
+        "stolen key still accepted on node2: {stolen}"
+    );
+    let own = revoke_with(&new_phone);
+    assert_eq!(own["status"], "Success", "new key rejected on node2: {own}");
+}

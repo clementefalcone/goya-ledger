@@ -100,6 +100,7 @@ pub async fn create_identity(
         migrated_from: None,
         signature_algorithm: Some(format!("{:?}", algorithm)),
         civil_anchor: civil_anchor.clone(),
+        recovery_commitment: None,
     };
 
     operations::check_register(store.as_ref(), &record, civil_anchor.as_deref(), None)
@@ -340,12 +341,14 @@ async fn verify_signature(
     Ok(HttpResponse::Ok().json(ApiResponse::success(response, trace_id)))
 }
 
-// ── PQC Migration ───────────────────────────────────────────────────────────
+// ── Key rotation ────────────────────────────────────────────────────────────
 
 #[derive(Debug, serde::Deserialize)]
-pub struct MigrateRequest {
+pub struct RotateKeyRequest {
     pub new_public_key: String,
-    pub signature: String,
+    pub recovery_public_key: String,
+    pub new_recovery_commitment: String,
+    pub recovery_signature: String,
     pub new_key_signature: String,
 }
 
@@ -354,53 +357,33 @@ pub struct OwnerActionRequest {
     pub signature: String,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct MigrateResponse {
-    old_did: String,
-    new_did: String,
-    new_algorithm: String,
-    new_public_key_hex: String,
-    migrated_at: u64,
-}
-
-#[post("/identity/{did}/migrate")]
-pub async fn migrate_did(
+#[post("/identity/{did}/rotate")]
+pub async fn rotate_key(
     state: web::Data<AppState>,
     path: web::Path<String>,
-    body: web::Json<MigrateRequest>,
+    body: web::Json<RotateKeyRequest>,
     req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let did = path.into_inner();
     let trace_id = uuid::Uuid::new_v4().to_string();
-
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
 
-    let request = operations::MigrateRequest {
+    let request = operations::RotateRequest {
         did: &did,
         new_public_key: &body.new_public_key,
-        owner_signature: &body.signature,
+        recovery_public_key: &body.recovery_public_key,
+        new_recovery_commitment: &body.new_recovery_commitment,
+        recovery_signature: &body.recovery_signature,
         new_key_signature: &body.new_key_signature,
     };
-    let change = operations::check_migrate(store.as_ref(), &request).map_err(identity_op_error)?;
+    let change = operations::check_rotate(store.as_ref(), &request).map_err(identity_op_error)?;
     if change == operations::Change::AlreadyApplied {
-        return Ok(HttpResponse::Conflict().json(ApiResponse::<()>::error(
-            ErrorDto {
-                code: "ALREADY_MIGRATED".into(),
-                message: format!("DID {did} already migrated"),
-                field: None,
-            },
-            409,
+        return Ok(HttpResponse::Ok().json(ApiResponse::success(
+            serde_json::json!({ "did": did, "status": "already_rotated" }),
+            trace_id,
         )));
     }
-    let new_algorithm = crate::signature::verify::infer_algorithm_from_key(&body.new_public_key)
-        .ok_or_else(|| ApiError::ValidationError {
-            field: "new_public_key".to_string(),
-            reason: format!(
-                "cannot infer signing algorithm from {} hex chars",
-                body.new_public_key.len()
-            ),
-        })?;
 
     let now = now_secs();
     commit_identity_op(
@@ -408,23 +391,24 @@ pub async fn migrate_did(
         store.as_ref(),
         channel,
         &did,
-        TxPayload::MigrateIdentity {
+        TxPayload::RotateIdentity {
             did: did.clone(),
             new_public_key: body.new_public_key.clone(),
-            migrated_at: now,
-            owner_signature: body.signature.clone(),
+            recovery_public_key: body.recovery_public_key.clone(),
+            new_recovery_commitment: body.new_recovery_commitment.clone(),
+            rotated_at: now,
+            recovery_signature: body.recovery_signature.clone(),
             new_key_signature: body.new_key_signature.clone(),
         },
     )?;
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
-        MigrateResponse {
-            old_did: did.clone(),
-            new_did: crate::identity::did::did_from_pubkey_hex(&body.new_public_key),
-            new_algorithm: format!("{new_algorithm}"),
-            new_public_key_hex: body.new_public_key.clone(),
-            migrated_at: now,
-        },
+        serde_json::json!({
+            "did": did,
+            "public_key": body.new_public_key,
+            "recovery_commitment": body.new_recovery_commitment,
+            "rotated_at": now,
+        }),
         trace_id,
     )))
 }
@@ -753,6 +737,7 @@ mod tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: None,
+            recovery_commitment: None,
         }
     }
 
@@ -845,7 +830,7 @@ mod tests {
             actix_web::App::new().app_data(owner.state.clone()).service(
                 web::scope("/api/v1")
                     .service(revoke_identity)
-                    .service(migrate_did),
+                    .service(rotate_key),
             ),
         )
         .await;
@@ -936,61 +921,72 @@ mod tests {
         assert_eq!(owner_status(&owner), "revoked");
     }
 
-    fn migration_body(
-        owner: &RegisteredOwner,
-        old_key: &crate::identity::signing::SoftwareSigningProvider,
-        new_key: &crate::identity::signing::MlDsaSigningProvider,
-    ) -> (serde_json::Value, String) {
-        use crate::identity::signing::SigningProvider;
-        let new_public_key = hex::encode(new_key.public_key());
-        let new_did = crate::identity::did::did_from_pubkey_hex(&new_public_key);
-        let message = format!("identity:migrate:{}:{new_did}", owner.did);
-        let body = serde_json::json!({
-            "new_public_key": new_public_key,
-            "signature": sign_hex(old_key, &message),
-            "new_key_signature": hex::encode(new_key.sign(message.as_bytes()).unwrap()),
-        });
-        (body, new_did)
-    }
-
-    #[actix_web::test]
-    async fn migrate_rejects_signature_from_another_key() {
-        let owner = registered_owner();
-        let attacker = crate::identity::signing::SoftwareSigningProvider::generate();
-        let new_key = crate::identity::signing::MlDsaSigningProvider::generate();
-        let (body, _) = migration_body(&owner, &attacker, &new_key);
-        assert_eq!(post_owner_action(&owner, "migrate", body).await, 401);
-        assert_eq!(owner_status(&owner), "active");
-    }
-
-    #[actix_web::test]
-    async fn migrate_rejects_new_key_without_its_signature() {
-        let owner = registered_owner();
-        let new_key = crate::identity::signing::MlDsaSigningProvider::generate();
-        let other_key = crate::identity::signing::MlDsaSigningProvider::generate();
-        let (mut body, _) = migration_body(&owner, &owner.key, &new_key);
-        let (other_body, _) = migration_body(&owner, &owner.key, &other_key);
-        body["new_key_signature"] = other_body["new_key_signature"].clone();
-        assert_eq!(post_owner_action(&owner, "migrate", body).await, 401);
-        assert_eq!(owner_status(&owner), "active");
-    }
-
-    #[actix_web::test]
-    async fn migrate_moves_identity_to_owner_supplied_key() {
+    fn owner_with_recovery() -> (
+        RegisteredOwner,
+        crate::identity::signing::MlDsaSigningProvider,
+    ) {
         use crate::identity::signing::SigningProvider;
         let owner = registered_owner();
-        let new_key = crate::identity::signing::MlDsaSigningProvider::generate();
-        let (body, new_did) = migration_body(&owner, &owner.key, &new_key);
-        assert_eq!(post_owner_action(&owner, "migrate", body).await, 200);
-        assert_eq!(owner_status(&owner), "migrated");
-        let new_record = get_channel_store(&owner.state, "default")
-            .unwrap()
-            .read_identity(&new_did)
+        let recovery = crate::identity::signing::MlDsaSigningProvider::generate();
+        let store = get_channel_store(&owner.state, "default").unwrap();
+        let record = store.read_identity(&owner.did).unwrap();
+        store
+            .write_identity(&crate::storage::traits::IdentityRecord {
+                recovery_commitment: Some(crate::identity::did::did_from_pubkey_hex(&hex::encode(
+                    recovery.public_key(),
+                ))),
+                ..record
+            })
             .unwrap();
-        assert_eq!(new_record.public_key, hex::encode(new_key.public_key()));
-        assert_eq!(
-            new_record.migrated_from.as_deref(),
-            Some(owner.did.as_str())
-        );
+        (owner, recovery)
+    }
+
+    fn rotation_body(
+        did: &str,
+        recovery_signer: &dyn crate::identity::signing::SigningProvider,
+        new_key: &crate::identity::signing::MlDsaSigningProvider,
+    ) -> serde_json::Value {
+        use crate::identity::signing::SigningProvider;
+        let next = crate::identity::signing::MlDsaSigningProvider::generate();
+        let new_public_key = hex::encode(new_key.public_key());
+        let next_commitment =
+            crate::identity::did::did_from_pubkey_hex(&hex::encode(next.public_key()));
+        let message = operations::rotate_message(did, &new_public_key, &next_commitment);
+        serde_json::json!({
+            "new_public_key": new_public_key,
+            "recovery_public_key": hex::encode(recovery_signer.public_key()),
+            "new_recovery_commitment": next_commitment,
+            "recovery_signature": hex::encode(recovery_signer.sign(message.as_bytes()).unwrap()),
+            "new_key_signature": hex::encode(new_key.sign(message.as_bytes()).unwrap()),
+        })
+    }
+
+    fn owner_public_key(owner: &RegisteredOwner) -> String {
+        get_channel_store(&owner.state, "default")
+            .unwrap()
+            .read_identity(&owner.did)
+            .unwrap()
+            .public_key
+    }
+
+    #[actix_web::test]
+    async fn rotate_rejects_classical_current_key_posing_as_recovery() {
+        let (owner, _recovery) = owner_with_recovery();
+        let thief_key = crate::identity::signing::MlDsaSigningProvider::generate();
+        let before = owner_public_key(&owner);
+        let body = rotation_body(&owner.did, &owner.key, &thief_key);
+        assert_eq!(post_owner_action(&owner, "rotate", body).await, 400);
+        assert_eq!(owner_public_key(&owner), before);
+    }
+
+    #[actix_web::test]
+    async fn rotate_with_recovery_key_replaces_key_and_keeps_did() {
+        use crate::identity::signing::SigningProvider;
+        let (owner, recovery) = owner_with_recovery();
+        let new_key = crate::identity::signing::MlDsaSigningProvider::generate();
+        let body = rotation_body(&owner.did, &recovery, &new_key);
+        assert_eq!(post_owner_action(&owner, "rotate", body).await, 200);
+        assert_eq!(owner_public_key(&owner), hex::encode(new_key.public_key()));
+        assert_eq!(owner_status(&owner), "active");
     }
 }

@@ -108,11 +108,13 @@ pub enum TxPayload {
         revoked_at: u64,
         owner_signature: String,
     },
-    MigrateIdentity {
+    RotateIdentity {
         did: String,
         new_public_key: String,
-        migrated_at: u64,
-        owner_signature: String,
+        recovery_public_key: String,
+        new_recovery_commitment: String,
+        rotated_at: u64,
+        recovery_signature: String,
         new_key_signature: String,
     },
     Notarize {
@@ -175,6 +177,8 @@ pub struct IdentityRecord {
     pub signature_algorithm: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub civil_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_commitment: Option<String>,
 }
 
 /// Credential structure
@@ -1412,6 +1416,7 @@ mod tests {
             migrated_from: None,
             signature_algorithm: None,
             civil_anchor: Some("cafebabe".into()),
+            recovery_commitment: None,
         };
         let tx = Transaction {
             id: "tx-id-1".into(),
