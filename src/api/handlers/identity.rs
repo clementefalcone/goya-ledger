@@ -5,8 +5,58 @@ use crate::api::handlers::channels::{
 use crate::api::models::*;
 use crate::app_state::AppState;
 use crate::identity::keys::KeyManager;
+use crate::identity::operations::{self, IdentityOpError};
+use crate::storage::traits::{BlockStore, Transaction, TxPayload};
 use actix_web::{get, post, web, HttpRequest, HttpResponse};
 use chrono::Utc;
+
+fn identity_op_error(error: IdentityOpError) -> ApiError {
+    match error {
+        IdentityOpError::NotFound(resource) => ApiError::NotFound { resource },
+        IdentityOpError::BadSignature(message) => ApiError::UnauthorizedWithMessage { message },
+        IdentityOpError::Conflict(reason) => ApiError::Conflict { reason },
+        IdentityOpError::Invalid(reason) => ApiError::ValidationError {
+            field: "identity".to_string(),
+            reason,
+        },
+    }
+}
+
+fn commit_identity_op(
+    state: &AppState,
+    store: &dyn BlockStore,
+    channel: &str,
+    author: &str,
+    payload: TxPayload,
+) -> Result<(), ApiError> {
+    let tx = Transaction {
+        id: format!("identity-{}", uuid::Uuid::new_v4()),
+        block_height: 0,
+        timestamp: now_secs(),
+        input_did: author.to_string(),
+        output_recipient: author.to_string(),
+        amount: 0,
+        state: "pending".to_string(),
+        fee: 0,
+        payload: Some(payload),
+    };
+    if channel == "default" {
+        let mut pool = state.tx_pool.lock().unwrap_or_else(|e| e.into_inner());
+        pool.add(tx.clone())
+            .map_err(|reason| ApiError::ConsensusError {
+                reason: format!("identity transaction {} not queued: {reason}", tx.id),
+            })?;
+    } else {
+        store
+            .write_transaction(&tx)
+            .map_err(|e| ApiError::StorageError {
+                reason: format!("identity transaction {} not recorded: {e}", tx.id),
+            })?;
+    }
+    crate::transaction::apply_tx_payload(store, &tx).map_err(|e| ApiError::StorageError {
+        reason: format!("identity transaction {} not applied: {e}", tx.id),
+    })
+}
 
 /// POST /identity/create - Create a new DID, generate Ed25519 keypair, persist to store.
 #[post("/identity/create")]
@@ -52,38 +102,19 @@ pub async fn create_identity(
         civil_anchor: civil_anchor.clone(),
     };
 
-    let tx = crate::storage::traits::Transaction {
-        id: format!("identity-{}", uuid::Uuid::new_v4()),
-        block_height: 0,
-        timestamp: now,
-        input_did: did.clone(),
-        output_recipient: did.clone(),
-        amount: 0,
-        state: "pending".to_string(),
-        fee: 0,
-        payload: Some(crate::storage::traits::TxPayload::RegisterIdentity {
+    operations::check_register(store.as_ref(), &record, civil_anchor.as_deref(), None)
+        .map_err(identity_op_error)?;
+    commit_identity_op(
+        &state,
+        store.as_ref(),
+        _channel,
+        &did,
+        crate::storage::traits::TxPayload::RegisterIdentity {
             record,
             civil_anchor: civil_anchor.clone(),
-        }),
-    };
-
-    crate::transaction::apply_tx_payload(store.as_ref(), &tx).map_err(|e| {
-        if e.to_string().contains("civil anchor already registered") {
-            ApiError::Conflict {
-                reason: "identity with document already exists".to_string(),
-            }
-        } else {
-            ApiError::StorageError {
-                reason: e.to_string(),
-            }
-        }
-    })?;
-
-    store
-        .write_transaction(&tx)
-        .map_err(|e| ApiError::StorageError {
-            reason: e.to_string(),
-        })?;
+            owner_signature: None,
+        },
+    )?;
 
     crate::audit::emit_if_present(
         &state.audit_store,
@@ -237,35 +268,31 @@ pub async fn revoke_identity(
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
 
-    let mut record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
-        resource: format!("identity {did}"),
-    })?;
-    verify_owner_signature(&record, &format!("identity:revoke:{did}"), &body.signature)?;
-
-    if record.status == "revoked" {
+    let change = operations::check_revoke(store.as_ref(), &did, &body.signature)
+        .map_err(identity_op_error)?;
+    if change == operations::Change::AlreadyApplied {
         return Ok(HttpResponse::Ok().json(ApiResponse::success(
             serde_json::json!({ "did": did, "status": "already_revoked" }),
             trace_id,
         )));
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    record.status = "revoked".to_string();
-    record.updated_at = now;
-
-    store
-        .write_identity(&record)
-        .map_err(|e| ApiError::StorageError {
-            reason: e.to_string(),
-        })?;
+    let now = now_secs();
+    commit_identity_op(
+        &state,
+        store.as_ref(),
+        channel,
+        &did,
+        TxPayload::RevokeIdentity {
+            did: did.clone(),
+            revoked_at: now,
+            owner_signature: body.signature.clone(),
+        },
+    )?;
 
     crate::audit::emit_if_present(
         &state.audit_store,
-        crate::audit::AuditAction::DidRegistered,
+        crate::audit::AuditAction::DidRevoked,
         req.headers()
             .get("X-Org-Id")
             .and_then(|v| v.to_str().ok())
@@ -327,31 +354,6 @@ pub struct OwnerActionRequest {
     pub signature: String,
 }
 
-fn verify_owner_signature(
-    record: &crate::storage::traits::IdentityRecord,
-    message: &str,
-    signature_hex: &str,
-) -> Result<(), ApiError> {
-    let is_owner = crate::signature::verify::infer_algorithm_from_key(&record.public_key)
-        .is_some_and(|algorithm| {
-            crate::signature::verify_signature(
-                algorithm,
-                &record.public_key,
-                message.as_bytes(),
-                signature_hex,
-            )
-        });
-    if !is_owner {
-        return Err(ApiError::UnauthorizedWithMessage {
-            message: format!(
-                "signature over {message:?} does not verify against the key registered for {}",
-                record.did
-            ),
-        });
-    }
-    Ok(())
-}
-
 #[derive(Debug, serde::Serialize)]
 struct MigrateResponse {
     old_did: String,
@@ -374,35 +376,14 @@ pub async fn migrate_did(
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
 
-    let record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
-        resource: format!("identity {did}"),
-    })?;
-    let new_did = crate::identity::did::did_from_pubkey_hex(&body.new_public_key);
-    let message = format!("identity:migrate:{did}:{new_did}");
-    verify_owner_signature(&record, &message, &body.signature)?;
-    let controls_new_key = crate::signature::verify::infer_algorithm_from_key(&body.new_public_key)
-        .is_some_and(|algorithm| {
-            crate::signature::verify_signature(
-                algorithm,
-                &body.new_public_key,
-                message.as_bytes(),
-                &body.new_key_signature,
-            )
-        });
-    if !controls_new_key {
-        return Err(ApiError::UnauthorizedWithMessage {
-            message: format!(
-                "new_key_signature over {message:?} does not verify against new_public_key"
-            ),
-        });
-    }
-    if store.read_identity(&new_did).is_ok() {
-        return Err(ApiError::Conflict {
-            reason: format!("identity {new_did} already registered"),
-        });
-    }
-
-    if record.status == "migrated" {
+    let request = operations::MigrateRequest {
+        did: &did,
+        new_public_key: &body.new_public_key,
+        owner_signature: &body.signature,
+        new_key_signature: &body.new_key_signature,
+    };
+    let change = operations::check_migrate(store.as_ref(), &request).map_err(identity_op_error)?;
+    if change == operations::Change::AlreadyApplied {
         return Ok(HttpResponse::Conflict().json(ApiResponse::<()>::error(
             ErrorDto {
                 code: "ALREADY_MIGRATED".into(),
@@ -412,24 +393,36 @@ pub async fn migrate_did(
             409,
         )));
     }
+    let new_algorithm = crate::signature::verify::infer_algorithm_from_key(&body.new_public_key)
+        .ok_or_else(|| ApiError::ValidationError {
+            field: "new_public_key".to_string(),
+            reason: format!(
+                "cannot infer signing algorithm from {} hex chars",
+                body.new_public_key.len()
+            ),
+        })?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let result =
-        crate::identity::keys::migrate_identity(store.as_ref(), &did, &body.new_public_key, now)
-            .map_err(|e| ApiError::StorageError {
-                reason: format!("migration failed: {e}"),
-            })?;
+    let now = now_secs();
+    commit_identity_op(
+        &state,
+        store.as_ref(),
+        channel,
+        &did,
+        TxPayload::MigrateIdentity {
+            did: did.clone(),
+            new_public_key: body.new_public_key.clone(),
+            migrated_at: now,
+            owner_signature: body.signature.clone(),
+            new_key_signature: body.new_key_signature.clone(),
+        },
+    )?;
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         MigrateResponse {
-            old_did: result.old_did,
-            new_did: result.new_did,
-            new_algorithm: format!("{}", result.new_algorithm),
-            new_public_key_hex: result.new_public_key_hex,
+            old_did: did.clone(),
+            new_did: crate::identity::did::did_from_pubkey_hex(&body.new_public_key),
+            new_algorithm: format!("{new_algorithm}"),
+            new_public_key_hex: body.new_public_key.clone(),
             migrated_at: now,
         },
         trace_id,
@@ -458,17 +451,24 @@ pub async fn store_write_identity(
     let _channel = channel_id_from_req(&req);
     enforce_channel_membership(&state, _channel, &req)?;
     let store = get_channel_store(&state, _channel)?;
-    validate_new_identity(store.as_ref(), &record)?;
-    verify_owner_signature(
-        &record,
-        &format!("identity:register:{}", record.did),
-        &signature,
+    let change = operations::check_register(store.as_ref(), &record, None, Some(&signature))
+        .map_err(identity_op_error)?;
+    if change == operations::Change::AlreadyApplied {
+        return Err(ApiError::Conflict {
+            reason: format!("identity {} already registered", record.did),
+        });
+    }
+    commit_identity_op(
+        &state,
+        store.as_ref(),
+        _channel,
+        &record.did,
+        TxPayload::RegisterIdentity {
+            record: record.clone(),
+            civil_anchor: None,
+            owner_signature: Some(signature),
+        },
     )?;
-    store
-        .write_identity(&record)
-        .map_err(|e| ApiError::StorageError {
-            reason: e.to_string(),
-        })?;
     crate::audit::emit_if_present(
         &state.audit_store,
         crate::audit::AuditAction::DidRegistered,
@@ -479,30 +479,6 @@ pub async fn store_write_identity(
         Some(format!("did={}", record.did)),
     );
     Ok(HttpResponse::Created().json(ApiResponse::success(record, trace_id)))
-}
-
-fn validate_new_identity(
-    store: &dyn crate::storage::traits::BlockStore,
-    record: &crate::storage::traits::IdentityRecord,
-) -> Result<(), ApiError> {
-    if !crate::identity::did::did_matches_pubkey(&record.did, &record.public_key) {
-        return Err(ApiError::ValidationError {
-            field: "did".into(),
-            reason: "did must be derived from public_key".into(),
-        });
-    }
-    if record.status != "active" {
-        return Err(ApiError::ValidationError {
-            field: "status".into(),
-            reason: format!("new identities must be active, got {:?}", record.status),
-        });
-    }
-    if store.read_identity(&record.did).is_ok() {
-        return Err(ApiError::Conflict {
-            reason: format!("identity {} already registered", record.did),
-        });
-    }
-    Ok(())
 }
 
 /// GET /api/v1/store/identities/{did} — lee un IdentityRecord del store.
@@ -778,59 +754,6 @@ mod tests {
             signature_algorithm: None,
             civil_anchor: None,
         }
-    }
-
-    fn canonical_identity() -> (String, String) {
-        use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
-        let public_key = hex::encode(SoftwareSigningProvider::generate().public_key());
-        (
-            crate::identity::did::did_from_pubkey_hex(&public_key),
-            public_key,
-        )
-    }
-
-    #[test]
-    fn new_identity_accepts_did_derived_from_key() {
-        let store = crate::storage::MemoryStore::new();
-        let (did, public_key) = canonical_identity();
-        let record = identity_record(&did, &public_key, "active");
-        assert!(validate_new_identity(&store, &record).is_ok());
-    }
-
-    #[test]
-    fn new_identity_rejects_did_not_derived_from_key() {
-        let store = crate::storage::MemoryStore::new();
-        let (victim_did, _) = canonical_identity();
-        let (_, attacker_key) = canonical_identity();
-        let record = identity_record(&victim_did, &attacker_key, "active");
-        assert!(matches!(
-            validate_new_identity(&store, &record),
-            Err(ApiError::ValidationError { .. })
-        ));
-    }
-
-    #[test]
-    fn new_identity_rejects_non_active_status() {
-        let store = crate::storage::MemoryStore::new();
-        let (did, public_key) = canonical_identity();
-        let record = identity_record(&did, &public_key, "revoked");
-        assert!(matches!(
-            validate_new_identity(&store, &record),
-            Err(ApiError::ValidationError { .. })
-        ));
-    }
-
-    #[test]
-    fn new_identity_rejects_existing_did() {
-        use crate::storage::traits::BlockStore;
-        let store = crate::storage::MemoryStore::new();
-        let (did, public_key) = canonical_identity();
-        let record = identity_record(&did, &public_key, "active");
-        store.write_identity(&record).unwrap();
-        assert!(matches!(
-            validate_new_identity(&store, &record),
-            Err(ApiError::Conflict { .. })
-        ));
     }
 
     #[test]

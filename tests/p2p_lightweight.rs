@@ -246,3 +246,78 @@ fn p2p_identity_and_credentials_cross_check() {
     assert_eq!(verify["data"]["issuer_did"], issuer_did.as_str());
     assert_eq!(verify["data"]["subject_did"], subject_did.as_str());
 }
+
+fn wait_for_identity_status(node: &TestNode, did: &str, status: &str, timeout_secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let url = node.api_url(&format!("/store/identities/{did}"));
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = reqwest::blocking::get(&url) {
+            let body: serde_json::Value = resp.json().unwrap_or_default();
+            if body["data"]["status"] == status {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+#[test]
+#[ignore]
+fn p2p_identity_registration_and_revocation_reach_second_node() {
+    use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider};
+    let node1 = TestNode::spawn(19120, 19121, None);
+    assert!(node1.wait_ready(30), "node1 failed to start");
+    let node2 = TestNode::spawn(19122, 19123, Some(&node1));
+    assert!(node2.wait_ready(30), "node2 failed to start");
+
+    let owner = MlDsaSigningProvider::generate();
+    let thief = MlDsaSigningProvider::generate();
+    let public_key = hex::encode(owner.public_key());
+    let did = rust_bc::identity::did::did_from_pubkey_hex(&public_key);
+    let sign = |key: &MlDsaSigningProvider, message: String| {
+        hex::encode(key.sign(message.as_bytes()).unwrap())
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let registered = post_json(
+        &node1.api_url("/store/identities"),
+        serde_json::json!({
+            "did": did, "public_key": public_key, "status": "active",
+            "created_at": now, "updated_at": now,
+            "signature": sign(&owner, format!("identity:register:{did}")),
+        }),
+    );
+    assert_eq!(
+        registered["status"], "Success",
+        "register failed: {registered}"
+    );
+    assert!(
+        wait_for_identity_status(&node2, &did, "active", 30),
+        "registration on node1 never reached node2; node1 health {}; node2 health {}",
+        get_json(&node1.api_url("/health"))["data"],
+        get_json(&node2.api_url("/health"))["data"]
+    );
+
+    let forged = post_json(
+        &node1.api_url(&format!("/identity/{did}/revoke")),
+        serde_json::json!({ "signature": sign(&thief, format!("identity:revoke:{did}")) }),
+    );
+    assert_ne!(
+        forged["status"], "Success",
+        "forged revocation accepted: {forged}"
+    );
+
+    let revoked = post_json(
+        &node1.api_url(&format!("/identity/{did}/revoke")),
+        serde_json::json!({ "signature": sign(&owner, format!("identity:revoke:{did}")) }),
+    );
+    assert_eq!(revoked["status"], "Success", "revoke failed: {revoked}");
+    assert!(
+        wait_for_identity_status(&node2, &did, "revoked", 30),
+        "revocation on node1 never reached node2"
+    );
+}

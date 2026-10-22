@@ -6,6 +6,7 @@ pub mod key_recovery;
 pub mod keys;
 pub mod mdoc;
 pub mod migration;
+pub mod operations;
 pub mod pqc_policy;
 pub mod ra;
 pub mod sd_jwt;

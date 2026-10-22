@@ -28,6 +28,7 @@ fn make_identity_tx(id: &str, pubkey: &str, doc_type: &str, doc_number: &str) ->
                 civil_anchor: Some(anchor.clone()),
             },
             civil_anchor: Some(anchor),
+            owner_signature: None,
         }),
     }
 }
@@ -84,6 +85,7 @@ fn identity_tx_without_anchor_no_dedup() {
                 civil_anchor: None,
             },
             civil_anchor: None,
+            owner_signature: None,
         }),
     };
 
@@ -108,6 +110,7 @@ fn identity_tx_without_anchor_no_dedup() {
                 civil_anchor: None,
             },
             civil_anchor: None,
+            owner_signature: None,
         }),
     };
 

@@ -100,6 +100,20 @@ pub enum TxPayload {
         record: IdentityRecord,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         civil_anchor: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner_signature: Option<String>,
+    },
+    RevokeIdentity {
+        did: String,
+        revoked_at: u64,
+        owner_signature: String,
+    },
+    MigrateIdentity {
+        did: String,
+        new_public_key: String,
+        migrated_at: u64,
+        owner_signature: String,
+        new_key_signature: String,
     },
     Notarize {
         entry: Box<NotarizationEntry>,
@@ -1411,6 +1425,7 @@ mod tests {
             payload: Some(TxPayload::RegisterIdentity {
                 record: record.clone(),
                 civil_anchor: Some("cafebabe".into()),
+                owner_signature: None,
             }),
         };
         let json = serde_json::to_string(&tx).unwrap();
@@ -1419,6 +1434,7 @@ mod tests {
             TxPayload::RegisterIdentity {
                 record: r,
                 civil_anchor,
+                ..
             } => {
                 assert_eq!(r.did, record.did);
                 assert_eq!(civil_anchor, Some("cafebabe".into()));

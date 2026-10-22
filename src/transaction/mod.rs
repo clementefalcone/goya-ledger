@@ -6,7 +6,8 @@ pub mod parallel;
 pub mod proposal;
 pub mod rwset;
 
-use crate::storage::errors::{StorageError, StorageResult};
+use crate::identity::operations;
+use crate::storage::errors::StorageResult;
 use crate::storage::traits::{BlockStore, Transaction, TxPayload};
 
 pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResult<()> {
@@ -14,21 +15,172 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
         Some(TxPayload::RegisterIdentity {
             record,
             civil_anchor,
-        }) => {
-            if let Some(anchor) = civil_anchor {
-                if store.resolve_by_civil_anchor(anchor).is_ok() {
-                    return Err(StorageError::Other(format!(
-                        "civil anchor already registered: {anchor}"
-                    )));
-                }
-            }
-            store.write_identity(record)?;
-            if let Some(anchor) = civil_anchor {
-                store.write_civil_anchor(anchor, &record.did)?;
-            }
-            Ok(())
-        }
+            owner_signature,
+        }) => operations::apply_register(
+            store,
+            record,
+            civil_anchor.as_deref(),
+            owner_signature.as_deref(),
+        ),
+        Some(TxPayload::RevokeIdentity {
+            did,
+            revoked_at,
+            owner_signature,
+        }) => operations::apply_revoke(store, did, *revoked_at, owner_signature),
+        Some(TxPayload::MigrateIdentity {
+            did,
+            new_public_key,
+            migrated_at,
+            owner_signature,
+            new_key_signature,
+        }) => operations::apply_migrate(
+            store,
+            &operations::MigrateRequest {
+                did,
+                new_public_key,
+                owner_signature,
+                new_key_signature,
+            },
+            *migrated_at,
+        ),
         Some(TxPayload::Notarize { entry }) => store.write_notarization(entry),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::did::did_from_pubkey_hex;
+    use crate::identity::operations::{migrate_message, register_message, revoke_message};
+    use crate::identity::signing::{MlDsaSigningProvider, SigningProvider};
+    use crate::storage::traits::IdentityRecord;
+    use crate::storage::MemoryStore;
+
+    fn sign(provider: &MlDsaSigningProvider, message: &str) -> String {
+        hex::encode(provider.sign(message.as_bytes()).unwrap())
+    }
+
+    fn identity_of(provider: &MlDsaSigningProvider) -> (String, String) {
+        let public_key = hex::encode(provider.public_key());
+        (did_from_pubkey_hex(&public_key), public_key)
+    }
+
+    fn tx_with(payload: TxPayload) -> Transaction {
+        Transaction {
+            id: "identity-op".to_string(),
+            block_height: 1,
+            timestamp: 100,
+            input_did: String::new(),
+            output_recipient: String::new(),
+            amount: 0,
+            state: "confirmed".to_string(),
+            fee: 0,
+            payload: Some(payload),
+        }
+    }
+
+    fn register_tx(provider: &MlDsaSigningProvider) -> Transaction {
+        let (did, public_key) = identity_of(provider);
+        tx_with(TxPayload::RegisterIdentity {
+            record: IdentityRecord {
+                did: did.clone(),
+                public_key,
+                created_at: 100,
+                updated_at: 100,
+                status: "active".to_string(),
+                migrated_from: None,
+                signature_algorithm: None,
+                civil_anchor: None,
+            },
+            civil_anchor: None,
+            owner_signature: Some(sign(provider, &register_message(&did))),
+        })
+    }
+
+    fn apply_on_both(nodes: [&MemoryStore; 2], tx: &Transaction) {
+        for node in nodes {
+            apply_tx_payload(node, tx).unwrap();
+        }
+    }
+
+    #[test]
+    fn revocation_in_a_block_reaches_every_node() {
+        let (node_a, node_b) = (MemoryStore::new(), MemoryStore::new());
+        let owner = MlDsaSigningProvider::generate();
+        let (did, _) = identity_of(&owner);
+        apply_on_both([&node_a, &node_b], &register_tx(&owner));
+
+        let revoke = tx_with(TxPayload::RevokeIdentity {
+            did: did.clone(),
+            revoked_at: 200,
+            owner_signature: sign(&owner, &revoke_message(&did)),
+        });
+        apply_on_both([&node_a, &node_b], &revoke);
+
+        let on_a = node_a.read_identity(&did).unwrap();
+        let on_b = node_b.read_identity(&did).unwrap();
+        assert_eq!(on_b.status, "revoked");
+        assert_eq!(on_a, on_b);
+    }
+
+    #[test]
+    fn migration_in_a_block_reaches_every_node() {
+        let (node_a, node_b) = (MemoryStore::new(), MemoryStore::new());
+        let owner = MlDsaSigningProvider::generate();
+        let successor = MlDsaSigningProvider::generate();
+        let (did, _) = identity_of(&owner);
+        let (new_did, new_public_key) = identity_of(&successor);
+        apply_on_both([&node_a, &node_b], &register_tx(&owner));
+
+        let message = migrate_message(&did, &new_did);
+        let migrate = tx_with(TxPayload::MigrateIdentity {
+            did: did.clone(),
+            new_public_key,
+            migrated_at: 300,
+            owner_signature: sign(&owner, &message),
+            new_key_signature: sign(&successor, &message),
+        });
+        apply_on_both([&node_a, &node_b], &migrate);
+
+        assert_eq!(node_b.read_identity(&did).unwrap().status, "migrated");
+        assert_eq!(
+            node_a.read_identity(&new_did).unwrap(),
+            node_b.read_identity(&new_did).unwrap()
+        );
+    }
+
+    #[test]
+    fn forged_revocation_in_a_block_is_rejected_by_receiving_node() {
+        let node = MemoryStore::new();
+        let owner = MlDsaSigningProvider::generate();
+        let thief = MlDsaSigningProvider::generate();
+        let (did, _) = identity_of(&owner);
+        apply_tx_payload(&node, &register_tx(&owner)).unwrap();
+
+        let forged = tx_with(TxPayload::RevokeIdentity {
+            did: did.clone(),
+            revoked_at: 200,
+            owner_signature: sign(&thief, &revoke_message(&did)),
+        });
+        assert!(apply_tx_payload(&node, &forged).is_err());
+        assert_eq!(node.read_identity(&did).unwrap().status, "active");
+    }
+
+    #[test]
+    fn forged_registration_in_a_block_is_rejected_by_receiving_node() {
+        let node = MemoryStore::new();
+        let owner = MlDsaSigningProvider::generate();
+        let attacker = MlDsaSigningProvider::generate();
+        let (did, _) = identity_of(&owner);
+        let mut tx = register_tx(&owner);
+        if let Some(TxPayload::RegisterIdentity {
+            owner_signature, ..
+        }) = &mut tx.payload
+        {
+            *owner_signature = Some(sign(&attacker, &register_message(&did)));
+        }
+        assert!(apply_tx_payload(&node, &tx).is_err());
+        assert!(node.read_identity(&did).is_err());
     }
 }

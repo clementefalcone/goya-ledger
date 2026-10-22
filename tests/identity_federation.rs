@@ -28,6 +28,7 @@ fn identity_tx(pubkey: &str, doc_type: &str, doc_number: &str) -> Transaction {
                 civil_anchor: Some(anchor.clone()),
             },
             civil_anchor: Some(anchor),
+            owner_signature: None,
         }),
     }
 }
