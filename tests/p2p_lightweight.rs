@@ -10,10 +10,12 @@ use std::time::Duration;
 struct TestNode {
     child: Child,
     api_port: u16,
+    p2p_port: u16,
+    data_dir: tempfile::TempDir,
 }
 
 impl TestNode {
-    fn spawn(api_port: u16, p2p_port: u16, bootstrap: Option<&str>) -> Self {
+    fn spawn(api_port: u16, p2p_port: u16, peer: Option<&TestNode>) -> Self {
         // Use precompiled binary from target/debug
         let bin = std::env::current_dir()
             .unwrap()
@@ -25,8 +27,10 @@ impl TestNode {
             );
         }
 
+        let data_dir = tempfile::TempDir::new().expect("failed to create node data dir");
         let mut cmd = Command::new(&bin);
-        cmd.arg(api_port.to_string())
+        cmd.env("STORAGE_PATH", data_dir.path())
+            .arg(api_port.to_string())
             .arg(p2p_port.to_string())
             .env("ACL_MODE", "permissive")
             .env("DIFFICULTY", "1")
@@ -35,12 +39,25 @@ impl TestNode {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
 
-        if let Some(peers) = bootstrap {
-            cmd.env("BOOTSTRAP_NODES", peers);
+        if let Some(peer) = peer {
+            cmd.env("BOOTSTRAP_NODES", format!("127.0.0.1:{}", peer.p2p_port))
+                .env("TRUSTED_BLOCK_SIGNERS", peer.signer_public_key_hex());
         }
 
         let child = cmd.spawn().expect("failed to spawn node");
-        Self { child, api_port }
+        Self {
+            child,
+            api_port,
+            p2p_port,
+            data_dir,
+        }
+    }
+
+    fn signer_public_key_hex(&self) -> String {
+        let key_path = self.data_dir.path().join("signing_key_mldsa65.bin");
+        let key = std::fs::read(&key_path)
+            .unwrap_or_else(|e| panic!("cannot read node signing key {key_path:?}: {e}"));
+        hex::encode(&key[..1952])
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -48,6 +65,7 @@ impl TestNode {
     }
 
     fn wait_ready(&self, timeout_secs: u64) -> bool {
+        rust_bc::tls::install_crypto_provider();
         let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
         while std::time::Instant::now() < deadline {
             if let Ok(resp) = reqwest::blocking::get(self.api_url("/health")) {
@@ -90,9 +108,8 @@ fn post_json(url: &str, body: serde_json::Value) -> serde_json::Value {
 #[ignore] // Run with: cargo test --test p2p_lightweight -- --ignored --nocapture
 fn p2p_two_nodes_health() {
     let node1 = TestNode::spawn(19080, 19081, None);
-    let node2 = TestNode::spawn(19082, 19083, Some("127.0.0.1:19081"));
-
     assert!(node1.wait_ready(30), "node1 failed to start");
+    let node2 = TestNode::spawn(19082, 19083, Some(&node1));
     assert!(node2.wait_ready(30), "node2 failed to start");
 
     // Both healthy
@@ -106,9 +123,8 @@ fn p2p_two_nodes_health() {
 #[ignore]
 fn p2p_mine_on_node1_visible_on_node2() {
     let node1 = TestNode::spawn(19090, 19091, None);
-    let node2 = TestNode::spawn(19092, 19093, Some("127.0.0.1:19091"));
-
     assert!(node1.wait_ready(30), "node1 failed to start");
+    let node2 = TestNode::spawn(19092, 19093, Some(&node1));
     assert!(node2.wait_ready(30), "node2 failed to start");
 
     // Create wallet on node1
