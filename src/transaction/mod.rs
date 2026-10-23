@@ -290,4 +290,51 @@ mod tests {
         assert!(apply_tx_payload(&node, &forged).is_err());
         assert!(node.read_identity(&did).unwrap().vault_entries.is_empty());
     }
+
+    #[test]
+    fn rotation_keeps_the_vault_copies() {
+        let node = MemoryStore::new();
+        let owner = MlDsaSigningProvider::generate();
+        let recovery = MlDsaSigningProvider::generate();
+        let successor = MlDsaSigningProvider::generate();
+        let next = MlDsaSigningProvider::generate();
+        let (did, _) = identity_of(&owner);
+        let (recovery_did, recovery_public_key) = identity_of(&recovery);
+        let (_, new_public_key) = identity_of(&successor);
+        let (next_did, _) = identity_of(&next);
+        apply_tx_payload(
+            &node,
+            &register_tx_with_recovery(&owner, Some(&recovery_did)),
+        )
+        .unwrap();
+        apply_tx_payload(
+            &node,
+            &tx_with(TxPayload::AddVaultEntry {
+                did: did.clone(),
+                entry: phone_copy(),
+                owner_signature: sign(&owner, &add_vault_entry_message(&did, &phone_copy())),
+            }),
+        )
+        .unwrap();
+
+        let message = rotate_message(&did, &new_public_key, &next_did);
+        apply_tx_payload(
+            &node,
+            &tx_with(TxPayload::RotateIdentity {
+                did: did.clone(),
+                new_public_key,
+                recovery_public_key,
+                new_recovery_commitment: next_did,
+                rotated_at: 300,
+                recovery_signature: sign(&recovery, &message),
+                new_key_signature: sign(&successor, &message),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            node.read_identity(&did).unwrap().vault_entries,
+            vec![phone_copy()]
+        );
+    }
 }

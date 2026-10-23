@@ -565,3 +565,97 @@ fn p2p_vault_copy_reaches_second_node_and_rejects_strangers() {
         "vault revocation on node1 never reached node2"
     );
 }
+
+#[test]
+#[ignore]
+fn p2p_theft_lockout_sequence_converges_on_second_node() {
+    use rust_bc::identity::operations::{register_message, rotate_message};
+    use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider};
+    use rust_bc::identity::vault_entries::{add_vault_entry_message, revoke_vault_entry_message};
+    use rust_bc::storage::traits::{VaultEntry, VaultEntryKind};
+    let node1 = TestNode::spawn(19150, 19151, None);
+    assert!(node1.wait_ready(30), "node1 failed to start");
+    let node2 = TestNode::spawn(19152, 19153, Some(&node1));
+    assert!(node2.wait_ready(30), "node2 failed to start");
+
+    let hex_key = |key: &MlDsaSigningProvider| hex::encode(key.public_key());
+    let did_of =
+        |key: &MlDsaSigningProvider| rust_bc::identity::did::did_from_pubkey_hex(&hex_key(key));
+    let sign = |key: &MlDsaSigningProvider, message: String| {
+        hex::encode(key.sign(message.as_bytes()).unwrap())
+    };
+    let (owner, recovery, successor, next) = (
+        MlDsaSigningProvider::generate(),
+        MlDsaSigningProvider::generate(),
+        MlDsaSigningProvider::generate(),
+        MlDsaSigningProvider::generate(),
+    );
+    let did = did_of(&owner);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let registered = post_json(
+        &node1.api_url("/store/identities"),
+        serde_json::json!({
+            "did": did, "public_key": hex_key(&owner), "status": "active",
+            "created_at": now, "updated_at": now, "recovery_commitment": did_of(&recovery),
+            "signature": sign(&owner, register_message(&did, Some(&did_of(&recovery)))),
+        }),
+    );
+    assert_eq!(
+        registered["status"], "Success",
+        "register failed: {registered}"
+    );
+
+    let copy = |entry_id: &str| VaultEntry {
+        entry_id: entry_id.to_string(),
+        kind: VaultEntryKind::Device,
+        label: entry_id.to_string(),
+        sealed_key: format!("{{\"ciphertext\":\"{entry_id}\"}}"),
+        added_at: 0,
+        revoked_at: None,
+    };
+    let add = |key: &MlDsaSigningProvider, entry: VaultEntry| {
+        post_json(
+            &node1.api_url(&format!("/identity/{did}/vault")),
+            serde_json::json!({
+                "entry_id": entry.entry_id, "kind": "device", "label": entry.label,
+                "sealed_key": entry.sealed_key, "signature": sign(key, add_vault_entry_message(&did, &entry)),
+            }),
+        )
+    };
+    assert_eq!(add(&owner, copy("aa01"))["status"], "Success");
+    let message = rotate_message(&did, &hex_key(&successor), &did_of(&next));
+    let rotated = post_json(
+        &node1.api_url(&format!("/identity/{did}/rotate")),
+        serde_json::json!({
+            "new_public_key": hex_key(&successor), "recovery_public_key": hex_key(&recovery),
+            "new_recovery_commitment": did_of(&next),
+            "recovery_signature": sign(&recovery, message.clone()),
+            "new_key_signature": sign(&successor, message),
+        }),
+    );
+    assert_eq!(rotated["status"], "Success", "rotate failed: {rotated}");
+    let revoked = post_json(
+        &node1.api_url(&format!("/identity/{did}/vault/aa01/revoke")),
+        serde_json::json!({ "signature": sign(&successor, revoke_vault_entry_message(&did, "aa01")) }),
+    );
+    assert_eq!(revoked["status"], "Success", "revoke failed: {revoked}");
+    assert_eq!(add(&successor, copy("bb02"))["status"], "Success");
+
+    assert!(
+        wait_for_vault_entry(&node2, &did, "bb02", false),
+        "lockout sequence never reached node2"
+    );
+    let on_node = |node: &TestNode| {
+        get_json(&node.api_url(&format!("/store/identities/{did}")))["data"].clone()
+    };
+    let (on1, on2) = (on_node(&node1), on_node(&node2));
+    assert_eq!(on2["public_key"], hex_key(&successor));
+    assert_eq!(on1["vault_entries"], on2["vault_entries"], "nodes diverged");
+    assert!(
+        on2["vault_entries"][0]["revoked_at"].is_u64(),
+        "old copy not revoked on node2: {on2}"
+    );
+}

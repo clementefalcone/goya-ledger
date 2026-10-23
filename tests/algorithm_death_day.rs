@@ -287,7 +287,6 @@ fn phase3_identity_migration_ed25519_to_mldsa65() {
         store
             .write_identity(&IdentityRecord {
                 recovery_commitment: Some(recovery.did.clone()),
-                vault_entries: Vec::new(),
                 ..record
             })
             .unwrap();
@@ -1393,7 +1392,6 @@ fn phase7_migration_during_partition_then_rejoin() {
         store
             .write_identity(&IdentityRecord {
                 recovery_commitment: Some(recovery.did.clone()),
-                vault_entries: Vec::new(),
                 ..record
             })
             .unwrap();
