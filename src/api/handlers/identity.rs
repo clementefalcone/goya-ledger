@@ -11,7 +11,7 @@ use crate::storage::traits::{BlockStore, Transaction, TxPayload};
 use actix_web::{get, post, web, HttpRequest, HttpResponse};
 use chrono::Utc;
 
-fn identity_op_error(error: IdentityOpError) -> ApiError {
+pub(crate) fn identity_op_error(error: IdentityOpError) -> ApiError {
     match error {
         IdentityOpError::NotFound(resource) => ApiError::NotFound { resource },
         IdentityOpError::BadSignature(message) => ApiError::UnauthorizedWithMessage { message },
@@ -23,7 +23,7 @@ fn identity_op_error(error: IdentityOpError) -> ApiError {
     }
 }
 
-fn commit_identity_op(
+pub(crate) fn commit_identity_op(
     state: &AppState,
     store: &dyn BlockStore,
     channel: &str,
@@ -102,6 +102,7 @@ pub async fn create_identity(
         signature_algorithm: Some(format!("{:?}", algorithm)),
         civil_anchor: civil_anchor.clone(),
         recovery_commitment: None,
+        vault_entries: Vec::new(),
     };
 
     operations::check_register(store.as_ref(), &record, civil_anchor.as_deref(), None)
@@ -597,7 +598,7 @@ fn mint_session_jwt(
     format!("{signing_input}.{s}")
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -766,6 +767,7 @@ mod tests {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         }
     }
 

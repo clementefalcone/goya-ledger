@@ -119,6 +119,16 @@ Client                          Server
 - Optional `device_factors` (`pin`, `passphrase`, `biometric`) are checked on the device. When present, the signature must cover `identity:login:{nonce}:{factors joined by ","}` in the order sent; otherwise it covers the bare nonce. A repeated factor returns 400.
 - The session JWT carries `verified_factors` (checked by the node, today `["key"]`) and `device_factors` (asserted by the device, bound by the signature). Apps requiring multiple factors read both.
 
+### Identity vault (per-device sealed keys)
+
+`IdentityRecord.vault_entries` holds encrypted copies of the DID secret key, one per device passkey (`kind: device`, sealed with the passkey PRF secret) and one per recovery code (`kind: recovery`). The node never decrypts `sealed_key`; it only stores and replicates it.
+
+- `POST /identity/{did}/vault` adds a copy. The current key of the DID signs `identity:vault:add:{did}:{entry_id}:{kind}:{sha3_256(label)}:{sha3_256(sealed_key)}`. `added_at` is set by the node and is not signed; retrying the same content is idempotent.
+- `POST /identity/{did}/vault/{entry_id}/revoke` marks a copy revoked; signature over `identity:vault:revoke:{did}:{entry_id}`.
+- Both travel in blocks (`TxPayload::AddVaultEntry`, `TxPayload::RevokeVaultEntry`) and every node re-verifies the signature.
+- Read with `GET /store/identities/{did}`.
+- Revoking a copy does not change the DID key. After a device is stolen, rotate the key and reseal the remaining devices.
+
 ### ACL System
 
 `src/acl/` — resource-based access control enforced via `enforce_acl()` on protected endpoints.

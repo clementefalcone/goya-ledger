@@ -395,6 +395,7 @@ mod tests {
                 signature_algorithm: None,
                 civil_anchor: None,
                 recovery_commitment: None,
+                vault_entries: Vec::new(),
             };
 
             let json = serde_json::to_string(&record).unwrap();

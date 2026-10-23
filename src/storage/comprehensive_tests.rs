@@ -78,6 +78,7 @@ mod comprehensive_storage_tests {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         assert!(store.write_identity(&identity).is_ok());
     }
@@ -169,6 +170,7 @@ mod comprehensive_storage_tests {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         assert!(store.write_identity(&identity).is_ok());
         identity.status = "revoked".to_string();
@@ -558,6 +560,7 @@ mod comprehensive_storage_tests {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         assert!(store.write_identity(&identity).is_ok());
     }
@@ -720,6 +723,7 @@ mod comprehensive_storage_tests {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         assert!(store.write_identity(&identity).is_ok());
     }
@@ -737,6 +741,7 @@ mod comprehensive_storage_tests {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         assert!(store.write_identity(&identity).is_ok());
     }

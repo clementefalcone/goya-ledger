@@ -13,4 +13,5 @@ pub mod ra;
 pub mod sd_jwt;
 pub mod signing;
 pub mod status_list;
+pub mod vault_entries;
 pub mod zkp;

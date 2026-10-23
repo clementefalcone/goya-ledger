@@ -84,6 +84,7 @@ mod tests {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         }
     }
 
@@ -117,6 +118,7 @@ mod tests {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         store.write_identity(&rec).unwrap();
 
@@ -138,6 +140,7 @@ mod tests {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         store.write_identity(&rec).unwrap();
 
@@ -179,6 +182,7 @@ mod tests {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         store.write_identity(&existing).unwrap();
 

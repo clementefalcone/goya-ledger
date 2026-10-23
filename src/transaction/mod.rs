@@ -6,7 +6,7 @@ pub mod parallel;
 pub mod proposal;
 pub mod rwset;
 
-use crate::identity::operations;
+use crate::identity::{operations, vault_entries};
 use crate::storage::errors::StorageResult;
 use crate::storage::traits::{BlockStore, Transaction, TxPayload};
 
@@ -47,6 +47,32 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
             },
             *rotated_at,
         ),
+        Some(TxPayload::AddVaultEntry {
+            did,
+            entry,
+            owner_signature,
+        }) => vault_entries::apply_add_vault_entry(
+            store,
+            &vault_entries::AddVaultEntryRequest {
+                did,
+                entry,
+                owner_signature,
+            },
+        ),
+        Some(TxPayload::RevokeVaultEntry {
+            did,
+            entry_id,
+            revoked_at,
+            owner_signature,
+        }) => vault_entries::apply_revoke_vault_entry(
+            store,
+            &vault_entries::RevokeVaultEntryRequest {
+                did,
+                entry_id,
+                revoked_at: *revoked_at,
+                owner_signature,
+            },
+        ),
         Some(TxPayload::Notarize { entry }) => store.write_notarization(entry),
         _ => Ok(()),
     }
@@ -58,7 +84,8 @@ mod tests {
     use crate::identity::did::did_from_pubkey_hex;
     use crate::identity::operations::{register_message, revoke_message, rotate_message};
     use crate::identity::signing::{MlDsaSigningProvider, SigningProvider};
-    use crate::storage::traits::IdentityRecord;
+    use crate::identity::vault_entries::{add_vault_entry_message, revoke_vault_entry_message};
+    use crate::storage::traits::{IdentityRecord, VaultEntry, VaultEntryKind};
     use crate::storage::MemoryStore;
 
     fn sign(provider: &MlDsaSigningProvider, message: &str) -> String {
@@ -104,6 +131,7 @@ mod tests {
                 signature_algorithm: None,
                 civil_anchor: None,
                 recovery_commitment: recovery_commitment.map(str::to_string),
+                vault_entries: Vec::new(),
             },
             civil_anchor: None,
             owner_signature: Some(sign(provider, &register_message(&did, recovery_commitment))),
@@ -207,5 +235,59 @@ mod tests {
         }
         assert!(apply_tx_payload(&node, &tx).is_err());
         assert!(node.read_identity(&did).is_err());
+    }
+
+    fn phone_copy() -> VaultEntry {
+        VaultEntry {
+            entry_id: "0378ffe5".to_string(),
+            kind: VaultEntryKind::Device,
+            label: "iPhone".to_string(),
+            sealed_key: r#"{"kdf":"hkdf","ciphertext":"aa"}"#.to_string(),
+            added_at: 150,
+            revoked_at: None,
+        }
+    }
+
+    #[test]
+    fn vault_copy_in_a_block_reaches_every_node() {
+        let (node_a, node_b) = (MemoryStore::new(), MemoryStore::new());
+        let owner = MlDsaSigningProvider::generate();
+        let (did, _) = identity_of(&owner);
+        apply_on_both([&node_a, &node_b], &register_tx(&owner));
+
+        let add = tx_with(TxPayload::AddVaultEntry {
+            did: did.clone(),
+            entry: phone_copy(),
+            owner_signature: sign(&owner, &add_vault_entry_message(&did, &phone_copy())),
+        });
+        apply_on_both([&node_a, &node_b], &add);
+        let revoke = tx_with(TxPayload::RevokeVaultEntry {
+            did: did.clone(),
+            entry_id: phone_copy().entry_id,
+            revoked_at: 250,
+            owner_signature: sign(&owner, &revoke_vault_entry_message(&did, "0378ffe5")),
+        });
+        apply_on_both([&node_a, &node_b], &revoke);
+
+        let on_b = node_b.read_identity(&did).unwrap();
+        assert_eq!(on_b.vault_entries[0].revoked_at, Some(250));
+        assert_eq!(node_a.read_identity(&did).unwrap(), on_b);
+    }
+
+    #[test]
+    fn forged_vault_copy_in_a_block_is_rejected_by_receiving_node() {
+        let node = MemoryStore::new();
+        let owner = MlDsaSigningProvider::generate();
+        let thief = MlDsaSigningProvider::generate();
+        let (did, _) = identity_of(&owner);
+        apply_tx_payload(&node, &register_tx(&owner)).unwrap();
+
+        let forged = tx_with(TxPayload::AddVaultEntry {
+            did: did.clone(),
+            entry: phone_copy(),
+            owner_signature: sign(&thief, &add_vault_entry_message(&did, &phone_copy())),
+        });
+        assert!(apply_tx_payload(&node, &forged).is_err());
+        assert!(node.read_identity(&did).unwrap().vault_entries.is_empty());
     }
 }

@@ -358,6 +358,7 @@ async fn uc_credential_lifecycle() {
                 signature_algorithm: None,
                 civil_anchor: None,
                 recovery_commitment: None,
+                vault_entries: Vec::new(),
             })
             .unwrap();
     }

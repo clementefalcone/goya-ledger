@@ -70,6 +70,7 @@ fn register_did(store: &dyn BlockStore, id: &Identity) {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         })
         .unwrap();
 }
@@ -286,6 +287,7 @@ fn phase3_identity_migration_ed25519_to_mldsa65() {
         store
             .write_identity(&IdentityRecord {
                 recovery_commitment: Some(recovery.did.clone()),
+                vault_entries: Vec::new(),
                 ..record
             })
             .unwrap();
@@ -1366,6 +1368,7 @@ fn phase7_migration_during_partition_then_rejoin() {
                 signature_algorithm: None,
                 civil_anchor: None,
                 recovery_commitment: None,
+                vault_entries: Vec::new(),
             })
             .unwrap();
     }
@@ -1390,6 +1393,7 @@ fn phase7_migration_during_partition_then_rejoin() {
         store
             .write_identity(&IdentityRecord {
                 recovery_commitment: Some(recovery.did.clone()),
+                vault_entries: Vec::new(),
                 ..record
             })
             .unwrap();

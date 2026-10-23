@@ -27,6 +27,7 @@ fn identity_tx(pubkey: &str, doc_type: &str, doc_number: &str) -> Transaction {
                 signature_algorithm: None,
                 civil_anchor: Some(anchor.clone()),
                 recovery_commitment: None,
+                vault_entries: Vec::new(),
             },
             civil_anchor: Some(anchor),
             owner_signature: None,

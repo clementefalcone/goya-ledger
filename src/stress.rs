@@ -478,6 +478,7 @@ pub fn stress_identity(ops: u64) -> ModuleStressResult {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
 
         if store.write_identity(&record).is_err() {
@@ -533,6 +534,7 @@ pub fn stress_credential(ops: u64) -> ModuleStressResult {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         })
         .unwrap();
 
@@ -770,6 +772,7 @@ mod tests {
                             signature_algorithm: None,
                             civil_anchor: None,
                             recovery_commitment: None,
+                            vault_entries: Vec::new(),
                         };
                         if s.write_identity(&rec).is_err() {
                             errors += 1;
@@ -829,6 +832,7 @@ mod tests {
                 signature_algorithm: None,
                 civil_anchor: None,
                 recovery_commitment: None,
+                vault_entries: Vec::new(),
             })
             .unwrap();
 
@@ -1087,6 +1091,7 @@ mod tests {
                             signature_algorithm: None,
                             civil_anchor: None,
                             recovery_commitment: None,
+                            vault_entries: Vec::new(),
                         };
                         if s.write_identity(&rec).is_err() {
                             e.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1503,6 +1508,7 @@ mod tests {
                             signature_algorithm: None,
                             civil_anchor: None,
                             recovery_commitment: None,
+                            vault_entries: Vec::new(),
                         };
                         if s.write_identity(&rec).is_err() {
                             errors += 1;
@@ -1548,6 +1554,7 @@ mod tests {
                 signature_algorithm: None,
                 civil_anchor: None,
                 recovery_commitment: None,
+                vault_entries: Vec::new(),
             })
             .unwrap();
 
@@ -1676,6 +1683,7 @@ mod tests {
                             signature_algorithm: None,
                             civil_anchor: None,
                             recovery_commitment: None,
+                            vault_entries: Vec::new(),
                         };
                         if s.write_identity(&rec).is_err() {
                             e.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

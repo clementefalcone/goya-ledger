@@ -2732,6 +2732,7 @@ mod tests {
             signature_algorithm: None,
             civil_anchor: None,
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         store.write_identity(&identity).unwrap();
         let loaded = store.read_identity("did:goya:123").unwrap();

@@ -267,6 +267,7 @@ pub fn apply_rotate(
     store.write_identity(&IdentityRecord {
         public_key: request.new_public_key.to_string(),
         recovery_commitment: Some(request.new_recovery_commitment.to_string()),
+        vault_entries: Vec::new(),
         status: "active".to_string(),
         updated_at: rotated_at,
         signature_algorithm: new_algorithm.map(|algorithm| format!("{algorithm:?}")),
@@ -330,6 +331,7 @@ mod tests {
                 signature_algorithm: None,
                 civil_anchor: None,
                 recovery_commitment: None,
+                vault_entries: Vec::new(),
             }
         }
 
@@ -376,6 +378,7 @@ mod tests {
     fn register_with_recovery(store: &dyn BlockStore, owner: &Owner, recovery: &Owner) {
         let record = IdentityRecord {
             recovery_commitment: Some(recovery.did.clone()),
+            vault_entries: Vec::new(),
             ..owner.record()
         };
         let signature = owner.sign(&register_message(&owner.did, Some(&recovery.did)));
@@ -557,6 +560,7 @@ mod tests {
         let swapped_in = Owner::ml_dsa();
         let record = IdentityRecord {
             recovery_commitment: Some(swapped_in.did.clone()),
+            vault_entries: Vec::new(),
             ..owner.record()
         };
         let signature_without_commitment = owner.sign(&register_message(&owner.did, None));
@@ -572,6 +576,7 @@ mod tests {
         let owner = Owner::ml_dsa();
         let record = IdentityRecord {
             recovery_commitment: Some(owner.did.clone()),
+            vault_entries: Vec::new(),
             ..owner.record()
         };
         let signature = owner.sign(&register_message(&owner.did, Some(&owner.did)));

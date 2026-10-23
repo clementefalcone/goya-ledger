@@ -469,3 +469,99 @@ fn p2p_key_rotation_reaches_second_node_and_kills_stolen_key() {
         "revoked identity logged in on node2: {revoked_login}"
     );
 }
+
+fn wait_for_vault_entry(node: &TestNode, did: &str, entry_id: &str, is_revoked: bool) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let url = node.api_url(&format!("/store/identities/{did}"));
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = reqwest::blocking::get(&url) {
+            let body: serde_json::Value = resp.json().unwrap_or_default();
+            let entries = body["data"]["vault_entries"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if entries.iter().any(|entry| {
+                entry["entry_id"] == entry_id && entry["revoked_at"].is_u64() == is_revoked
+            }) {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+#[test]
+#[ignore]
+fn p2p_vault_copy_reaches_second_node_and_rejects_strangers() {
+    use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider};
+    use rust_bc::identity::vault_entries::{add_vault_entry_message, revoke_vault_entry_message};
+    use rust_bc::storage::traits::{VaultEntry, VaultEntryKind};
+    let node1 = TestNode::spawn(19140, 19141, None);
+    assert!(node1.wait_ready(30), "node1 failed to start");
+    let node2 = TestNode::spawn(19142, 19143, Some(&node1));
+    assert!(node2.wait_ready(30), "node2 failed to start");
+
+    let owner = MlDsaSigningProvider::generate();
+    let stranger = MlDsaSigningProvider::generate();
+    let public_key = hex::encode(owner.public_key());
+    let did = rust_bc::identity::did::did_from_pubkey_hex(&public_key);
+    let sign = |key: &MlDsaSigningProvider, message: String| {
+        hex::encode(key.sign(message.as_bytes()).unwrap())
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let registered = post_json(
+        &node1.api_url("/store/identities"),
+        serde_json::json!({
+            "did": did, "public_key": public_key, "status": "active",
+            "created_at": now, "updated_at": now,
+            "signature": sign(&owner, format!("identity:register:{did}")),
+        }),
+    );
+    assert_eq!(
+        registered["status"], "Success",
+        "register failed: {registered}"
+    );
+
+    let copy = VaultEntry {
+        entry_id: "0378ffe5".to_string(),
+        kind: VaultEntryKind::Device,
+        label: "iPhone".to_string(),
+        sealed_key: r#"{"kdf":"hkdf","ciphertext":"aa"}"#.to_string(),
+        added_at: 0,
+        revoked_at: None,
+    };
+    let body_signed_by = |key: &MlDsaSigningProvider| {
+        serde_json::json!({
+            "entry_id": copy.entry_id, "kind": "device", "label": copy.label,
+            "sealed_key": copy.sealed_key,
+            "signature": sign(key, add_vault_entry_message(&did, &copy)),
+        })
+    };
+    let vault_url = node1.api_url(&format!("/identity/{did}/vault"));
+    let forged = post_json(&vault_url, body_signed_by(&stranger));
+    assert_ne!(
+        forged["status"], "Success",
+        "stranger stored a copy: {forged}"
+    );
+
+    let added = post_json(&vault_url, body_signed_by(&owner));
+    assert_eq!(added["status"], "Success", "add failed: {added}");
+    assert!(
+        wait_for_vault_entry(&node2, &did, "0378ffe5", false),
+        "vault copy on node1 never reached node2"
+    );
+
+    let revoked = post_json(
+        &node1.api_url(&format!("/identity/{did}/vault/0378ffe5/revoke")),
+        serde_json::json!({ "signature": sign(&owner, revoke_vault_entry_message(&did, "0378ffe5")) }),
+    );
+    assert_eq!(revoked["status"], "Success", "revoke failed: {revoked}");
+    assert!(
+        wait_for_vault_entry(&node2, &did, "0378ffe5", true),
+        "vault revocation on node1 never reached node2"
+    );
+}

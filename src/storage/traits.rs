@@ -117,6 +117,17 @@ pub enum TxPayload {
         recovery_signature: String,
         new_key_signature: String,
     },
+    AddVaultEntry {
+        did: String,
+        entry: VaultEntry,
+        owner_signature: String,
+    },
+    RevokeVaultEntry {
+        did: String,
+        entry_id: String,
+        revoked_at: u64,
+        owner_signature: String,
+    },
     Notarize {
         entry: Box<NotarizationEntry>,
     },
@@ -179,6 +190,26 @@ pub struct IdentityRecord {
     pub civil_anchor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_commitment: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vault_entries: Vec<VaultEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultEntryKind {
+    Device,
+    Recovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VaultEntry {
+    pub entry_id: String,
+    pub kind: VaultEntryKind,
+    pub label: String,
+    pub sealed_key: String,
+    pub added_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<u64>,
 }
 
 /// Credential structure
@@ -1417,6 +1448,7 @@ mod tests {
             signature_algorithm: None,
             civil_anchor: Some("cafebabe".into()),
             recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         let tx = Transaction {
             id: "tx-id-1".into(),
