@@ -4,6 +4,7 @@ pub mod dual_signing;
 pub mod hsm;
 pub mod key_recovery;
 pub mod keys;
+pub mod login_factors;
 pub mod mdoc;
 pub mod migration;
 pub mod operations;

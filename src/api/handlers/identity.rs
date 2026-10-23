@@ -5,6 +5,7 @@ use crate::api::handlers::channels::{
 use crate::api::models::*;
 use crate::app_state::AppState;
 use crate::identity::keys::KeyManager;
+use crate::identity::login_factors::{has_repeated_factor, login_message, DeviceFactor};
 use crate::identity::operations::{self, IdentityOpError};
 use crate::storage::traits::{BlockStore, Transaction, TxPayload};
 use actix_web::{get, post, web, HttpRequest, HttpResponse};
@@ -546,6 +547,8 @@ pub struct AuthenticateRequest {
     pub did: String,
     pub challenge: String,
     pub signature: String,
+    #[serde(default)]
+    pub device_factors: Vec<DeviceFactor>,
 }
 
 #[derive(serde::Serialize)]
@@ -563,19 +566,26 @@ fn b64url_encode(data: &[u8]) -> String {
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, data)
 }
 
-fn mint_session_jwt(
-    did: &str,
+struct SessionClaims<'a> {
+    did: &'a str,
     exp: u64,
+    device_factors: &'a [DeviceFactor],
+}
+
+fn mint_session_jwt(
+    claims: &SessionClaims,
     signer: Option<&dyn crate::identity::signing::SigningProvider>,
 ) -> String {
     let now = now_secs();
     let header = serde_json::json!({"alg": "EdDSA", "typ": "JWT"});
     let payload = serde_json::json!({
-        "sub": did,
+        "sub": claims.did,
         "iat": now,
-        "exp": exp,
+        "exp": claims.exp,
         "iss": "goya-ledger",
         "type": "session",
+        "verified_factors": ["key"],
+        "device_factors": claims.device_factors,
     });
     let h = b64url_encode(&serde_json::to_vec(&header).unwrap_or_default());
     let p = b64url_encode(&serde_json::to_vec(&payload).unwrap_or_default());
@@ -642,6 +652,12 @@ pub async fn auth_verify(
     req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let trace_id = uuid::Uuid::new_v4().to_string();
+    if has_repeated_factor(&body.device_factors) {
+        return Err(ApiError::ValidationError {
+            field: "device_factors".into(),
+            reason: format!("repeated factor in {:?}", body.device_factors),
+        });
+    }
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
 
@@ -688,7 +704,7 @@ pub async fn auth_verify(
     let valid = crate::signature::verify_signature(
         algorithm,
         &identity.public_key,
-        challenge.nonce.as_bytes(),
+        login_message(&challenge.nonce, &body.device_factors).as_bytes(),
         &body.signature,
     );
 
@@ -705,7 +721,14 @@ pub async fn auth_verify(
 
     let session_ttl = 3600u64;
     let session_exp = now_secs() + session_ttl;
-    let session_token = mint_session_jwt(&body.did, session_exp, state.signing_provider.as_deref());
+    let session_token = mint_session_jwt(
+        &SessionClaims {
+            did: &body.did,
+            exp: session_exp,
+            device_factors: &body.device_factors,
+        },
+        state.signing_provider.as_deref(),
+    );
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         AuthenticateResponse {
@@ -782,7 +805,14 @@ mod tests {
     #[test]
     fn session_jwt_has_correct_structure() {
         let provider = crate::identity::signing::SoftwareSigningProvider::generate();
-        let token = mint_session_jwt("did:goya:test1234", now_secs() + 3600, Some(&provider));
+        let token = mint_session_jwt(
+            &SessionClaims {
+                did: "did:goya:test1234",
+                exp: now_secs() + 3600,
+                device_factors: &[],
+            },
+            Some(&provider),
+        );
         let parts: Vec<&str> = token.split('.').collect();
         assert_eq!(parts.len(), 3);
 
@@ -996,6 +1026,18 @@ mod tests {
     }
 
     async fn did_login_status(owner: &RegisteredOwner) -> u16 {
+        did_login(
+            owner,
+            |nonce| serde_json::json!({ "signature": sign_hex(&owner.key, nonce) }),
+        )
+        .await
+        .0
+    }
+
+    async fn did_login(
+        owner: &RegisteredOwner,
+        proof: impl Fn(&str) -> serde_json::Value,
+    ) -> (u16, serde_json::Value) {
         let app = actix_web::test::init_service(
             actix_web::App::new().app_data(owner.state.clone()).service(
                 web::scope("/api/v1")
@@ -1011,18 +1053,101 @@ mod tests {
         let challenge: serde_json::Value =
             actix_web::test::call_and_read_body_json(&app, challenge_req).await;
         let nonce = challenge["data"]["challenge"].as_str().unwrap().to_string();
+        let mut body = proof(&nonce);
+        body["did"] = serde_json::json!(owner.did);
+        body["challenge"] = serde_json::json!(nonce);
         let verify_req = actix_web::test::TestRequest::post()
             .uri("/api/v1/identity/auth/verify")
-            .set_json(serde_json::json!({
-                "did": owner.did,
-                "challenge": nonce,
-                "signature": sign_hex(&owner.key, &nonce),
-            }))
+            .set_json(body)
             .to_request();
-        actix_web::test::call_service(&app, verify_req)
-            .await
-            .status()
-            .as_u16()
+        let response = actix_web::test::call_service(&app, verify_req).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    fn session_claims(response: &serde_json::Value) -> serde_json::Value {
+        let token = response["data"]["session_token"].as_str().unwrap();
+        let payload = token.split('.').nth(1).unwrap();
+        let bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload)
+                .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[actix_web::test]
+    async fn did_login_records_signed_device_factors() {
+        let owner = registered_owner();
+        let (status, response) = did_login(&owner, |nonce| {
+            let message = format!("identity:login:{nonce}:pin,biometric");
+            serde_json::json!({
+                "signature": sign_hex(&owner.key, &message),
+                "device_factors": ["pin", "biometric"],
+            })
+        })
+        .await;
+        assert_eq!(status, 200);
+        let claims = session_claims(&response);
+        assert_eq!(claims["verified_factors"], serde_json::json!(["key"]));
+        assert_eq!(
+            claims["device_factors"],
+            serde_json::json!(["pin", "biometric"])
+        );
+    }
+
+    #[actix_web::test]
+    async fn did_login_without_factors_records_key_only() {
+        let owner = registered_owner();
+        let (status, response) = did_login(
+            &owner,
+            |nonce| serde_json::json!({ "signature": sign_hex(&owner.key, nonce) }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let claims = session_claims(&response);
+        assert_eq!(claims["verified_factors"], serde_json::json!(["key"]));
+        assert_eq!(claims["device_factors"], serde_json::json!([]));
+    }
+
+    #[actix_web::test]
+    async fn did_login_rejects_factors_not_covered_by_signature() {
+        let owner = registered_owner();
+        let (status, _) = did_login(&owner, |nonce| {
+            serde_json::json!({
+                "signature": sign_hex(&owner.key, nonce),
+                "device_factors": ["pin", "biometric"],
+            })
+        })
+        .await;
+        assert_eq!(status, 401);
+    }
+
+    #[actix_web::test]
+    async fn did_login_rejects_repeated_factor() {
+        let owner = registered_owner();
+        let (status, response) = did_login(&owner, |nonce| {
+            let message = format!("identity:login:{nonce}:pin,pin");
+            serde_json::json!({
+                "signature": sign_hex(&owner.key, &message),
+                "device_factors": ["pin", "pin"],
+            })
+        })
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(response["error"]["field"], "device_factors");
+    }
+
+    #[actix_web::test]
+    async fn did_login_rejects_unknown_factor() {
+        let owner = registered_owner();
+        let (status, _) = did_login(&owner, |nonce| {
+            serde_json::json!({
+                "signature": sign_hex(&owner.key, nonce),
+                "device_factors": ["retina"],
+            })
+        })
+        .await;
+        assert_eq!(status, 400);
     }
 
     #[actix_web::test]
