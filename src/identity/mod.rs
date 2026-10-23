@@ -8,7 +8,6 @@ pub mod login_factors;
 pub mod mdoc;
 pub mod migration;
 pub mod operations;
-pub mod passive_auth;
 pub mod pqc_policy;
 pub mod ra;
 pub mod sd_jwt;
