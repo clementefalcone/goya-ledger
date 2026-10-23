@@ -49,7 +49,7 @@ Other subsystems: bridge, governance, EVM (revm), chaincode, channels, oracles, 
 - RocksDB keys: zero-padded 12 digits. Secondary index: `{:012}:{id}`.
 - Signatures: `Vec<u8>` (not `[u8; 64]`) — supports Ed25519 (64B) and ML-DSA-65 (3309B). Hex-serialized via `vec_hex`.
 - Every signed struct carries `signature_algorithm: SigningAlgorithm` with `#[serde(default)]`.
-- DID format: `did:goya:` + hex(SHA3-512(public key bytes)), 128 hex chars. Canonical derivation via `identity::did::did_from_pubkey_hex()`. All DID generation must use this function.
+- DID format: `did:goya:` + hex(SHA3-512(public key bytes)), 128 hex chars. Canonical derivation via `identity::did::did_from_pubkey_hex()`. All DID generation must use this function. The DID is fixed by the first key; after `/identity/{did}/rotate` the registry's `public_key` is the only key that controls it.
 - Crypto boundary enforced by `cargo test --test crypto_boundary`.
 - `tempfile::TempDir` for RocksDB test fixtures.
 

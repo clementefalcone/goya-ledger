@@ -545,7 +545,9 @@ pub async fn cast_governance_vote(
         }
 
         // Verify voter DID matches the public key
-        if !crate::identity::did::did_matches_pubkey(&body.voter, pk_hex) {
+        let identities = crate::api::handlers::channels::get_channel_store(&state, "default")?;
+        if !crate::identity::operations::key_controls_did(identities.as_ref(), &body.voter, pk_hex)
+        {
             return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
                 err_dto("voter DID does not match public key"),
                 400,

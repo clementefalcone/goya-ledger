@@ -669,6 +669,11 @@ pub async fn auth_verify(
         .map_err(|_| ApiError::NotFound {
             resource: format!("identity {}", body.did),
         })?;
+    if identity.status != "active" {
+        return Err(ApiError::Forbidden {
+            reason: format!("identity {} is {}", body.did, identity.status),
+        });
+    }
 
     let algorithm = identity
         .signature_algorithm
@@ -988,5 +993,50 @@ mod tests {
         assert_eq!(post_owner_action(&owner, "rotate", body).await, 200);
         assert_eq!(owner_public_key(&owner), hex::encode(new_key.public_key()));
         assert_eq!(owner_status(&owner), "active");
+    }
+
+    async fn did_login_status(owner: &RegisteredOwner) -> u16 {
+        let app = actix_web::test::init_service(
+            actix_web::App::new().app_data(owner.state.clone()).service(
+                web::scope("/api/v1")
+                    .service(auth_challenge)
+                    .service(auth_verify),
+            ),
+        )
+        .await;
+        let challenge_req = actix_web::test::TestRequest::post()
+            .uri("/api/v1/identity/auth/challenge")
+            .set_json(serde_json::json!({ "did": owner.did }))
+            .to_request();
+        let challenge: serde_json::Value =
+            actix_web::test::call_and_read_body_json(&app, challenge_req).await;
+        let nonce = challenge["data"]["challenge"].as_str().unwrap().to_string();
+        let verify_req = actix_web::test::TestRequest::post()
+            .uri("/api/v1/identity/auth/verify")
+            .set_json(serde_json::json!({
+                "did": owner.did,
+                "challenge": nonce,
+                "signature": sign_hex(&owner.key, &nonce),
+            }))
+            .to_request();
+        actix_web::test::call_service(&app, verify_req)
+            .await
+            .status()
+            .as_u16()
+    }
+
+    #[actix_web::test]
+    async fn did_login_succeeds_for_active_identity() {
+        let owner = registered_owner();
+        assert_eq!(did_login_status(&owner).await, 200);
+    }
+
+    #[actix_web::test]
+    async fn did_login_rejects_revoked_identity() {
+        let owner = registered_owner();
+        let message = format!("identity:revoke:{}", owner.did);
+        let body = serde_json::json!({ "signature": sign_hex(&owner.key, &message) });
+        assert_eq!(post_owner_action(&owner, "revoke", body).await, 200);
+        assert_eq!(did_login_status(&owner).await, 403);
     }
 }

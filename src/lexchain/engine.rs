@@ -164,7 +164,7 @@ pub fn sign(
         return Err(LexChainError::AlreadySigned(req.did.clone()));
     }
 
-    if !crate::identity::did::did_matches_pubkey(&req.did, &req.public_key) {
+    if !crate::identity::operations::key_controls_did(store.backend(), &req.did, &req.public_key) {
         return Err(LexChainError::SignerMismatch(req.did.clone()));
     }
 
@@ -551,12 +551,12 @@ mod tests {
         LexChainStore::new()
     }
 
-    fn register_did(store: &LexChainStore, did: &str) {
+    fn register_key(store: &LexChainStore, provider: &dyn SigningProvider) {
         store
             .backend()
             .write_identity(&IdentityRecord {
-                did: did.to_string(),
-                public_key: "deadbeef".to_string(),
+                did: did_of(provider),
+                public_key: hex::encode(provider.public_key()),
                 created_at: 0,
                 updated_at: 0,
                 status: "active".to_string(),
@@ -636,7 +636,7 @@ mod tests {
     #[test]
     fn sign_rejects_key_not_bound_to_party_did() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let forged = sign_as(&contract, &key("mallory"));
@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn sign_advances_to_fully_signed() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&contract, &key("alice"));
         let updated = sign(&store, &contract.id, &req).unwrap();
@@ -692,7 +692,7 @@ mod tests {
     #[test]
     fn sign_rejects_unknown_party() {
         let store = test_store();
-        register_did(&store, &did("unknown"));
+        register_key(&store, &key("unknown"));
         let contract = deploy(&store, fes_definition()).unwrap();
         let provider = SoftwareSigningProvider::generate();
         let mut req = sign_as(&contract, &provider);
@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn sign_rejects_after_fully_signed() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&contract, &key("alice"));
         let signed = sign(&store, &contract.id, &req).unwrap();
@@ -720,8 +720,8 @@ mod tests {
     #[test]
     fn two_party_flow_pending_until_both_sign() {
         let store = test_store();
-        register_did(&store, &did("alice"));
-        register_did(&store, &did("bob"));
+        register_key(&store, &key("alice"));
+        register_key(&store, &key("bob"));
         let contract = deploy(&store, two_party_definition()).unwrap();
 
         let req_a = sign_as(&contract, &key("alice"));
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn full_lifecycle_deploy_sign_notarize_archive() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -786,7 +786,7 @@ mod tests {
         let store = test_store();
         let provider = MlDsaSigningProvider::generate();
         let notary_did = did_of(&provider);
-        register_did(&store, &notary_did);
+        register_key(&store, &provider);
         let def = ContractDefinition {
             contract_type: "notarial_deed".into(),
             parties: vec![PartyDefinition {
@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn archive_writes_transaction_to_store() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -863,7 +863,7 @@ mod tests {
     #[test]
     fn persistence_roundtrip() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
         let id = contract.id.clone();
 
@@ -906,7 +906,7 @@ mod tests {
     #[test]
     fn sign_rejects_expired_contract() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let mut def = fes_definition();
         def.deadline_secs = Some(0);
         let contract = deploy(&store, def).unwrap();
@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn signed_contract_with_deadline_does_not_expire() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let mut def = fes_definition();
         def.deadline_secs = Some(3600);
         let contract = deploy(&store, def).unwrap();
@@ -1108,7 +1108,7 @@ mod tests {
     #[test]
     fn deliver_creates_receipt_with_tsa() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1128,7 +1128,7 @@ mod tests {
     #[test]
     fn acknowledge_delivery_timestamps_receipt() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1146,7 +1146,7 @@ mod tests {
     #[test]
     fn deliver_rejects_unknown_party() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1172,8 +1172,8 @@ mod tests {
     #[test]
     fn two_party_delivery_transitions_on_last() {
         let store = test_store();
-        register_did(&store, &did("alice"));
-        register_did(&store, &did("bob"));
+        register_key(&store, &key("alice"));
+        register_key(&store, &key("bob"));
         let contract = deploy(&store, two_party_definition()).unwrap();
 
         let req_a = sign_as(&contract, &key("alice"));
@@ -1204,7 +1204,7 @@ mod tests {
     #[test]
     fn archive_accepts_delivered_state() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1221,7 +1221,7 @@ mod tests {
     #[test]
     fn full_erds_lifecycle() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1244,7 +1244,7 @@ mod tests {
     #[test]
     fn preserve_contract_re_signs_with_pqc() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1280,7 +1280,7 @@ mod tests {
         use crate::crypto::algorithm_policy::AlgorithmPolicy;
 
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
 
         let contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&contract, &key("alice"));
@@ -1313,7 +1313,7 @@ mod tests {
         use crate::crypto::algorithm_policy::AlgorithmPolicy;
 
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
 
         let contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&contract, &key("alice"));
@@ -1343,7 +1343,7 @@ mod tests {
         use crate::crypto::algorithm_policy::AlgorithmPolicy;
 
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
 
         let contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&contract, &key("alice"));
@@ -1362,7 +1362,7 @@ mod tests {
     #[test]
     fn quarantine_classical_only_contracts() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
 
         let ed_contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&ed_contract, &key("alice"));
@@ -1370,7 +1370,7 @@ mod tests {
 
         let pqc_signer = MlDsaSigningProvider::generate();
         let pqc_did = did_of(&pqc_signer);
-        register_did(&store, &pqc_did);
+        register_key(&store, &pqc_signer);
         let pqc_def = ContractDefinition {
             contract_type: "nda".into(),
             parties: vec![PartyDefinition {

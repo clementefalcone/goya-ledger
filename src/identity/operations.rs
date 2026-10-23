@@ -274,6 +274,14 @@ pub fn apply_rotate(
     })
 }
 
+pub fn key_controls_did(store: &dyn BlockStore, did: &str, public_key: &str) -> bool {
+    match store.read_identity(did) {
+        Ok(record) => record.status == "active" && record.public_key == public_key,
+        Err(StorageError::IdentityNotFound(_)) => did_matches_pubkey(did, public_key),
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +509,45 @@ mod tests {
         apply_revoke(&store, &owner.did, 500, &signature).unwrap();
         apply_revoke(&store, &owner.did, 900, &signature).unwrap();
         assert_eq!(store.read_identity(&owner.did).unwrap().updated_at, 500);
+    }
+
+    #[test]
+    fn unregistered_did_is_controlled_only_by_the_key_it_derives_from() {
+        let store = MemoryStore::new();
+        let (owner, stranger) = (Owner::ml_dsa(), Owner::ml_dsa());
+        assert!(key_controls_did(&store, &owner.did, &owner.public_key));
+        assert!(!key_controls_did(&store, &owner.did, &stranger.public_key));
+    }
+
+    #[test]
+    fn rotated_did_is_controlled_by_new_key_and_not_by_first_key() {
+        let store = MemoryStore::new();
+        let (owner, recovery, successor, next) = (
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+            Owner::ml_dsa(),
+        );
+        register_with_recovery(&store, &owner, &recovery);
+        assert!(key_controls_did(&store, &owner.did, &owner.public_key));
+        apply_rotate(
+            &store,
+            &Rotation::signed(&owner, &recovery, &successor, &next).request(),
+            700,
+        )
+        .unwrap();
+        assert!(key_controls_did(&store, &owner.did, &successor.public_key));
+        assert!(!key_controls_did(&store, &owner.did, &owner.public_key));
+    }
+
+    #[test]
+    fn revoked_did_is_controlled_by_no_key() {
+        let store = MemoryStore::new();
+        let owner = Owner::ml_dsa();
+        owner.register_on(&store);
+        let revocation = owner.sign(&revoke_message(&owner.did));
+        apply_revoke(&store, &owner.did, 500, &revocation).unwrap();
+        assert!(!key_controls_did(&store, &owner.did, &owner.public_key));
     }
 
     #[test]

@@ -404,6 +404,52 @@ fn p2p_key_rotation_reaches_second_node_and_kills_stolen_key() {
         "rotation on node1 never reached node2"
     );
 
+    let content_hash = format!("{:064x}", now);
+    let notarize_with = |provider: &MlDsaSigningProvider| {
+        post_json(
+            &node2.api_url("/notarize"),
+            serde_json::json!({
+                "content_hash": content_hash,
+                "signer": did,
+                "public_key": key_of(provider),
+                "signature_algorithm": "MlDsa65",
+                "signature": sign(provider, &format!("notarize:{did}:{content_hash}")),
+            }),
+        )
+    };
+    let stolen_notarization = notarize_with(&phone);
+    assert_ne!(
+        stolen_notarization["status"], "Success",
+        "stolen key notarized on node2: {stolen_notarization}"
+    );
+    let own_notarization = notarize_with(&new_phone);
+    assert_eq!(
+        own_notarization["status"], "Success",
+        "new key could not notarize on node2: {own_notarization}"
+    );
+
+    let login_with = |provider: &MlDsaSigningProvider| {
+        let challenge = post_json(
+            &node2.api_url("/identity/auth/challenge"),
+            serde_json::json!({ "did": did }),
+        );
+        let nonce = challenge["data"]["challenge"].as_str().unwrap().to_string();
+        post_json(
+            &node2.api_url("/identity/auth/verify"),
+            serde_json::json!({ "did": did, "challenge": nonce, "signature": sign(provider, &nonce) }),
+        )
+    };
+    let stolen_login = login_with(&phone);
+    assert_ne!(
+        stolen_login["status"], "Success",
+        "stolen key logged in on node2: {stolen_login}"
+    );
+    let own_login = login_with(&new_phone);
+    assert_eq!(
+        own_login["status"], "Success",
+        "new key could not log in on node2: {own_login}"
+    );
+
     let revoke_with = |provider: &MlDsaSigningProvider| {
         post_json(
             &node2.api_url(&format!("/identity/{did}/revoke")),
@@ -417,4 +463,9 @@ fn p2p_key_rotation_reaches_second_node_and_kills_stolen_key() {
     );
     let own = revoke_with(&new_phone);
     assert_eq!(own["status"], "Success", "new key rejected on node2: {own}");
+    let revoked_login = login_with(&new_phone);
+    assert_ne!(
+        revoked_login["status"], "Success",
+        "revoked identity logged in on node2: {revoked_login}"
+    );
 }

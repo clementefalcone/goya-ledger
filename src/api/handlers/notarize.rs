@@ -19,10 +19,11 @@ use crate::api::errors::{ApiResponse, ApiResult, ErrorDto};
 use crate::api::handlers::channels::{channel_id_from_req, get_channel_store};
 use crate::app_state::AppState;
 use crate::document::DocumentFingerprint;
+use crate::identity::operations;
 use crate::identity::signing::SigningAlgorithm;
 use crate::signature::{
     compute_biometrics_hash, is_signer_proven, verify_signature, BiometricEvidence, SignatureLevel,
-    SignerProof,
+    SignerClaim, SignerProof,
 };
 use crate::storage::traits::{NotarizationEntry, OwnershipTransfer};
 use actix_web::{get, post, web, HttpRequest, HttpResponse};
@@ -191,10 +192,13 @@ pub async fn submit_notarization(
         &body.biometric_evidence,
     );
     if !is_signer_proven(
-        &body.signer,
-        &body.public_key,
-        body.signer_proof.as_ref(),
-        sign_msg.as_bytes(),
+        &SignerClaim {
+            signer: &body.signer,
+            signing_public_key: &body.public_key,
+            proof: body.signer_proof.as_ref(),
+            payload: sign_msg.as_bytes(),
+        },
+        &|did, key| operations::key_controls_did(store.as_ref(), did, key),
     ) {
         return Ok(signer_not_proven(&body.signer));
     }
@@ -371,10 +375,13 @@ pub async fn notarize_pdf(
         body.signer, fingerprint.canonical_hash, bio_hash
     );
     if !is_signer_proven(
-        &body.signer,
-        "",
-        Some(&body.signer_proof),
-        payload.as_bytes(),
+        &SignerClaim {
+            signer: &body.signer,
+            signing_public_key: "",
+            proof: Some(&body.signer_proof),
+            payload: payload.as_bytes(),
+        },
+        &|did, key| operations::key_controls_did(store.as_ref(), did, key),
     ) {
         return Ok(signer_not_proven(&body.signer));
     }
@@ -491,7 +498,11 @@ impl EntryVerification {
     }
 }
 
-fn verify_entry(state: &AppState, entry: &NotarizationEntry) -> EntryVerification {
+fn verify_entry(
+    state: &AppState,
+    store: &dyn crate::storage::traits::BlockStore,
+    entry: &NotarizationEntry,
+) -> EntryVerification {
     if entry.public_key.is_empty() {
         return EntryVerification {
             signature: None,
@@ -516,10 +527,16 @@ fn verify_entry(state: &AppState, entry: &NotarizationEntry) -> EntryVerificatio
         .as_ref()
         .map(|cades_hex| verify_entry_cades(state, entry, cades_hex));
     let signer = is_signer_proven(
-        &entry.signer,
-        &entry.public_key,
-        entry.signer_proof.as_ref(),
-        payload.as_bytes(),
+        &SignerClaim {
+            signer: &entry.signer,
+            signing_public_key: &entry.public_key,
+            proof: entry.signer_proof.as_ref(),
+            payload: payload.as_bytes(),
+        },
+        &|did, key| {
+            crate::identity::did::did_matches_pubkey(did, key)
+                || operations::key_controls_did(store, did, key)
+        },
     );
     EntryVerification {
         signature: Some(signature),
@@ -570,7 +587,7 @@ pub async fn verify_notarization(
 
     match store.read_notarization_by_hash(&content_hash) {
         Ok(entry) => {
-            let verification = verify_entry(&state, &entry);
+            let verification = verify_entry(&state, store.as_ref(), &entry);
             if !verification.is_authentic() {
                 return Ok(HttpResponse::UnprocessableEntity().json(ApiResponse::<()>::error(
                     err_dto(
@@ -733,7 +750,7 @@ pub async fn transfer_document(
     }
 
     // Verify from_did matches public_key
-    if !crate::identity::did::did_matches_pubkey(&body.from_did, &body.public_key) {
+    if !operations::key_controls_did(store.as_ref(), &body.from_did, &body.public_key) {
         return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
             err_dto("SIGNER_MISMATCH", "from_did does not match public key"),
             401,
@@ -918,6 +935,7 @@ pub async fn sign_fea(
     body: web::Json<SignFeaRequest>,
 ) -> ApiResult<HttpResponse> {
     let trace = uuid::Uuid::new_v4().to_string();
+    let store = get_channel_store(&state, "default")?;
 
     if body.content_hash.len() != 64 || hex::decode(&body.content_hash).is_err() {
         return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
@@ -975,10 +993,13 @@ pub async fn sign_fea(
         body.signer, body.content_hash, bio_hash
     );
     if !is_signer_proven(
-        &body.signer,
-        "",
-        Some(&body.signer_proof),
-        payload.as_bytes(),
+        &SignerClaim {
+            signer: &body.signer,
+            signing_public_key: "",
+            proof: Some(&body.signer_proof),
+            payload: payload.as_bytes(),
+        },
+        &|did, key| operations::key_controls_did(store.as_ref(), did, key),
     ) {
         return Ok(signer_not_proven(&body.signer));
     }
@@ -1556,7 +1577,7 @@ pub async fn verify_fes_bulk(
 
         match store.read_notarization_by_hash(&hash) {
             Ok(entry) => {
-                let status = if verify_entry(&state, &entry).is_authentic() {
+                let status = if verify_entry(&state, store.as_ref(), &entry).is_authentic() {
                     "verified"
                 } else {
                     "invalid_signature"
@@ -1966,6 +1987,78 @@ mod tests {
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["data"]["verified"], true);
         assert_eq!(body["data"]["signature_level"], "simple");
+    }
+
+    async fn post_simple_notarization(
+        state: web::Data<AppState>,
+        did: &str,
+        public_key: &str,
+        provider: &SoftwareSigningProvider,
+    ) -> u16 {
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .service(web::scope("/api/v1").service(submit_notarization)),
+        )
+        .await;
+        let hash = content_hash();
+        let payload = format!("notarize:{did}:{hash}");
+        let req = test::TestRequest::post()
+            .uri("/api/v1/notarize")
+            .set_json(serde_json::json!({
+                "content_hash": hash,
+                "signer": did,
+                "public_key": public_key,
+                "signature": hex::encode(provider.sign(payload.as_bytes()).unwrap()),
+            }))
+            .to_request();
+        test::call_service(&app, req).await.status().as_u16()
+    }
+
+    fn rotated_identity(
+        state: &web::Data<AppState>,
+    ) -> (
+        String,
+        (String, SoftwareSigningProvider),
+        (String, SoftwareSigningProvider),
+    ) {
+        let (did, first_key, first_provider) = ed25519_identity();
+        let (_, current_key, current_provider) = ed25519_identity();
+        crate::api::handlers::channels::get_channel_store(state, "default")
+            .unwrap()
+            .write_identity(&crate::storage::traits::IdentityRecord {
+                did: did.clone(),
+                public_key: current_key.clone(),
+                created_at: 1,
+                updated_at: 2,
+                status: "active".to_string(),
+                migrated_from: None,
+                signature_algorithm: None,
+                civil_anchor: None,
+                recovery_commitment: None,
+            })
+            .unwrap();
+        (
+            did,
+            (first_key, first_provider),
+            (current_key, current_provider),
+        )
+    }
+
+    #[actix_web::test]
+    async fn notarize_rejects_key_rotated_out_of_the_identity() {
+        let state = make_app_data();
+        let (did, (stolen_key, stolen_provider), _) = rotated_identity(&state);
+        let status = post_simple_notarization(state, &did, &stolen_key, &stolen_provider).await;
+        assert_eq!(status, 401);
+    }
+
+    #[actix_web::test]
+    async fn notarize_accepts_key_rotated_into_the_identity() {
+        let state = make_app_data();
+        let (did, _, (current_key, current_provider)) = rotated_identity(&state);
+        let status = post_simple_notarization(state, &did, &current_key, &current_provider).await;
+        assert_eq!(status, 201);
     }
 
     // ── E2E: Advanced (FEA) with ML-DSA-65 + biometric ──────────────
