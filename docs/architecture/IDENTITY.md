@@ -116,7 +116,7 @@ Client                          Server
 
 - Algorithm resolved from `IdentityRecord.signature_algorithm`
 - Supports Ed25519 and ML-DSA-65
-- Optional `device_factors` (`pin`, `biometric`) are checked on the device. When present, the signature must cover `identity:login:{nonce}:{factors joined by ","}` in the order sent; otherwise it covers the bare nonce. A repeated factor returns 400.
+- Optional `device_factors` (`pin`, `passphrase`, `biometric`) are checked on the device. When present, the signature must cover `identity:login:{nonce}:{factors joined by ","}` in the order sent; otherwise it covers the bare nonce. A repeated factor returns 400.
 - The session JWT carries `verified_factors` (checked by the node, today `["key"]`) and `device_factors` (asserted by the device, bound by the signature). Apps requiring multiple factors read both.
 
 ### ACL System

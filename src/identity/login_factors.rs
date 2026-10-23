@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum DeviceFactor {
     Pin,
+    Passphrase,
     Biometric,
 }
 
@@ -11,6 +12,7 @@ impl DeviceFactor {
     fn key(self) -> &'static str {
         match self {
             DeviceFactor::Pin => "pin",
+            DeviceFactor::Passphrase => "passphrase",
             DeviceFactor::Biometric => "biometric",
         }
     }
@@ -56,6 +58,12 @@ mod tests {
             login_message("n", &factors),
             "identity:login:n:pin,biometric"
         );
+    }
+
+    #[test]
+    fn passphrase_is_a_knowledge_factor() {
+        let factors: Vec<DeviceFactor> = serde_json::from_str(r#"["passphrase"]"#).unwrap();
+        assert_eq!(login_message("n", &factors), "identity:login:n:passphrase");
     }
 
     #[test]
