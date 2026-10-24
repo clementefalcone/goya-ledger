@@ -56,6 +56,7 @@ impl ApiRoutes {
             .service(identity::rotate_key)
             .service(identity_vault::add_vault_entry)
             .service(identity_vault::revoke_vault_entry)
+            .service(identity_vault::commit_recovery_key)
             .service(identity::get_identity_methods)
             .service(identity::store_write_identity)
             .service(identity::store_list_identities)
@@ -431,6 +432,7 @@ impl LightRoutes {
             .service(identity::rotate_key)
             .service(identity_vault::add_vault_entry)
             .service(identity_vault::revoke_vault_entry)
+            .service(identity_vault::commit_recovery_key)
             .service(identity::auth_challenge)
             .service(identity::auth_verify);
         // Tokenomics

@@ -5,6 +5,7 @@ use crate::api::handlers::identity::{
 };
 use crate::app_state::AppState;
 use crate::identity::operations::Change;
+use crate::identity::recovery_commitment::{check_commit_recovery, CommitRecoveryRequest};
 use crate::identity::vault_entries::{
     check_add_vault_entry, check_revoke_vault_entry, AddVaultEntryRequest, RevokeVaultEntryRequest,
 };
@@ -117,9 +118,61 @@ pub async fn revoke_vault_entry(
     )))
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct CommitRecoveryBody {
+    pub recovery_commitment: String,
+    pub signature: String,
+}
+
+#[post("/identity/{did}/recovery")]
+pub async fn commit_recovery_key(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<CommitRecoveryBody>,
+    req: HttpRequest,
+) -> ApiResult<HttpResponse> {
+    let did = path.into_inner();
+    let trace_id = uuid::Uuid::new_v4().to_string();
+    let channel = channel_id_from_req(&req);
+    let store = get_channel_store(&state, channel)?;
+
+    let request = CommitRecoveryRequest {
+        did: &did,
+        recovery_commitment: &body.recovery_commitment,
+        owner_signature: &body.signature,
+    };
+    if check_commit_recovery(store.as_ref(), &request).map_err(identity_op_error)?
+        == Change::AlreadyApplied
+    {
+        return Ok(HttpResponse::Ok().json(ApiResponse::success(
+            serde_json::json!({ "did": did, "status": "already_committed" }),
+            trace_id,
+        )));
+    }
+
+    let committed_at = now_secs();
+    commit_identity_op(
+        &state,
+        store.as_ref(),
+        channel,
+        &did,
+        TxPayload::CommitRecoveryKey {
+            did: did.clone(),
+            recovery_commitment: body.recovery_commitment.clone(),
+            committed_at,
+            owner_signature: body.signature.clone(),
+        },
+    )?;
+    Ok(HttpResponse::Created().json(ApiResponse::success(
+        serde_json::json!({ "did": did, "committed_at": committed_at }),
+        trace_id,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::recovery_commitment::commit_recovery_message;
     use crate::identity::signing::{MlDsaSigningProvider, SigningProvider};
     use crate::identity::vault_entries::{add_vault_entry_message, revoke_vault_entry_message};
     use crate::storage::traits::IdentityRecord;
@@ -173,7 +226,8 @@ mod tests {
             actix_web::App::new().app_data(owner.state.clone()).service(
                 web::scope("/api/v1")
                     .service(add_vault_entry)
-                    .service(revoke_vault_entry),
+                    .service(revoke_vault_entry)
+                    .service(commit_recovery_key),
             ),
         )
         .await;
@@ -258,5 +312,39 @@ mod tests {
         body["kind"] = serde_json::json!("laptop");
         let uri = format!("/api/v1/identity/{}/vault", owner.did);
         assert_eq!(post(&owner, &uri, body).await, 400);
+    }
+    #[actix_web::test]
+    async fn legacy_identity_commits_its_recovery_key_once_over_http() {
+        let owner = registered_owner();
+        let first = crate::identity::did::did_from_pubkey_hex(&hex::encode(
+            MlDsaSigningProvider::generate().public_key(),
+        ));
+        let second = crate::identity::did::did_from_pubkey_hex(&hex::encode(
+            MlDsaSigningProvider::generate().public_key(),
+        ));
+        let uri = format!("/api/v1/identity/{}/recovery", owner.did);
+        let body = |commitment: &str| {
+            serde_json::json!({
+                "recovery_commitment": commitment,
+                "signature": sign(&owner.key, &commit_recovery_message(&owner.did, commitment)),
+            })
+        };
+        assert_eq!(post(&owner, &uri, body(&first)).await, 201);
+        assert_eq!(post(&owner, &uri, body(&first)).await, 200);
+        assert_eq!(post(&owner, &uri, body(&second)).await, 409);
+    }
+
+    #[actix_web::test]
+    async fn stranger_cannot_commit_a_recovery_key_over_http() {
+        let owner = registered_owner();
+        let stranger = MlDsaSigningProvider::generate();
+        let stranger_did =
+            crate::identity::did::did_from_pubkey_hex(&hex::encode(stranger.public_key()));
+        let uri = format!("/api/v1/identity/{}/recovery", owner.did);
+        let body = serde_json::json!({
+            "recovery_commitment": stranger_did,
+            "signature": sign(&stranger, &commit_recovery_message(&owner.did, &stranger_did)),
+        });
+        assert_eq!(post(&owner, &uri, body).await, 401);
     }
 }

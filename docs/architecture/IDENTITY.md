@@ -60,6 +60,7 @@ register (DID fixed by first key, commits SHA3-512 of an ML-DSA-65 recovery key)
 - Register, revoke and rotate are `TxPayload` transactions: every node re-verifies signatures when it applies the block (`identity::operations`)
 - Rotation is the PQC migration path: an Ed25519 identity rotates to an ML-DSA-65 key and keeps its DID; the recovery key must be ML-DSA-65 so a broken classical algorithm cannot authorize it
 - A stolen device cannot rotate: it holds the current key, not the recovery key; after rotation the stolen key fails every identity operation on every node
+- An identity registered without a recovery commitment can commit one once (`POST /identity/{did}/recovery`, `TxPayload::CommitRecoveryKey`), signed by its current key over `identity:recovery:commit:{did}:{commitment}`; once set, only rotation by the recovery key replaces it (`identity::recovery_commitment`)
 - `key_recovery::split(secret, threshold, total)` produces N shares; any K reconstruct via Lagrange interpolation over GF(256)
 
 ### HSM Support

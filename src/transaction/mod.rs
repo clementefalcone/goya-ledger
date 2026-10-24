@@ -6,7 +6,7 @@ pub mod parallel;
 pub mod proposal;
 pub mod rwset;
 
-use crate::identity::{operations, vault_entries};
+use crate::identity::{operations, recovery_commitment, vault_entries};
 use crate::storage::errors::StorageResult;
 use crate::storage::traits::{BlockStore, Transaction, TxPayload};
 
@@ -73,6 +73,20 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
                 owner_signature,
             },
         ),
+        Some(TxPayload::CommitRecoveryKey {
+            did,
+            recovery_commitment,
+            committed_at,
+            owner_signature,
+        }) => recovery_commitment::apply_commit_recovery(
+            store,
+            &recovery_commitment::CommitRecoveryRequest {
+                did,
+                recovery_commitment,
+                owner_signature,
+            },
+            *committed_at,
+        ),
         Some(TxPayload::Notarize { entry }) => store.write_notarization(entry),
         _ => Ok(()),
     }
@@ -83,6 +97,7 @@ mod tests {
     use super::*;
     use crate::identity::did::did_from_pubkey_hex;
     use crate::identity::operations::{register_message, revoke_message, rotate_message};
+    use crate::identity::recovery_commitment::commit_recovery_message;
     use crate::identity::signing::{MlDsaSigningProvider, SigningProvider};
     use crate::identity::vault_entries::{add_vault_entry_message, revoke_vault_entry_message};
     use crate::storage::traits::{IdentityRecord, VaultEntry, VaultEntryKind};
@@ -336,5 +351,62 @@ mod tests {
             node.read_identity(&did).unwrap().vault_entries,
             vec![phone_copy()]
         );
+    }
+    #[test]
+    fn legacy_identity_gains_a_recovery_key_that_rotates_on_every_node() {
+        let (node_a, node_b) = (MemoryStore::new(), MemoryStore::new());
+        let owner = MlDsaSigningProvider::generate();
+        let recovery = MlDsaSigningProvider::generate();
+        let successor = MlDsaSigningProvider::generate();
+        let next = MlDsaSigningProvider::generate();
+        let (did, _) = identity_of(&owner);
+        let (recovery_did, recovery_public_key) = identity_of(&recovery);
+        let (_, new_public_key) = identity_of(&successor);
+        let (next_did, _) = identity_of(&next);
+        apply_on_both([&node_a, &node_b], &register_tx(&owner));
+
+        let commit = tx_with(TxPayload::CommitRecoveryKey {
+            did: did.clone(),
+            recovery_commitment: recovery_did.clone(),
+            committed_at: 200,
+            owner_signature: sign(&owner, &commit_recovery_message(&did, &recovery_did)),
+        });
+        apply_on_both([&node_a, &node_b], &commit);
+
+        let message = rotate_message(&did, &new_public_key, &next_did);
+        let rotate = tx_with(TxPayload::RotateIdentity {
+            did: did.clone(),
+            new_public_key: new_public_key.clone(),
+            recovery_public_key,
+            new_recovery_commitment: next_did.clone(),
+            rotated_at: 300,
+            recovery_signature: sign(&recovery, &message),
+            new_key_signature: sign(&successor, &message),
+        });
+        apply_on_both([&node_a, &node_b], &rotate);
+
+        let on_a = node_a.read_identity(&did).unwrap();
+        let on_b = node_b.read_identity(&did).unwrap();
+        assert_eq!(on_b.public_key, new_public_key);
+        assert_eq!(on_b.recovery_commitment, Some(next_did));
+        assert_eq!(on_a, on_b);
+    }
+
+    #[test]
+    fn forged_recovery_commitment_in_a_block_is_rejected_by_receiving_node() {
+        let node = MemoryStore::new();
+        let owner = MlDsaSigningProvider::generate();
+        let thief = MlDsaSigningProvider::generate();
+        let (did, _) = identity_of(&owner);
+        let (thief_did, _) = identity_of(&thief);
+        apply_tx_payload(&node, &register_tx(&owner)).unwrap();
+        let forged = tx_with(TxPayload::CommitRecoveryKey {
+            did: did.clone(),
+            recovery_commitment: thief_did.clone(),
+            committed_at: 200,
+            owner_signature: sign(&thief, &commit_recovery_message(&did, &thief_did)),
+        });
+        assert!(apply_tx_payload(&node, &forged).is_err());
+        assert_eq!(node.read_identity(&did).unwrap().recovery_commitment, None);
     }
 }

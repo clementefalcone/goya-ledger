@@ -10,6 +10,7 @@ pub mod migration;
 pub mod operations;
 pub mod pqc_policy;
 pub mod ra;
+pub mod recovery_commitment;
 pub mod sd_jwt;
 pub mod signing;
 pub mod status_list;

@@ -128,6 +128,12 @@ pub enum TxPayload {
         revoked_at: u64,
         owner_signature: String,
     },
+    CommitRecoveryKey {
+        did: String,
+        recovery_commitment: String,
+        committed_at: u64,
+        owner_signature: String,
+    },
     Notarize {
         entry: Box<NotarizationEntry>,
     },

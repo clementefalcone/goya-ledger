@@ -659,3 +659,101 @@ fn p2p_theft_lockout_sequence_converges_on_second_node() {
         "old copy not revoked on node2: {on2}"
     );
 }
+
+#[test]
+#[ignore]
+fn p2p_legacy_identity_commits_recovery_key_and_rotates_on_second_node() {
+    use rust_bc::identity::operations::{register_message, rotate_message};
+    use rust_bc::identity::recovery_commitment::commit_recovery_message;
+    use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider};
+    use rust_bc::identity::vault_entries::add_vault_entry_message;
+    use rust_bc::storage::traits::{VaultEntry, VaultEntryKind};
+    let node1 = TestNode::spawn(19160, 19161, None);
+    assert!(node1.wait_ready(30), "node1 failed to start");
+    let node2 = TestNode::spawn(19162, 19163, Some(&node1));
+    assert!(node2.wait_ready(30), "node2 failed to start");
+
+    let hex_key = |key: &MlDsaSigningProvider| hex::encode(key.public_key());
+    let did_of =
+        |key: &MlDsaSigningProvider| rust_bc::identity::did::did_from_pubkey_hex(&hex_key(key));
+    let sign = |key: &MlDsaSigningProvider, message: String| {
+        hex::encode(key.sign(message.as_bytes()).unwrap())
+    };
+    let (owner, recovery, successor, next, thief) = (
+        MlDsaSigningProvider::generate(),
+        MlDsaSigningProvider::generate(),
+        MlDsaSigningProvider::generate(),
+        MlDsaSigningProvider::generate(),
+        MlDsaSigningProvider::generate(),
+    );
+    let did = did_of(&owner);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let registered = post_json(
+        &node1.api_url("/store/identities"),
+        serde_json::json!({
+            "did": did, "public_key": hex_key(&owner), "status": "active",
+            "created_at": now, "updated_at": now,
+            "signature": sign(&owner, register_message(&did, None)),
+        }),
+    );
+    assert_eq!(
+        registered["status"], "Success",
+        "register failed: {registered}"
+    );
+
+    let commit = |key: &MlDsaSigningProvider, commitment: String| {
+        post_json(
+            &node1.api_url(&format!("/identity/{did}/recovery")),
+            serde_json::json!({
+                "recovery_commitment": commitment,
+                "signature": sign(key, commit_recovery_message(&did, &commitment)),
+            }),
+        )
+    };
+    let forged = commit(&thief, did_of(&thief));
+    assert_ne!(forged["status"], "Success", "thief committed: {forged}");
+    let committed = commit(&owner, did_of(&recovery));
+    assert_eq!(committed["status"], "Success", "commit failed: {committed}");
+    let replaced = commit(&owner, did_of(&thief));
+    assert_ne!(replaced["status"], "Success", "commit replaced: {replaced}");
+
+    let message = rotate_message(&did, &hex_key(&successor), &did_of(&next));
+    let rotated = post_json(
+        &node1.api_url(&format!("/identity/{did}/rotate")),
+        serde_json::json!({
+            "new_public_key": hex_key(&successor), "recovery_public_key": hex_key(&recovery),
+            "new_recovery_commitment": did_of(&next),
+            "recovery_signature": sign(&recovery, message.clone()),
+            "new_key_signature": sign(&successor, message),
+        }),
+    );
+    assert_eq!(rotated["status"], "Success", "rotate failed: {rotated}");
+
+    let marker = VaultEntry {
+        entry_id: "cc03".to_string(),
+        kind: VaultEntryKind::Device,
+        label: "after rotation".to_string(),
+        sealed_key: "{}".to_string(),
+        added_at: 0,
+        revoked_at: None,
+    };
+    let added = post_json(
+        &node1.api_url(&format!("/identity/{did}/vault")),
+        serde_json::json!({
+            "entry_id": marker.entry_id, "kind": "device", "label": marker.label,
+            "sealed_key": marker.sealed_key,
+            "signature": sign(&successor, add_vault_entry_message(&did, &marker)),
+        }),
+    );
+    assert_eq!(added["status"], "Success", "add failed: {added}");
+    assert!(
+        wait_for_vault_entry(&node2, &did, "cc03", false),
+        "commit and rotation never reached node2"
+    );
+    let on2 = get_json(&node2.api_url(&format!("/store/identities/{did}")))["data"].clone();
+    assert_eq!(on2["public_key"], hex_key(&successor));
+    assert_eq!(on2["recovery_commitment"], did_of(&next));
+}
