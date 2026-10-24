@@ -117,6 +117,41 @@ pub struct VaultStoreRequest {
     pub encrypted_wallet: serde_json::Value,
     /// Client-derived recovery key (hex, 64 chars = 32 bytes). Optional.
     pub recovery_key: Option<String>,
+    pub public_key: String,
+    pub signature: String,
+}
+
+pub fn vault_store_message(
+    did: &str,
+    encrypted_wallet: &serde_json::Value,
+    recovery_key: Option<&str>,
+) -> String {
+    format!(
+        "vault:store:{did}:{}:{encrypted_wallet}",
+        recovery_key.unwrap_or("")
+    )
+}
+
+fn wallet_address_of(public_key_hex: &str) -> Option<String> {
+    let public_key = hex::decode(public_key_hex).ok()?;
+    let digest =
+        crate::crypto::hasher::hash_with(crate::crypto::hasher::HashAlgorithm::Sha256, &public_key);
+    Some(hex::encode(&digest[..20]))
+}
+
+fn key_owns_vault_did(
+    store: &dyn crate::storage::traits::BlockStore,
+    did: &str,
+    public_key_hex: &str,
+) -> bool {
+    let wallet_address = did.strip_prefix("did:goya:bio:").or_else(|| {
+        did.strip_prefix("did:goya:")
+            .filter(|rest| rest.len() == 40)
+    });
+    match wallet_address {
+        Some(address) => wallet_address_of(public_key_hex).as_deref() == Some(address),
+        None => crate::identity::operations::key_controls_did(store, did, public_key_hex),
+    }
 }
 
 #[derive(Deserialize)]
@@ -141,6 +176,26 @@ pub async fn vault_store(
 
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
+
+    if !key_owns_vault_did(store.as_ref(), &body.did, &body.public_key) {
+        return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
+            err_dto(&format!("public_key does not own vault {}", body.did)),
+            401,
+        )));
+    }
+    let message = vault_store_message(
+        &body.did,
+        &body.encrypted_wallet,
+        body.recovery_key.as_deref(),
+    );
+    if !crate::identity::operations::is_signed_by(&body.public_key, &message, &body.signature) {
+        return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
+            err_dto(&format!(
+                "signature over {message:?} does not verify against public_key"
+            )),
+            401,
+        )));
+    }
 
     store
         .write_vault(&body.did, &body.encrypted_wallet)
@@ -303,6 +358,187 @@ pub async fn vault_recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
+
+    struct Wallet {
+        key: SoftwareSigningProvider,
+        public_key: String,
+        did: String,
+    }
+
+    fn new_wallet() -> Wallet {
+        let key = SoftwareSigningProvider::generate();
+        let public_key = hex::encode(key.public_key());
+        let did = format!("did:goya:{}", wallet_address_of(&public_key).unwrap());
+        Wallet {
+            key,
+            public_key,
+            did,
+        }
+    }
+
+    fn store_body(
+        signer: &Wallet,
+        did: &str,
+        encrypted_wallet: serde_json::Value,
+        recovery_key: Option<&str>,
+    ) -> serde_json::Value {
+        let message = vault_store_message(did, &encrypted_wallet, recovery_key);
+        serde_json::json!({
+            "did": did,
+            "encrypted_wallet": encrypted_wallet,
+            "recovery_key": recovery_key,
+            "public_key": signer.public_key,
+            "signature": hex::encode(signer.key.sign(message.as_bytes()).unwrap()),
+        })
+    }
+
+    async fn call(
+        state: &web::Data<AppState>,
+        request: actix_web::test::TestRequest,
+    ) -> actix_web::dev::ServiceResponse {
+        let app = actix_web::test::init_service(
+            actix_web::App::new().app_data(state.clone()).service(
+                web::scope("/api/v1")
+                    .service(vault_store)
+                    .service(vault_get),
+            ),
+        )
+        .await;
+        actix_web::test::call_service(&app, request.to_request()).await
+    }
+
+    async fn store(state: &web::Data<AppState>, body: serde_json::Value) -> u16 {
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/v1/vault/store")
+            .set_json(body);
+        call(state, request).await.status().as_u16()
+    }
+
+    async fn stored_wallet(state: &web::Data<AppState>, did: &str) -> serde_json::Value {
+        let uri = format!("/api/v1/vault/{}", urlencoding::encode(did));
+        let request = actix_web::test::TestRequest::get().uri(&uri);
+        let body: serde_json::Value =
+            actix_web::test::read_body_json(call(state, request).await).await;
+        body["data"]["encrypted_wallet"].clone()
+    }
+
+    #[actix_web::test]
+    async fn owner_stores_and_replaces_its_wallet_backup() {
+        let state = web::Data::new(AppState::test_default());
+        let owner = new_wallet();
+        let first = serde_json::json!({ "address": "a", "nonce": "1" });
+        let second = serde_json::json!({ "address": "a", "nonce": "2" });
+        assert_eq!(
+            store(&state, store_body(&owner, &owner.did, first, None)).await,
+            200
+        );
+        assert_eq!(
+            store(&state, store_body(&owner, &owner.did, second.clone(), None)).await,
+            200
+        );
+        assert_eq!(stored_wallet(&state, &owner.did).await, second);
+    }
+
+    #[actix_web::test]
+    async fn stranger_cannot_overwrite_a_wallet_backup() {
+        let state = web::Data::new(AppState::test_default());
+        let owner = new_wallet();
+        let stranger = new_wallet();
+        let original = serde_json::json!({ "nonce": "1" });
+        assert_eq!(
+            store(
+                &state,
+                store_body(&owner, &owner.did, original.clone(), None)
+            )
+            .await,
+            200
+        );
+        let hijack = store_body(
+            &stranger,
+            &owner.did,
+            serde_json::json!({ "nonce": "evil" }),
+            None,
+        );
+        assert_eq!(store(&state, hijack).await, 401);
+        assert_eq!(stored_wallet(&state, &owner.did).await, original);
+    }
+
+    #[actix_web::test]
+    async fn signature_covers_the_wallet_and_recovery_key() {
+        let state = web::Data::new(AppState::test_default());
+        let owner = new_wallet();
+        let signed = store_body(
+            &owner,
+            &owner.did,
+            serde_json::json!({ "nonce": "1" }),
+            None,
+        );
+        let mut swapped_wallet = signed.clone();
+        swapped_wallet["encrypted_wallet"] = serde_json::json!({ "nonce": "evil" });
+        assert_eq!(store(&state, swapped_wallet).await, 401);
+        let mut added_recovery = signed;
+        added_recovery["recovery_key"] = serde_json::json!("ab".repeat(32));
+        assert_eq!(store(&state, added_recovery).await, 401);
+    }
+
+    #[actix_web::test]
+    async fn unsigned_store_is_rejected() {
+        let state = web::Data::new(AppState::test_default());
+        let owner = new_wallet();
+        let body = serde_json::json!({ "did": owner.did, "encrypted_wallet": { "nonce": "1" } });
+        assert_eq!(store(&state, body).await, 400);
+    }
+
+    #[actix_web::test]
+    async fn biometric_backup_belongs_to_the_wallet_key() {
+        let state = web::Data::new(AppState::test_default());
+        let owner = new_wallet();
+        let stranger = new_wallet();
+        let bio_did = owner.did.replacen("did:goya:", "did:goya:bio:", 1);
+        let sealed = serde_json::json!({ "credential_id": "c", "iv": "i", "ct": "x" });
+        assert_eq!(
+            store(
+                &state,
+                store_body(&stranger, &bio_did, sealed.clone(), None)
+            )
+            .await,
+            401
+        );
+        assert_eq!(
+            store(&state, store_body(&owner, &bio_did, sealed, None)).await,
+            200
+        );
+        assert_eq!(
+            store(
+                &state,
+                store_body(&owner, &bio_did, serde_json::Value::Null, None)
+            )
+            .await,
+            200
+        );
+    }
+
+    #[actix_web::test]
+    async fn canonical_did_backup_needs_the_key_that_derives_it() {
+        let state = web::Data::new(AppState::test_default());
+        let owner = new_wallet();
+        let canonical_did = crate::identity::did::did_from_pubkey_hex(&owner.public_key);
+        let wallet = serde_json::json!({ "nonce": "1" });
+        assert_eq!(
+            store(
+                &state,
+                store_body(&new_wallet(), &canonical_did, wallet.clone(), None)
+            )
+            .await,
+            401
+        );
+        assert_eq!(
+            store(&state, store_body(&owner, &canonical_did, wallet, None)).await,
+            200
+        );
+    }
 
     #[test]
     fn blind_index_is_deterministic() {
