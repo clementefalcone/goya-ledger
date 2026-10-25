@@ -26,6 +26,7 @@ pub mod gateway;
 pub mod governance;
 pub mod governance_entities;
 pub mod identity;
+pub mod identity_session;
 pub mod identity_vault;
 pub mod inference;
 pub mod intelligence;

@@ -573,7 +573,7 @@ struct SessionClaims<'a> {
     device_factors: &'a [DeviceFactor],
 }
 
-fn jose_algorithm(
+pub(crate) fn jose_algorithm(
     algorithm: crate::identity::signing::SigningAlgorithm,
 ) -> Result<&'static str, String> {
     match algorithm {
@@ -607,7 +607,7 @@ fn mint_session_jwt(
     Ok(format!("{signing_input}.{}", b64url_encode(&sig)))
 }
 
-fn session_signer(
+pub(crate) fn session_signer(
     state: &AppState,
 ) -> Result<&dyn crate::identity::signing::SigningProvider, ApiError> {
     state
@@ -1092,7 +1092,8 @@ mod tests {
                 web::scope("/api/v1")
                     .service(auth_challenge)
                     .service(auth_verify)
-                    .service(session_key),
+                    .service(session_key)
+                    .service(crate::api::handlers::identity_session::redeem_session),
             ),
         )
         .await;
@@ -1176,6 +1177,123 @@ mod tests {
             forged_input.as_bytes(),
             &hex::encode(decode(parts[2])),
         ));
+    }
+
+    async fn issued_token(owner: &RegisteredOwner) -> String {
+        let (status, response) = did_login(
+            owner,
+            |nonce| serde_json::json!({ "signature": sign_hex(&owner.key, nonce) }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        response["data"]["session_token"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn redeem(state: &web::Data<AppState>, token: &str) -> (u16, serde_json::Value) {
+        let app = actix_web::test::init_service(
+            actix_web::App::new().app_data(state.clone()).service(
+                web::scope("/api/v1")
+                    .service(crate::api::handlers::identity_session::redeem_session),
+            ),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/v1/identity/auth/session/redeem")
+            .set_json(serde_json::json!({ "session_token": token }))
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[actix_web::test]
+    async fn app_redeems_a_session_token_exactly_once() {
+        let owner = registered_owner();
+        let token = issued_token(&owner).await;
+        let (status, response) = redeem(&owner.state, &token).await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["data"]["did"], owner.did);
+        assert_eq!(
+            response["data"]["verified_factors"],
+            serde_json::json!(["key"])
+        );
+        let (replay_status, replay) = redeem(&owner.state, &token).await;
+        assert_eq!(replay_status, 401);
+        assert_eq!(replay["error"]["code"], "SESSION_ALREADY_REDEEMED");
+    }
+
+    #[actix_web::test]
+    async fn tampered_or_foreign_session_tokens_are_rejected() {
+        let owner = registered_owner();
+        let token = issued_token(&owner).await;
+        let parts: Vec<&str> = token.split('.').collect();
+        let forged_payload = b64url_encode(
+            &serde_json::to_vec(&serde_json::json!({
+                "sub": "did:goya:intruder", "iss": "goya-ledger", "type": "session", "exp": now_secs() + 3600,
+            }))
+            .unwrap(),
+        );
+        let tampered = format!("{}.{}.{}", parts[0], forged_payload, parts[2]);
+        let (status, response) = redeem(&owner.state, &tampered).await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("INVALID_SIGNATURE"))
+        );
+
+        let other_node = web::Data::new(state_with_session_key());
+        let (status, response) = redeem(&other_node, &token).await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("INVALID_SIGNATURE"))
+        );
+
+        let (status, _) = redeem(&owner.state, "not-a-jwt").await;
+        assert_eq!(status, 400);
+    }
+
+    #[actix_web::test]
+    async fn expired_session_token_is_rejected() {
+        let owner = registered_owner();
+        let signer = owner.state.signing_provider.clone().unwrap();
+        let expired = mint_session_jwt(
+            &SessionClaims {
+                did: &owner.did,
+                exp: now_secs() - 1,
+                device_factors: &[],
+            },
+            signer.as_ref(),
+        )
+        .unwrap();
+        let (status, response) = redeem(&owner.state, &expired).await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("SESSION_EXPIRED"))
+        );
+    }
+
+    #[actix_web::test]
+    async fn session_of_a_revoked_identity_is_rejected() {
+        let owner = registered_owner();
+        let token = issued_token(&owner).await;
+        get_channel_store(&owner.state, "default")
+            .unwrap()
+            .write_identity(&identity_record(
+                &owner.did,
+                &hex::encode(crate::identity::signing::SigningProvider::public_key(
+                    &owner.key,
+                )),
+                "revoked",
+            ))
+            .unwrap();
+        let (status, response) = redeem(&owner.state, &token).await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("IDENTITY_INACTIVE"))
+        );
     }
 
     #[actix_web::test]

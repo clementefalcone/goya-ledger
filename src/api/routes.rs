@@ -5,11 +5,11 @@ use crate::api::handlers::evm;
 use crate::api::handlers::{
     acl, airdrop, alias, audit, billing, blocks, bridge, certificates, chain, chaincode, channels,
     compliance, compliance_auto, contact, contracts, credentials, crl, discovery, events, forensic,
-    gateway, governance, governance_entities, identity, identity_vault, inference, intelligence,
-    interop, invitations, legal_oracle, lexchain, msp, network, notarize, ocsp, oid4vci, oid4vp,
-    oracle, organizations, pentest, pin, policy, private_data, proposals, ra, registry, regulatory,
-    savings, snapshots, staking, stats, stress, stripe, tokenization, tokenomics, transactions,
-    tsa, tsl, utilities, vault, wallets, zkp,
+    gateway, governance, governance_entities, identity, identity_session, identity_vault,
+    inference, intelligence, interop, invitations, legal_oracle, lexchain, msp, network, notarize,
+    ocsp, oid4vci, oid4vp, oracle, organizations, pentest, pin, policy, private_data, proposals,
+    ra, registry, regulatory, savings, snapshots, staking, stats, stress, stripe, tokenization,
+    tokenomics, transactions, tsa, tsl, utilities, vault, wallets, zkp,
 };
 
 /// API routes configuration
@@ -64,6 +64,7 @@ impl ApiRoutes {
             .service(identity::auth_challenge)
             .service(identity::auth_verify)
             .service(identity::session_key)
+            .service(identity_session::redeem_session)
             .service(credentials::store_write_credential)
             .service(credentials::store_list_credentials)
             .service(credentials::store_get_credential)
@@ -436,7 +437,8 @@ impl LightRoutes {
             .service(identity_vault::commit_recovery_key)
             .service(identity::auth_challenge)
             .service(identity::auth_verify)
-            .service(identity::session_key);
+            .service(identity::session_key)
+            .service(identity_session::redeem_session);
         // Tokenomics
         cfg.service(tokenomics::supply)
             .service(tokenomics::fee)
