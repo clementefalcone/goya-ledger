@@ -119,6 +119,7 @@ Client                          Server
 - Supports Ed25519 and ML-DSA-65
 - Optional `device_factors` (`pin`, `passphrase`, `biometric`) are checked on the device. When present, the signature must cover `identity:login:{nonce}:{factors joined by ","}` in the order sent; otherwise it covers the bare nonce. A repeated factor returns 400.
 - The session JWT carries `verified_factors` (checked by the node, today `["key"]`) and `device_factors` (asserted by the device, bound by the signature). Apps requiring multiple factors read both.
+- The session JWT is signed by the node's signing key; its header `alg` names that key (`ML-DSA-65` or `EdDSA`). Apps fetch the key from `GET /identity/auth/session-key` (`{issuer, alg, public_key}`) and verify `{header}.{payload}` against it. A node without a signing key refuses to issue tokens (500).
 
 ### Identity vault (per-device sealed keys)
 
@@ -200,6 +201,7 @@ Light client: `LocalIdentityStore` persists identities as JSON in `~/.goya/ident
 | POST | /identity/{did}/rotate | Rotate key with recovery key (same DID) |
 | POST | /identity/auth/challenge | DID Auth: get nonce |
 | POST | /identity/auth/verify | DID Auth: verify signature |
+| GET | /identity/auth/session-key | Public key that signs session JWTs |
 | GET | /did/{did} | W3C DID Resolution |
 | POST | /credentials/issue | Issue credential |
 | GET | /credentials/{id} | Fetch credential |

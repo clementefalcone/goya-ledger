@@ -573,12 +573,22 @@ struct SessionClaims<'a> {
     device_factors: &'a [DeviceFactor],
 }
 
+fn jose_algorithm(
+    algorithm: crate::identity::signing::SigningAlgorithm,
+) -> Result<&'static str, String> {
+    match algorithm {
+        crate::identity::signing::SigningAlgorithm::Ed25519 => Ok("EdDSA"),
+        crate::identity::signing::SigningAlgorithm::MlDsa65 => Ok("ML-DSA-65"),
+        other => Err(format!("session tokens cannot be signed with {other:?}")),
+    }
+}
+
 fn mint_session_jwt(
     claims: &SessionClaims,
-    signer: Option<&dyn crate::identity::signing::SigningProvider>,
-) -> String {
+    signer: &dyn crate::identity::signing::SigningProvider,
+) -> Result<String, String> {
     let now = now_secs();
-    let header = serde_json::json!({"alg": "EdDSA", "typ": "JWT"});
+    let header = serde_json::json!({"alg": jose_algorithm(signer.algorithm())?, "typ": "JWT"});
     let payload = serde_json::json!({
         "sub": claims.did,
         "iat": now,
@@ -592,10 +602,34 @@ fn mint_session_jwt(
     let p = b64url_encode(&serde_json::to_vec(&payload).unwrap_or_default());
     let signing_input = format!("{h}.{p}");
     let sig = signer
-        .and_then(|s| s.sign(signing_input.as_bytes()).ok())
-        .unwrap_or_default();
-    let s = b64url_encode(&sig);
-    format!("{signing_input}.{s}")
+        .sign(signing_input.as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(format!("{signing_input}.{}", b64url_encode(&sig)))
+}
+
+fn session_signer(
+    state: &AppState,
+) -> Result<&dyn crate::identity::signing::SigningProvider, ApiError> {
+    state
+        .signing_provider
+        .as_deref()
+        .ok_or_else(|| ApiError::InternalError {
+            reason: "this node has no session signing key".to_string(),
+        })
+}
+
+#[get("/identity/auth/session-key")]
+pub async fn session_key(state: web::Data<AppState>) -> ApiResult<HttpResponse> {
+    let signer = session_signer(&state)?;
+    Ok(HttpResponse::Ok().json(ApiResponse::success(
+        serde_json::json!({
+            "issuer": "goya-ledger",
+            "alg": jose_algorithm(signer.algorithm())
+                .map_err(|reason| ApiError::InternalError { reason })?,
+            "public_key": hex::encode(signer.public_key()),
+        }),
+        uuid::Uuid::new_v4().to_string(),
+    )))
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -728,8 +762,11 @@ pub async fn auth_verify(
             exp: session_exp,
             device_factors: &body.device_factors,
         },
-        state.signing_provider.as_deref(),
-    );
+        session_signer(&state)?,
+    )
+    .map_err(|e| ApiError::InternalError {
+        reason: format!("session token for {} not signed: {e}", body.did),
+    })?;
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         AuthenticateResponse {
@@ -813,8 +850,9 @@ mod tests {
                 exp: now_secs() + 3600,
                 device_factors: &[],
             },
-            Some(&provider),
-        );
+            &provider,
+        )
+        .unwrap();
         let parts: Vec<&str> = token.split('.').collect();
         assert_eq!(parts.len(), 3);
 
@@ -840,9 +878,18 @@ mod tests {
         key: crate::identity::signing::SoftwareSigningProvider,
     }
 
+    fn state_with_session_key() -> AppState {
+        AppState {
+            signing_provider: Some(std::sync::Arc::new(
+                crate::identity::signing::MlDsaSigningProvider::generate(),
+            )),
+            ..AppState::test_default()
+        }
+    }
+
     fn registered_owner() -> RegisteredOwner {
         use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(state_with_session_key());
         let key = SoftwareSigningProvider::generate();
         let public_key = hex::encode(key.public_key());
         let did = crate::identity::did::did_from_pubkey_hex(&public_key);
@@ -1044,7 +1091,8 @@ mod tests {
             actix_web::App::new().app_data(owner.state.clone()).service(
                 web::scope("/api/v1")
                     .service(auth_challenge)
-                    .service(auth_verify),
+                    .service(auth_verify)
+                    .service(session_key),
             ),
         )
         .await;
@@ -1075,6 +1123,86 @@ mod tests {
             base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload)
                 .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn published_session_key(state: &web::Data<AppState>) -> (u16, serde_json::Value) {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(state.clone())
+                .service(web::scope("/api/v1").service(session_key)),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::get()
+            .uri("/api/v1/identity/auth/session-key")
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[actix_web::test]
+    async fn session_token_verifies_against_the_published_key() {
+        let owner = registered_owner();
+        let (status, response) = did_login(
+            &owner,
+            |nonce| serde_json::json!({ "signature": sign_hex(&owner.key, nonce) }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let token = response["data"]["session_token"].as_str().unwrap();
+        let (key_status, key) = published_session_key(&owner.state).await;
+        assert_eq!(key_status, 200);
+        assert_eq!(key["data"]["alg"], "ML-DSA-65");
+
+        let parts: Vec<&str> = token.split('.').collect();
+        let decode = |part: &str| {
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, part).unwrap()
+        };
+        let header: serde_json::Value = serde_json::from_slice(&decode(parts[0])).unwrap();
+        assert_eq!(header["alg"], "ML-DSA-65");
+        let signing_input = format!("{}.{}", parts[0], parts[1]);
+        let public_key = key["data"]["public_key"].as_str().unwrap();
+        assert!(crate::signature::verify_signature(
+            crate::identity::signing::SigningAlgorithm::MlDsa65,
+            public_key,
+            signing_input.as_bytes(),
+            &hex::encode(decode(parts[2])),
+        ));
+        let forged_input = signing_input.replacen('.', "x.", 1);
+        assert!(!crate::signature::verify_signature(
+            crate::identity::signing::SigningAlgorithm::MlDsa65,
+            public_key,
+            forged_input.as_bytes(),
+            &hex::encode(decode(parts[2])),
+        ));
+    }
+
+    #[actix_web::test]
+    async fn node_without_session_key_refuses_to_issue_tokens() {
+        let owner = registered_owner();
+        let keyless = RegisteredOwner {
+            state: web::Data::new(AppState::test_default()),
+            ..owner
+        };
+        get_channel_store(&keyless.state, "default")
+            .unwrap()
+            .write_identity(&identity_record(
+                &keyless.did,
+                &hex::encode(crate::identity::signing::SigningProvider::public_key(
+                    &keyless.key,
+                )),
+                "active",
+            ))
+            .unwrap();
+        let (status, response) = did_login(
+            &keyless,
+            |nonce| serde_json::json!({ "signature": sign_hex(&keyless.key, nonce) }),
+        )
+        .await;
+        assert_eq!(status, 500, "{response}");
+        assert!(response["data"]["session_token"].is_null());
+        assert_eq!(published_session_key(&keyless.state).await.0, 500);
     }
 
     #[actix_web::test]

@@ -63,6 +63,7 @@ impl ApiRoutes {
             .service(identity::store_get_identity)
             .service(identity::auth_challenge)
             .service(identity::auth_verify)
+            .service(identity::session_key)
             .service(credentials::store_write_credential)
             .service(credentials::store_list_credentials)
             .service(credentials::store_get_credential)
@@ -434,7 +435,8 @@ impl LightRoutes {
             .service(identity_vault::revoke_vault_entry)
             .service(identity_vault::commit_recovery_key)
             .service(identity::auth_challenge)
-            .service(identity::auth_verify);
+            .service(identity::auth_verify)
+            .service(identity::session_key);
         // Tokenomics
         cfg.service(tokenomics::supply)
             .service(tokenomics::fee)
