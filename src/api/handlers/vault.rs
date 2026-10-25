@@ -132,26 +132,13 @@ pub fn vault_store_message(
     )
 }
 
-fn wallet_address_of(public_key_hex: &str) -> Option<String> {
-    let public_key = hex::decode(public_key_hex).ok()?;
-    let digest =
-        crate::crypto::hasher::hash_with(crate::crypto::hasher::HashAlgorithm::Sha256, &public_key);
-    Some(hex::encode(&digest[..20]))
-}
-
 fn key_owns_vault_did(
     store: &dyn crate::storage::traits::BlockStore,
     did: &str,
     public_key_hex: &str,
 ) -> bool {
-    let wallet_address = did.strip_prefix("did:goya:bio:").or_else(|| {
-        did.strip_prefix("did:goya:")
-            .filter(|rest| rest.len() == 40)
-    });
-    match wallet_address {
-        Some(address) => wallet_address_of(public_key_hex).as_deref() == Some(address),
-        None => crate::identity::operations::key_controls_did(store, did, public_key_hex),
-    }
+    let owner_did = did.replacen("did:goya:bio:", "did:goya:", 1);
+    crate::identity::operations::key_controls_did(store, &owner_did, public_key_hex)
 }
 
 #[derive(Deserialize)]
@@ -370,7 +357,10 @@ mod tests {
     fn new_wallet() -> Wallet {
         let key = SoftwareSigningProvider::generate();
         let public_key = hex::encode(key.public_key());
-        let did = format!("did:goya:{}", wallet_address_of(&public_key).unwrap());
+        let did = format!(
+            "did:goya:{}",
+            crate::identity::operations::wallet_address_of(&public_key).unwrap()
+        );
         Wallet {
             key,
             public_key,

@@ -274,7 +274,20 @@ pub fn apply_rotate(
     })
 }
 
+pub fn wallet_address_of(public_key_hex: &str) -> Option<String> {
+    let public_key = hex::decode(public_key_hex).ok()?;
+    let digest =
+        crate::crypto::hasher::hash_with(crate::crypto::hasher::HashAlgorithm::Sha256, &public_key);
+    Some(hex::encode(&digest[..20]))
+}
+
 pub fn key_controls_did(store: &dyn BlockStore, did: &str, public_key: &str) -> bool {
+    let wallet_address = did
+        .strip_prefix("did:goya:")
+        .filter(|rest| rest.len() == 40);
+    if let Some(address) = wallet_address {
+        return wallet_address_of(public_key).as_deref() == Some(address);
+    }
     match store.read_identity(did) {
         Ok(record) => record.status == "active" && record.public_key == public_key,
         Err(StorageError::IdentityNotFound(_)) => did_matches_pubkey(did, public_key),
@@ -518,6 +531,20 @@ mod tests {
         let (owner, stranger) = (Owner::ml_dsa(), Owner::ml_dsa());
         assert!(key_controls_did(&store, &owner.did, &owner.public_key));
         assert!(!key_controls_did(&store, &owner.did, &stranger.public_key));
+    }
+
+    #[test]
+    fn wallet_address_did_is_controlled_only_by_its_wallet_key() {
+        let store = MemoryStore::new();
+        let (owner, stranger) = (Owner::ed25519(), Owner::ed25519());
+        let wallet_did = format!("did:goya:{}", wallet_address_of(&owner.public_key).unwrap());
+        assert!(key_controls_did(&store, &wallet_did, &owner.public_key));
+        assert!(!key_controls_did(&store, &wallet_did, &stranger.public_key));
+        assert!(!key_controls_did(
+            &store,
+            "did:goya:0000000000000000000000000000000000000000",
+            &owner.public_key
+        ));
     }
 
     #[test]
