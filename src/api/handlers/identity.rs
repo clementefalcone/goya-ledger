@@ -309,38 +309,30 @@ pub async fn revoke_identity(
     )))
 }
 
-/// POST /identity/{did}/verify-signature - Verify Ed25519 signature.
+#[derive(Debug, serde::Deserialize)]
+pub struct VerifyMessageRequest {
+    pub message: String,
+    pub signature: String,
+}
+
 #[post("/identity/{did}/verify-signature")]
-async fn verify_signature(
+pub async fn verify_signature(
     state: web::Data<AppState>,
     path: web::Path<String>,
-    body: web::Json<VerifySignatureRequest>,
+    body: web::Json<VerifyMessageRequest>,
     req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let did = path.into_inner();
-    let trace_id = uuid::Uuid::new_v4().to_string();
-
-    // Verify DID exists
-    let _channel = channel_id_from_req(&req);
-    let store = get_channel_store(&state, _channel)?;
-    let _record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
+    let store = get_channel_store(&state, channel_id_from_req(&req))?;
+    let record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
         resource: format!("identity {did}"),
     })?;
-
-    // Verify signature using the declared algorithm
-    let valid = crate::signature::verify_signature(
-        body.signature_algorithm,
-        &body.public_key,
-        body.message.as_bytes(),
-        &body.signature,
-    );
-
-    let response = VerifySignatureResponse {
-        valid,
-        key_index: 0,
-        verified_at: Utc::now(),
-    };
-    Ok(HttpResponse::Ok().json(ApiResponse::success(response, trace_id)))
+    let valid = record.status == "active"
+        && operations::is_signed_by(&record.public_key, &body.message, &body.signature);
+    Ok(HttpResponse::Ok().json(ApiResponse::success(
+        serde_json::json!({ "did": did, "valid": valid, "status": record.status }),
+        uuid::Uuid::new_v4().to_string(),
+    )))
 }
 
 // ── Key rotation ────────────────────────────────────────────────────────────
@@ -1616,6 +1608,58 @@ mod tests {
             (status, response["error"]["code"].clone()),
             (401, serde_json::json!("READER_REVOKED"))
         );
+    }
+
+    async fn verify_message(
+        owner: &RegisteredOwner,
+        did: &str,
+        message: &str,
+        signature: &str,
+    ) -> (u16, serde_json::Value) {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(owner.state.clone())
+                .service(web::scope("/api/v1").service(verify_signature)),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri(&format!("/api/v1/identity/{did}/verify-signature"))
+            .set_json(serde_json::json!({ "message": message, "signature": signature }))
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[actix_web::test]
+    async fn verify_signature_checks_the_current_key_of_the_did() {
+        let owner = registered_owner();
+        let stranger = crate::identity::signing::SoftwareSigningProvider::generate();
+        let message = "c0ffee\nPOST /api/releases/1/sign\n{\"pet\":\"Toby\"}";
+        let (status, response) =
+            verify_message(&owner, &owner.did, message, &sign_hex(&owner.key, message)).await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["data"]["valid"], true);
+        let (_, forged) =
+            verify_message(&owner, &owner.did, message, &sign_hex(&stranger, message)).await;
+        assert_eq!(forged["data"]["valid"], false);
+        let (_, other_message) =
+            verify_message(&owner, &owner.did, "other", &sign_hex(&owner.key, message)).await;
+        assert_eq!(other_message["data"]["valid"], false);
+    }
+
+    #[actix_web::test]
+    async fn verify_signature_refuses_revoked_and_unknown_identities() {
+        let owner = registered_owner();
+        let message = "hello";
+        let signature = sign_hex(&owner.key, message);
+        let revoke = serde_json::json!({ "signature": sign_hex(&owner.key, &format!("identity:revoke:{}", owner.did)) });
+        assert_eq!(post_owner_action(&owner, "revoke", revoke).await, 200);
+        let (_, revoked) = verify_message(&owner, &owner.did, message, &signature).await;
+        assert_eq!(revoked["data"]["valid"], false);
+        let (status, _) = verify_message(&owner, "did:goya:unknown", message, &signature).await;
+        assert_eq!(status, 404);
     }
 
     #[actix_web::test]

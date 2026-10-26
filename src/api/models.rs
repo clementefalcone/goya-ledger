@@ -38,27 +38,6 @@ pub struct IdentityResponse {
     pub created_at: DateTime<Utc>,
 }
 
-/// Signature verification request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifySignatureRequest {
-    pub message: String,
-    pub signature: String, // hex encoded
-    /// Public key (hex encoded).
-    #[serde(default)]
-    pub public_key: String,
-    /// Signing algorithm: "Ed25519" (default) or "MlDsa65".
-    #[serde(default)]
-    pub signature_algorithm: crate::identity::signing::SigningAlgorithm,
-}
-
-/// Signature verification response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifySignatureResponse {
-    pub valid: bool,
-    pub key_index: usize,
-    pub verified_at: DateTime<Utc>,
-}
-
 /// Block proposal request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposBlockRequest {
