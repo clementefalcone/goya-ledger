@@ -114,6 +114,14 @@ fn validate_entry(entry: &VaultEntry) -> Result<(), IdentityOpError> {
     problem.map_or(Ok(()), |reason| Err(IdentityOpError::Invalid(reason)))
 }
 
+fn active_entry_count(record: &IdentityRecord) -> usize {
+    record
+        .vault_entries
+        .iter()
+        .filter(|entry| entry.revoked_at.is_none())
+        .count()
+}
+
 fn has_same_content(stored: &VaultEntry, submitted: &VaultEntry) -> bool {
     stored.kind == submitted.kind
         && stored.label == submitted.label
@@ -142,9 +150,9 @@ pub fn check_add_vault_entry(
             "vault entry {} of {} already exists with different content",
             request.entry.entry_id, request.did
         ))),
-        None if record.vault_entries.len() >= MAX_ENTRIES => {
+        None if active_entry_count(&record) >= MAX_ENTRIES => {
             Err(IdentityOpError::Conflict(format!(
-                "identity {} already holds {MAX_ENTRIES} vault entries",
+                "identity {} already holds {MAX_ENTRIES} active vault entries",
                 request.did
             )))
         }
@@ -460,6 +468,27 @@ mod tests {
         };
         add(&owner, &reader, &owner.key).unwrap();
         assert_eq!(entries(&owner), vec![reader]);
+    }
+
+    #[test]
+    fn revoked_copies_do_not_fill_the_vault() {
+        let owner = registered_owner();
+        for index in 0..MAX_ENTRIES {
+            let entry_id = format!("{index:04x}");
+            add(&owner, &device_entry(&entry_id), &owner.key).unwrap();
+            revoke(&owner, &entry_id, &owner.key).unwrap();
+        }
+        add(&owner, &device_entry("ffff"), &owner.key).unwrap();
+        assert_eq!(entries(&owner).len(), MAX_ENTRIES + 1);
+    }
+
+    #[test]
+    fn active_copies_are_capped() {
+        let owner = registered_owner();
+        for index in 0..MAX_ENTRIES {
+            add(&owner, &device_entry(&format!("{index:04x}")), &owner.key).unwrap();
+        }
+        assert!(add(&owner, &device_entry("ffff"), &owner.key).is_err());
     }
 
     #[test]
