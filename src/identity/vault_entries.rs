@@ -31,6 +31,7 @@ fn kind_key(kind: VaultEntryKind) -> &'static str {
     match kind {
         VaultEntryKind::Device => "device",
         VaultEntryKind::Recovery => "recovery",
+        VaultEntryKind::Reader => "reader",
     }
 }
 
@@ -101,6 +102,11 @@ fn validate_entry(entry: &VaultEntry) -> Result<(), IdentityOpError> {
         (
             entry.revoked_at.is_some(),
             "a new vault entry cannot be revoked".to_string(),
+        ),
+        (
+            entry.kind == VaultEntryKind::Reader
+                && !crate::identity::reader_login::is_reader_public_key(&entry.sealed_key),
+            "a reader entry carries its 64-hex Ed25519 public key in sealed_key".to_string(),
         ),
     ]
     .into_iter()
@@ -422,6 +428,10 @@ mod tests {
                 revoked_at: Some(5),
                 ..device_entry("aa01")
             },
+            VaultEntry {
+                kind: VaultEntryKind::Reader,
+                ..device_entry("aa01")
+            },
         ];
         for entry in cases {
             let signature = sign(&owner.key, &add_vault_entry_message(&owner.did, &entry));
@@ -438,6 +448,18 @@ mod tests {
                 "{entry:?}"
             );
         }
+    }
+
+    #[test]
+    fn owner_adds_a_reader_key() {
+        let owner = registered_owner();
+        let reader = VaultEntry {
+            kind: VaultEntryKind::Reader,
+            sealed_key: "ab".repeat(32),
+            ..device_entry("cc03")
+        };
+        add(&owner, &reader, &owner.key).unwrap();
+        assert_eq!(entries(&owner), vec![reader]);
     }
 
     #[test]

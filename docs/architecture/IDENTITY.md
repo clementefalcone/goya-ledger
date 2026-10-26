@@ -120,7 +120,16 @@ Client                          Server
 - Optional `device_factors` (`pin`, `passphrase`, `biometric`) are checked on the device. When present, the signature must cover `identity:login:{nonce}:{factors joined by ","}` in the order sent; otherwise it covers the bare nonce. A repeated factor returns 400.
 - The session JWT carries `verified_factors` (checked by the node, today `["key"]`) and `device_factors` (asserted by the device, bound by the signature). Apps requiring multiple factors read both.
 - The session JWT is signed by the node's signing key; its header `alg` names that key (`ML-DSA-65` or `EdDSA`). Apps fetch the key from `GET /identity/auth/session-key` (`{issuer, alg, public_key}`) and verify `{header}.{payload}` against it. A node without a signing key refuses to issue tokens (500).
-- Apps without ML-DSA redeem the token instead: `POST /identity/auth/session/redeem {session_token}` checks the node signature, `iss`, `type`, `exp` and that the identity is still active, then returns `{did, exp, verified_factors, device_factors}`. Each token redeems once (kept in memory until it expires, so a node restart forgets them).
+- Apps without ML-DSA redeem the token instead: `POST /identity/auth/session/redeem {session_token, allow_read?}` checks the node signature, `iss`, `type`, `exp` and that the identity is still active, then returns `{did, exp, access, verified_factors, device_factors}`. Each token redeems once (kept in memory until it expires, so a node restart forgets them).
+
+### Read-only sessions (reader keys)
+
+A device can read without Face ID and act only with it.
+
+- A reader key is a vault entry of `kind: reader` whose `sealed_key` carries the device's Ed25519 public key (64 hex; nothing is sealed). It is added and revoked like any vault entry, signed by the DID key, so the theft lockout that revokes every copy also kills every reader.
+- Sign-in: `POST /identity/auth/verify {did, challenge, reader_entry_id, signature}` with the reader's signature over `identity:read:{nonce}` and no `device_factors`. The token has `type: read_session`, `verified_factors: ["reader"]` and `reader_entry_id`.
+- Redeem is safe by default: a read session answers 401 `READ_ONLY_SESSION` unless the app sends `allow_read: true`, and 401 `READER_REVOKED` once its reader is revoked. `access` is `full` or `read`; apps refuse every change on a `read` session.
+- Reader keys are classical (Ed25519) because browsers only keep non-extractable keys for classical algorithms; they never authorize a change.
 
 ### Identity vault (per-device sealed keys)
 

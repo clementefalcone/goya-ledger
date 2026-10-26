@@ -12,6 +12,16 @@ static REDEEMED_SESSIONS: LazyLock<Mutex<HashMap<String, u64>>> =
 #[derive(Debug, serde::Deserialize)]
 pub struct RedeemSessionRequest {
     pub session_token: String,
+    #[serde(default)]
+    pub allow_read: bool,
+}
+
+fn session_access(session_type: &serde_json::Value, allow_read: bool) -> Option<&'static str> {
+    match (session_type.as_str(), allow_read) {
+        (Some("session"), _) => Some("full"),
+        (Some("read_session"), true) => Some("read"),
+        _ => None,
+    }
 }
 
 fn rejection(code: &str, message: String) -> HttpResponse {
@@ -80,21 +90,40 @@ pub async fn redeem_session(
     }
     let claims = decode_json(payload_part).unwrap_or_default();
     let exp = claims["exp"].as_u64().unwrap_or(0);
-    if claims["iss"] != "goya-ledger" || claims["type"] != "session" || exp <= now_secs() {
+    let is_read_session = claims["type"] == "read_session";
+    let is_known_session = claims["type"] == "session" || is_read_session;
+    if claims["iss"] != "goya-ledger" || !is_known_session || exp <= now_secs() {
         return Ok(rejection(
             "SESSION_EXPIRED",
             "session token is expired or is not a goya-ledger session".to_string(),
         ));
     }
+    let Some(access) = session_access(&claims["type"], body.allow_read) else {
+        return Ok(rejection(
+            "READ_ONLY_SESSION",
+            "a read-only session needs allow_read from an app that separates reading from acting"
+                .to_string(),
+        ));
+    };
     let did = claims["sub"].as_str().unwrap_or_default().to_string();
     let store = get_channel_store(&state, channel_id_from_req(&req))?;
-    let is_active = store
+    let record = store
         .read_identity(&did)
-        .is_ok_and(|record| record.status == "active");
-    if !is_active {
+        .ok()
+        .filter(|record| record.status == "active");
+    let Some(record) = record else {
         return Ok(rejection(
             "IDENTITY_INACTIVE",
             format!("identity {did} is not active on this node"),
+        ));
+    };
+    let reader_entry_id = claims["reader_entry_id"].as_str().unwrap_or_default();
+    let is_reader_active =
+        crate::identity::reader_login::active_reader_key(&record, reader_entry_id).is_some();
+    if is_read_session && !is_reader_active {
+        return Ok(rejection(
+            "READER_REVOKED",
+            format!("reader {reader_entry_id} of {did} is revoked or unknown"),
         ));
     }
     if !mark_redeemed(signature_part, exp) {
@@ -107,6 +136,7 @@ pub async fn redeem_session(
         serde_json::json!({
             "did": did,
             "exp": exp,
+            "access": access,
             "verified_factors": claims["verified_factors"],
             "device_factors": claims["device_factors"],
         }),

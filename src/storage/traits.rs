@@ -205,6 +205,7 @@ pub struct IdentityRecord {
 pub enum VaultEntryKind {
     Device,
     Recovery,
+    Reader,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

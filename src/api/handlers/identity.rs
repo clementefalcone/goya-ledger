@@ -550,6 +550,8 @@ pub struct AuthenticateRequest {
     pub signature: String,
     #[serde(default)]
     pub device_factors: Vec<DeviceFactor>,
+    #[serde(default)]
+    pub reader_entry_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -571,6 +573,14 @@ struct SessionClaims<'a> {
     did: &'a str,
     exp: u64,
     device_factors: &'a [DeviceFactor],
+    reader_entry_id: Option<&'a str>,
+}
+
+fn session_kind(reader_entry_id: Option<&str>) -> (&'static str, [&'static str; 1]) {
+    match reader_entry_id {
+        Some(_) => ("read_session", ["reader"]),
+        None => ("session", ["key"]),
+    }
 }
 
 pub(crate) fn jose_algorithm(
@@ -589,15 +599,19 @@ fn mint_session_jwt(
 ) -> Result<String, String> {
     let now = now_secs();
     let header = serde_json::json!({"alg": jose_algorithm(signer.algorithm())?, "typ": "JWT"});
-    let payload = serde_json::json!({
+    let (session_type, verified_factors) = session_kind(claims.reader_entry_id);
+    let mut payload = serde_json::json!({
         "sub": claims.did,
         "iat": now,
         "exp": claims.exp,
         "iss": "goya-ledger",
-        "type": "session",
-        "verified_factors": ["key"],
+        "type": session_type,
+        "verified_factors": verified_factors,
         "device_factors": claims.device_factors,
     });
+    if let Some(entry_id) = claims.reader_entry_id {
+        payload["reader_entry_id"] = serde_json::json!(entry_id);
+    }
     let h = b64url_encode(&serde_json::to_vec(&header).unwrap_or_default());
     let p = b64url_encode(&serde_json::to_vec(&payload).unwrap_or_default());
     let signing_input = format!("{h}.{p}");
@@ -693,6 +707,12 @@ pub async fn auth_verify(
             reason: format!("repeated factor in {:?}", body.device_factors),
         });
     }
+    if body.reader_entry_id.is_some() && !body.device_factors.is_empty() {
+        return Err(ApiError::ValidationError {
+            field: "device_factors".into(),
+            reason: "a reader key signs in without device factors".into(),
+        });
+    }
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
 
@@ -736,12 +756,20 @@ pub async fn auth_verify(
         })
         .unwrap_or(crate::identity::signing::SigningAlgorithm::Ed25519);
 
-    let valid = crate::signature::verify_signature(
-        algorithm,
-        &identity.public_key,
-        login_message(&challenge.nonce, &body.device_factors).as_bytes(),
-        &body.signature,
-    );
+    let valid = match body.reader_entry_id.as_deref() {
+        Some(entry_id) => crate::identity::reader_login::is_signed_by_reader(
+            &identity,
+            entry_id,
+            &challenge.nonce,
+            &body.signature,
+        ),
+        None => crate::signature::verify_signature(
+            algorithm,
+            &identity.public_key,
+            login_message(&challenge.nonce, &body.device_factors).as_bytes(),
+            &body.signature,
+        ),
+    };
 
     if !valid {
         return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
@@ -761,6 +789,7 @@ pub async fn auth_verify(
             did: &body.did,
             exp: session_exp,
             device_factors: &body.device_factors,
+            reader_entry_id: body.reader_entry_id.as_deref(),
         },
         session_signer(&state)?,
     )
@@ -849,6 +878,7 @@ mod tests {
                 did: "did:goya:test1234",
                 exp: now_secs() + 3600,
                 device_factors: &[],
+                reader_entry_id: None,
             },
             &provider,
         )
@@ -1264,6 +1294,7 @@ mod tests {
                 did: &owner.did,
                 exp: now_secs() - 1,
                 device_factors: &[],
+                reader_entry_id: None,
             },
             signer.as_ref(),
         )
@@ -1396,6 +1427,195 @@ mod tests {
         })
         .await;
         assert_eq!(status, 400);
+    }
+
+    fn owner_with_reader(
+        revoked_at: Option<u64>,
+    ) -> (
+        RegisteredOwner,
+        crate::identity::signing::SoftwareSigningProvider,
+    ) {
+        use crate::identity::signing::SigningProvider;
+        let owner = registered_owner();
+        let reader = crate::identity::signing::SoftwareSigningProvider::generate();
+        let store = get_channel_store(&owner.state, "default").unwrap();
+        let record = store.read_identity(&owner.did).unwrap();
+        store
+            .write_identity(&crate::storage::traits::IdentityRecord {
+                vault_entries: vec![crate::storage::traits::VaultEntry {
+                    entry_id: "aa01".to_string(),
+                    kind: crate::storage::traits::VaultEntryKind::Reader,
+                    label: "iPhone".to_string(),
+                    sealed_key: hex::encode(reader.public_key()),
+                    added_at: 1,
+                    revoked_at,
+                }],
+                ..record
+            })
+            .unwrap();
+        (owner, reader)
+    }
+
+    fn read_proof(
+        reader: &crate::identity::signing::SoftwareSigningProvider,
+        nonce: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "reader_entry_id": "aa01",
+            "signature": sign_hex(reader, &format!("identity:read:{nonce}")),
+        })
+    }
+
+    async fn redeem_with(
+        state: &web::Data<AppState>,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let app = actix_web::test::init_service(
+            actix_web::App::new().app_data(state.clone()).service(
+                web::scope("/api/v1")
+                    .service(crate::api::handlers::identity_session::redeem_session),
+            ),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/v1/identity/auth/session/redeem")
+            .set_json(body)
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[actix_web::test]
+    async fn reader_key_signs_in_to_a_read_only_session() {
+        let (owner, reader) = owner_with_reader(None);
+        let (status, response) = did_login(&owner, |nonce| read_proof(&reader, nonce)).await;
+        assert_eq!(status, 200, "{response}");
+        let claims = session_claims(&response);
+        assert_eq!(claims["type"], "read_session");
+        assert_eq!(claims["verified_factors"], serde_json::json!(["reader"]));
+        assert_eq!(claims["reader_entry_id"], "aa01");
+    }
+
+    #[actix_web::test]
+    async fn reader_login_rejects_foreign_revoked_or_confused_keys() {
+        let (owner, _reader) = owner_with_reader(None);
+        let thief = crate::identity::signing::SoftwareSigningProvider::generate();
+        assert_eq!(
+            did_login(&owner, |nonce| read_proof(&thief, nonce)).await.0,
+            401
+        );
+        let owner_key_as_reader = did_login(&owner, |nonce| {
+            serde_json::json!({ "reader_entry_id": "aa01", "signature": sign_hex(&owner.key, nonce) })
+        })
+        .await;
+        assert_eq!(owner_key_as_reader.0, 401);
+
+        let (revoked_owner, revoked_reader) = owner_with_reader(Some(5));
+        assert_eq!(
+            did_login(&revoked_owner, |nonce| read_proof(&revoked_reader, nonce))
+                .await
+                .0,
+            401
+        );
+    }
+
+    #[actix_web::test]
+    async fn reader_login_cannot_claim_device_factors() {
+        let (owner, reader) = owner_with_reader(None);
+        let (status, response) = did_login(&owner, |nonce| {
+            let mut proof = read_proof(&reader, nonce);
+            proof["device_factors"] = serde_json::json!(["biometric"]);
+            proof
+        })
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(response["error"]["field"], "device_factors");
+    }
+
+    #[actix_web::test]
+    async fn read_session_redeems_only_for_apps_that_accept_reading() {
+        let (owner, reader) = owner_with_reader(None);
+        let token = |response: serde_json::Value| {
+            response["data"]["session_token"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let first = token(
+            did_login(&owner, |nonce| read_proof(&reader, nonce))
+                .await
+                .1,
+        );
+        let (status, response) =
+            redeem_with(&owner.state, serde_json::json!({ "session_token": first })).await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("READ_ONLY_SESSION"))
+        );
+
+        let second = token(
+            did_login(&owner, |nonce| read_proof(&reader, nonce))
+                .await
+                .1,
+        );
+        let (status, response) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": second, "allow_read": true }),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["data"]["access"], "read");
+        assert_eq!(response["data"]["did"], owner.did);
+    }
+
+    #[actix_web::test]
+    async fn full_session_redeems_with_full_access() {
+        let owner = registered_owner();
+        let token = issued_token(&owner).await;
+        let (status, response) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": token, "allow_read": true }),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["data"]["access"], "full");
+    }
+
+    #[actix_web::test]
+    async fn read_session_dies_when_its_reader_is_revoked() {
+        let (owner, reader) = owner_with_reader(None);
+        let (_, response) = did_login(&owner, |nonce| read_proof(&reader, nonce)).await;
+        let token = response["data"]["session_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let store = get_channel_store(&owner.state, "default").unwrap();
+        let record = store.read_identity(&owner.did).unwrap();
+        let revoked = record
+            .vault_entries
+            .iter()
+            .map(|entry| crate::storage::traits::VaultEntry {
+                revoked_at: Some(9),
+                ..entry.clone()
+            })
+            .collect();
+        store
+            .write_identity(&crate::storage::traits::IdentityRecord {
+                vault_entries: revoked,
+                ..record
+            })
+            .unwrap();
+        let (status, response) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": token, "allow_read": true }),
+        )
+        .await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("READER_REVOKED"))
+        );
     }
 
     #[actix_web::test]
