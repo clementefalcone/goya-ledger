@@ -2,6 +2,7 @@ use crate::api::errors::{ApiError, ApiResponse, ApiResult, ErrorDto};
 use crate::api::handlers::channels::{channel_id_from_req, get_channel_store};
 use crate::api::handlers::identity::{jose_algorithm, now_secs, session_signer};
 use crate::app_state::AppState;
+use crate::identity::pairwise::{self, Audience, Disclosure};
 use actix_web::{post, web, HttpRequest, HttpResponse};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -14,6 +15,30 @@ pub struct RedeemSessionRequest {
     pub session_token: String,
     #[serde(default)]
     pub allow_read: bool,
+    #[serde(default)]
+    pub audience: Option<String>,
+}
+
+pub(crate) fn pairwise_secret(state: &AppState) -> Result<&[u8], ApiError> {
+    state
+        .pairwise_secret
+        .as_deref()
+        .ok_or_else(|| ApiError::InternalError {
+            reason: "PAIRWISE_SECRET is not configured on this node".to_string(),
+        })
+}
+
+fn disclosed_identity(
+    state: &AppState,
+    did: &str,
+    audience: Option<Audience>,
+) -> Result<serde_json::Value, ApiError> {
+    let Some(audience) = audience.filter(|app| app.disclosure() == Disclosure::Subject) else {
+        return Ok(serde_json::json!({ "did": did }));
+    };
+    let subject = pairwise::subject_for(pairwise_secret(state)?, audience, did)
+        .map_err(|reason| ApiError::InternalError { reason })?;
+    Ok(serde_json::json!({ "subject": subject, "audience": audience.name() }))
 }
 
 fn session_access(session_type: &serde_json::Value, allow_read: bool) -> Option<&'static str> {
@@ -105,6 +130,18 @@ pub async fn redeem_session(
                 .to_string(),
         ));
     };
+    let token_audience = claims["aud"].as_str();
+    if token_audience != body.audience.as_deref() {
+        return Ok(rejection(
+            "WRONG_AUDIENCE",
+            format!(
+                "session token is for {} but was redeemed for {}",
+                token_audience.unwrap_or("no app"),
+                body.audience.as_deref().unwrap_or("no app")
+            ),
+        ));
+    }
+    let audience = token_audience.and_then(Audience::parse);
     let did = claims["sub"].as_str().unwrap_or_default().to_string();
     let store = get_channel_store(&state, channel_id_from_req(&req))?;
     let record = store
@@ -132,14 +169,59 @@ pub async fn redeem_session(
             format!("session token for {did} was already redeemed"),
         ));
     }
+    let mut session = disclosed_identity(&state, &did, audience)?;
+    session["exp"] = serde_json::json!(exp);
+    session["access"] = serde_json::json!(access);
+    session["verified_factors"] = claims["verified_factors"].clone();
+    session["device_factors"] = claims["device_factors"].clone();
     Ok(HttpResponse::Ok().json(ApiResponse::success(
-        serde_json::json!({
-            "did": did,
-            "exp": exp,
-            "access": access,
-            "verified_factors": claims["verified_factors"],
-            "device_factors": claims["device_factors"],
-        }),
+        session,
+        uuid::Uuid::new_v4().to_string(),
+    )))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct VerifySubjectSignatureRequest {
+    pub audience: String,
+    pub subject: String,
+    pub message: String,
+    pub signature: String,
+}
+
+#[post("/identity/pairwise/verify-signature")]
+pub async fn verify_subject_signature(
+    state: web::Data<AppState>,
+    body: web::Json<VerifySubjectSignatureRequest>,
+    req: HttpRequest,
+) -> ApiResult<HttpResponse> {
+    let audience = Audience::parse(&body.audience)
+        .filter(|app| app.disclosure() == Disclosure::Subject)
+        .ok_or_else(|| ApiError::ValidationError {
+            field: "audience".to_string(),
+            reason: format!(
+                "{} is not an app that sees pairwise subjects",
+                body.audience
+            ),
+        })?;
+    let store = get_channel_store(&state, channel_id_from_req(&req))?;
+    let records = store
+        .list_identities()
+        .map_err(|e| ApiError::InternalError {
+            reason: format!("identities not listed to resolve {}: {e}", body.subject),
+        })?;
+    let record =
+        pairwise::find_by_subject(pairwise_secret(&state)?, audience, &body.subject, &records)
+            .map_err(|reason| ApiError::InternalError { reason })?;
+    let valid = record.is_some_and(|record| {
+        record.status == "active"
+            && crate::identity::operations::is_signed_by(
+                &record.public_key,
+                &body.message,
+                &body.signature,
+            )
+    });
+    Ok(HttpResponse::Ok().json(ApiResponse::success(
+        serde_json::json!({ "subject": body.subject, "valid": valid }),
         uuid::Uuid::new_v4().to_string(),
     )))
 }

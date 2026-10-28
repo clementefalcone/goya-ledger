@@ -544,6 +544,8 @@ pub struct AuthenticateRequest {
     pub device_factors: Vec<DeviceFactor>,
     #[serde(default)]
     pub reader_entry_id: Option<String>,
+    #[serde(default)]
+    pub audience: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -566,6 +568,7 @@ struct SessionClaims<'a> {
     exp: u64,
     device_factors: &'a [DeviceFactor],
     reader_entry_id: Option<&'a str>,
+    audience: Option<crate::identity::pairwise::Audience>,
 }
 
 fn session_kind(reader_entry_id: Option<&str>) -> (&'static str, [&'static str; 1]) {
@@ -603,6 +606,9 @@ fn mint_session_jwt(
     });
     if let Some(entry_id) = claims.reader_entry_id {
         payload["reader_entry_id"] = serde_json::json!(entry_id);
+    }
+    if let Some(audience) = claims.audience {
+        payload["aud"] = serde_json::json!(audience.name());
     }
     let h = b64url_encode(&serde_json::to_vec(&header).unwrap_or_default());
     let p = b64url_encode(&serde_json::to_vec(&payload).unwrap_or_default());
@@ -699,6 +705,16 @@ pub async fn auth_verify(
             reason: format!("repeated factor in {:?}", body.device_factors),
         });
     }
+    let audience =
+        match body.audience.as_deref() {
+            None => None,
+            Some(name) => Some(crate::identity::pairwise::Audience::parse(name).ok_or_else(
+                || ApiError::ValidationError {
+                    field: "audience".into(),
+                    reason: format!("unknown audience {name}"),
+                },
+            )?),
+        };
     if body.reader_entry_id.is_some() && !body.device_factors.is_empty() {
         return Err(ApiError::ValidationError {
             field: "device_factors".into(),
@@ -782,6 +798,7 @@ pub async fn auth_verify(
             exp: session_exp,
             device_factors: &body.device_factors,
             reader_entry_id: body.reader_entry_id.as_deref(),
+            audience,
         },
         session_signer(&state)?,
     )
@@ -871,6 +888,7 @@ mod tests {
                 exp: now_secs() + 3600,
                 device_factors: &[],
                 reader_entry_id: None,
+                audience: None,
             },
             &provider,
         )
@@ -905,6 +923,7 @@ mod tests {
             signing_provider: Some(std::sync::Arc::new(
                 crate::identity::signing::MlDsaSigningProvider::generate(),
             )),
+            pairwise_secret: Some(vec![9; 32]),
             ..AppState::test_default()
         }
     }
@@ -1287,6 +1306,7 @@ mod tests {
                 exp: now_secs() - 1,
                 device_factors: &[],
                 reader_entry_id: None,
+                audience: None,
             },
             signer.as_ref(),
         )
@@ -1675,5 +1695,153 @@ mod tests {
         let body = serde_json::json!({ "signature": sign_hex(&owner.key, &message) });
         assert_eq!(post_owner_action(&owner, "revoke", body).await, 200);
         assert_eq!(did_login_status(&owner).await, 403);
+    }
+
+    async fn token_for(owner: &RegisteredOwner, audience: &str) -> String {
+        let (status, response) = did_login(owner, |nonce| {
+            serde_json::json!({ "signature": sign_hex(&owner.key, nonce), "audience": audience })
+        })
+        .await;
+        assert_eq!(status, 200, "{response}");
+        response["data"]["session_token"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn subject_of(
+        owner: &RegisteredOwner,
+        audience: crate::identity::pairwise::Audience,
+    ) -> String {
+        crate::identity::pairwise::subject_for(
+            owner.state.pairwise_secret.as_deref().unwrap(),
+            audience,
+            &owner.did,
+        )
+        .unwrap()
+    }
+
+    #[actix_web::test]
+    async fn pairwise_app_gets_its_subject_and_never_the_did() {
+        let owner = registered_owner();
+        let token = token_for(&owner, "pet").await;
+        let (status, response) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": token, "audience": "pet" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(
+            response["data"]["subject"],
+            subject_of(&owner, crate::identity::pairwise::Audience::Pet)
+        );
+        assert!(!response.to_string().contains(&owner.did));
+    }
+
+    #[actix_web::test]
+    async fn research_still_gets_the_did() {
+        let owner = registered_owner();
+        let token = token_for(&owner, "research").await;
+        let (status, response) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": token, "audience": "research" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["data"]["did"], owner.did);
+        assert!(response["data"]["subject"].is_null());
+    }
+
+    #[actix_web::test]
+    async fn session_redeems_only_for_the_app_it_was_issued_to() {
+        let owner = registered_owner();
+        let token = token_for(&owner, "pet").await;
+        for body in [
+            serde_json::json!({ "session_token": token, "audience": "salud" }),
+            serde_json::json!({ "session_token": token }),
+        ] {
+            let (status, response) = redeem_with(&owner.state, body).await;
+            assert_eq!(
+                (status, response["error"]["code"].clone()),
+                (401, serde_json::json!("WRONG_AUDIENCE"))
+            );
+        }
+        let legacy = issued_token(&owner).await;
+        let (status, _) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": legacy, "audience": "pet" }),
+        )
+        .await;
+        assert_eq!(status, 401);
+        let (status, _) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": token, "audience": "pet" }),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+
+    #[actix_web::test]
+    async fn login_rejects_an_unknown_audience() {
+        let owner = registered_owner();
+        let (status, _) = did_login(&owner, |nonce| {
+            serde_json::json!({ "signature": sign_hex(&owner.key, nonce), "audience": "evil" })
+        })
+        .await;
+        assert_eq!(status, 400);
+    }
+
+    async fn verify_subject(
+        owner: &RegisteredOwner,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let app = actix_web::test::init_service(
+            actix_web::App::new().app_data(owner.state.clone()).service(
+                web::scope("/api/v1")
+                    .service(crate::api::handlers::identity_session::verify_subject_signature),
+            ),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/v1/identity/pairwise/verify-signature")
+            .set_json(body)
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[actix_web::test]
+    async fn app_verifies_a_signature_by_subject_only_in_its_own_audience() {
+        use crate::identity::pairwise::Audience;
+        let owner = registered_owner();
+        let stranger = crate::identity::signing::SoftwareSigningProvider::generate();
+        let message = "c0ffee\nPOST /api/releases/1/sign\n{\"pet\":\"Toby\"}";
+        let check = |audience: &str, subject: String, signature: String| serde_json::json!({ "audience": audience, "subject": subject, "message": message, "signature": signature });
+        let pet = subject_of(&owner, Audience::Pet);
+        let (status, response) = verify_subject(
+            &owner,
+            check("pet", pet.clone(), sign_hex(&owner.key, message)),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["data"]["valid"], true);
+        let (_, forged) = verify_subject(
+            &owner,
+            check("pet", pet.clone(), sign_hex(&stranger, message)),
+        )
+        .await;
+        assert_eq!(forged["data"]["valid"], false);
+        let salud = subject_of(&owner, Audience::Salud);
+        let (_, crossed) =
+            verify_subject(&owner, check("pet", salud, sign_hex(&owner.key, message))).await;
+        assert_eq!(crossed["data"]["valid"], false);
+        let (status, _) = verify_subject(
+            &owner,
+            check("research", pet, sign_hex(&owner.key, message)),
+        )
+        .await;
+        assert_eq!(status, 400);
     }
 }

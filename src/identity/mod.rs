@@ -8,6 +8,7 @@ pub mod login_factors;
 pub mod mdoc;
 pub mod migration;
 pub mod operations;
+pub mod pairwise;
 pub mod pqc_policy;
 pub mod ra;
 pub mod reader_login;

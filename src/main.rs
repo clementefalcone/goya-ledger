@@ -924,6 +924,10 @@ async fn async_main_inner() -> std::io::Result<()> {
             .ok()
             .filter(|s| !s.is_empty())
             .map(|s| hex::decode(s.as_str()).unwrap_or_else(|_| s.into_bytes())),
+        pairwise_secret: std::env::var("PAIRWISE_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| crate::identity::pairwise::parse_secret(&s).unwrap_or_else(|e| panic!("{e}"))),
         vault_rate_limiter: Arc::new(crate::api::handlers::vault::RecoveryRateLimiter::new()),
         bridge_engine: Arc::new(crate::bridge::protocol::BridgeEngine::new()),
         proof_verifier: Arc::new(inference::proof::MultiVerifier::new()),
