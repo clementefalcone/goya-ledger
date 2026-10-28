@@ -1739,17 +1739,19 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn research_still_gets_the_did() {
+    async fn research_and_wallet_still_get_the_did() {
         let owner = registered_owner();
-        let token = token_for(&owner, "research").await;
-        let (status, response) = redeem_with(
-            &owner.state,
-            serde_json::json!({ "session_token": token, "audience": "research" }),
-        )
-        .await;
-        assert_eq!(status, 200, "{response}");
-        assert_eq!(response["data"]["did"], owner.did);
-        assert!(response["data"]["subject"].is_null());
+        for audience in ["research", "wallet"] {
+            let token = token_for(&owner, audience).await;
+            let (status, response) = redeem_with(
+                &owner.state,
+                serde_json::json!({ "session_token": token, "audience": audience }),
+            )
+            .await;
+            assert_eq!(status, 200, "{audience}: {response}");
+            assert_eq!(response["data"]["did"], owner.did);
+            assert!(response["data"]["subject"].is_null());
+        }
     }
 
     #[actix_web::test]

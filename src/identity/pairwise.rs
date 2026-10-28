@@ -39,8 +39,8 @@ impl Audience {
 
     pub fn disclosure(self) -> Disclosure {
         match self {
-            Self::Research => Disclosure::Did,
-            Self::Salud | Self::Pet | Self::Wallet => Disclosure::Subject,
+            Self::Research | Self::Wallet => Disclosure::Did,
+            Self::Salud | Self::Pet => Disclosure::Subject,
         }
     }
 }
@@ -132,9 +132,12 @@ mod tests {
     }
 
     #[test]
-    fn only_research_sees_the_did() {
-        assert_eq!(Audience::Research.disclosure(), Disclosure::Did);
-        for audience in [Audience::Salud, Audience::Pet, Audience::Wallet] {
+    fn the_person_s_own_apps_see_the_did_and_services_see_subjects() {
+        for audience in [Audience::Research, Audience::Wallet] {
+            assert_eq!(audience.disclosure(), Disclosure::Did);
+            assert_eq!(Audience::parse(audience.name()), Some(audience));
+        }
+        for audience in [Audience::Salud, Audience::Pet] {
             assert_eq!(audience.disclosure(), Disclosure::Subject);
             assert_eq!(Audience::parse(audience.name()), Some(audience));
         }
