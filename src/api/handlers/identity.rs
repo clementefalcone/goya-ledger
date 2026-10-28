@@ -1803,7 +1803,7 @@ mod tests {
         )
         .await;
         let request = actix_web::test::TestRequest::post()
-            .uri("/api/v1/identity/pairwise/verify-signature")
+            .uri("/api/v1/pairwise/verify-signature")
             .set_json(body)
             .to_request();
         let response = actix_web::test::call_service(&app, request).await;
@@ -1843,5 +1843,29 @@ mod tests {
         )
         .await;
         assert_eq!(status, 400);
+    }
+
+    #[actix_web::test]
+    async fn pairwise_verify_is_reachable_through_the_real_route_table() {
+        let owner = registered_owner();
+        let message = "c0ffee";
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(owner.state.clone())
+                .configure(crate::api::routes::ApiRoutes::configure),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/v1/pairwise/verify-signature")
+            .set_json(serde_json::json!({
+                "audience": "pet",
+                "subject": subject_of(&owner, crate::identity::pairwise::Audience::Pet),
+                "message": message,
+                "signature": sign_hex(&owner.key, message),
+            }))
+            .to_request();
+        let response: serde_json::Value =
+            actix_web::test::call_and_read_body_json(&app, request).await;
+        assert_eq!(response["data"]["valid"], true, "{response}");
     }
 }

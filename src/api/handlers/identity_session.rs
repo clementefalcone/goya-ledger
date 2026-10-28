@@ -188,7 +188,7 @@ pub struct VerifySubjectSignatureRequest {
     pub signature: String,
 }
 
-#[post("/identity/pairwise/verify-signature")]
+#[post("/pairwise/verify-signature")]
 pub async fn verify_subject_signature(
     state: web::Data<AppState>,
     body: web::Json<VerifySubjectSignatureRequest>,
