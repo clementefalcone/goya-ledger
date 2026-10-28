@@ -67,6 +67,7 @@ impl ApiRoutes {
             .service(identity::session_key)
             .service(identity_session::redeem_session)
             .service(identity_session::verify_subject_signature)
+            .service(identity_session::subject_status)
             .service(credentials::store_write_credential)
             .service(credentials::store_list_credentials)
             .service(credentials::store_get_credential)
@@ -442,7 +443,8 @@ impl LightRoutes {
             .service(identity::auth_verify)
             .service(identity::session_key)
             .service(identity_session::redeem_session)
-            .service(identity_session::verify_subject_signature);
+            .service(identity_session::verify_subject_signature)
+            .service(identity_session::subject_status);
         // Tokenomics
         cfg.service(tokenomics::supply)
             .service(tokenomics::fee)

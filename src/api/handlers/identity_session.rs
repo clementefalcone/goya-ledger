@@ -180,6 +180,29 @@ pub async fn redeem_session(
     )))
 }
 
+fn resolve_subject(
+    state: &AppState,
+    req: &HttpRequest,
+    audience_name: &str,
+    subject: &str,
+) -> Result<Option<crate::storage::traits::IdentityRecord>, ApiError> {
+    let audience = Audience::parse(audience_name)
+        .filter(|app| app.disclosure() == Disclosure::Subject)
+        .ok_or_else(|| ApiError::ValidationError {
+            field: "audience".to_string(),
+            reason: format!("{audience_name} is not an app that sees pairwise subjects"),
+        })?;
+    let store = get_channel_store(state, channel_id_from_req(req))?;
+    let records = store
+        .list_identities()
+        .map_err(|e| ApiError::InternalError {
+            reason: format!("identities not listed to resolve {subject}: {e}"),
+        })?;
+    pairwise::find_by_subject(pairwise_secret(state)?, audience, subject, &records)
+        .map(|record| record.cloned())
+        .map_err(|reason| ApiError::InternalError { reason })
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct VerifySubjectSignatureRequest {
     pub audience: String,
@@ -194,24 +217,7 @@ pub async fn verify_subject_signature(
     body: web::Json<VerifySubjectSignatureRequest>,
     req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
-    let audience = Audience::parse(&body.audience)
-        .filter(|app| app.disclosure() == Disclosure::Subject)
-        .ok_or_else(|| ApiError::ValidationError {
-            field: "audience".to_string(),
-            reason: format!(
-                "{} is not an app that sees pairwise subjects",
-                body.audience
-            ),
-        })?;
-    let store = get_channel_store(&state, channel_id_from_req(&req))?;
-    let records = store
-        .list_identities()
-        .map_err(|e| ApiError::InternalError {
-            reason: format!("identities not listed to resolve {}: {e}", body.subject),
-        })?;
-    let record =
-        pairwise::find_by_subject(pairwise_secret(&state)?, audience, &body.subject, &records)
-            .map_err(|reason| ApiError::InternalError { reason })?;
+    let record = resolve_subject(&state, &req, &body.audience, &body.subject)?;
     let valid = record.is_some_and(|record| {
         record.status == "active"
             && crate::identity::operations::is_signed_by(
@@ -222,6 +228,26 @@ pub async fn verify_subject_signature(
     });
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         serde_json::json!({ "subject": body.subject, "valid": valid }),
+        uuid::Uuid::new_v4().to_string(),
+    )))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SubjectStatusRequest {
+    pub audience: String,
+    pub subject: String,
+}
+
+#[post("/pairwise/status")]
+pub async fn subject_status(
+    state: web::Data<AppState>,
+    body: web::Json<SubjectStatusRequest>,
+    req: HttpRequest,
+) -> ApiResult<HttpResponse> {
+    let record = resolve_subject(&state, &req, &body.audience, &body.subject)?;
+    let is_active = record.is_some_and(|record| record.status == "active");
+    Ok(HttpResponse::Ok().json(ApiResponse::success(
+        serde_json::json!({ "subject": body.subject, "active": is_active }),
         uuid::Uuid::new_v4().to_string(),
     )))
 }

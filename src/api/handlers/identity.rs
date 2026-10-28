@@ -1868,4 +1868,43 @@ mod tests {
             actix_web::test::call_and_read_body_json(&app, request).await;
         assert_eq!(response["data"]["valid"], true, "{response}");
     }
+
+    #[actix_web::test]
+    async fn app_learns_when_the_identity_behind_its_subject_is_revoked() {
+        use crate::identity::signing::SigningProvider;
+        let owner = registered_owner();
+        let subject = subject_of(&owner, crate::identity::pairwise::Audience::Salud);
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(owner.state.clone())
+                .configure(crate::api::routes::ApiRoutes::configure),
+        )
+        .await;
+        let status_of = |subject: String| {
+            actix_web::test::TestRequest::post()
+                .uri("/api/v1/pairwise/status")
+                .set_json(serde_json::json!({ "audience": "salud", "subject": subject }))
+                .to_request()
+        };
+        let active: serde_json::Value =
+            actix_web::test::call_and_read_body_json(&app, status_of(subject.clone())).await;
+        assert_eq!(active["data"]["active"], true, "{active}");
+        get_channel_store(&owner.state, "default")
+            .unwrap()
+            .write_identity(&identity_record(
+                &owner.did,
+                &hex::encode(owner.key.public_key()),
+                "revoked",
+            ))
+            .unwrap();
+        let revoked: serde_json::Value =
+            actix_web::test::call_and_read_body_json(&app, status_of(subject)).await;
+        assert_eq!(revoked["data"]["active"], false);
+        let unknown: serde_json::Value = actix_web::test::call_and_read_body_json(
+            &app,
+            status_of(format!("pid:{}", "0".repeat(64))),
+        )
+        .await;
+        assert_eq!(unknown["data"]["active"], false);
+    }
 }
