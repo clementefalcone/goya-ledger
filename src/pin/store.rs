@@ -20,9 +20,16 @@ pub trait PinStore: Send + Sync {
     fn remove(&self, did: &str) -> Result<bool, PinError>;
 }
 
+pub const MAX_FAILED_ATTEMPTS: u8 = 5;
+
+struct PinRecord {
+    hash: String,
+    failed_attempts: u8,
+}
+
 /// In-memory implementation backed by a `HashMap`.
 pub struct MemoryPinStore {
-    data: RwLock<HashMap<String, String>>,
+    data: RwLock<HashMap<String, PinRecord>>,
 }
 
 impl MemoryPinStore {
@@ -45,7 +52,13 @@ impl PinStore for MemoryPinStore {
             .data
             .write()
             .map_err(|e| PinError::HashError(format!("lock poisoned: {e}")))?;
-        map.insert(did.to_string(), pin_hash.to_string());
+        map.insert(
+            did.to_string(),
+            PinRecord {
+                hash: pin_hash.to_string(),
+                failed_attempts: 0,
+            },
+        );
         Ok(())
     }
 
@@ -54,14 +67,31 @@ impl PinStore for MemoryPinStore {
             .data
             .read()
             .map_err(|e| PinError::HashError(format!("lock poisoned: {e}")))?;
-        Ok(map.get(did).cloned())
+        Ok(map.get(did).map(|record| record.hash.clone()))
     }
 
     fn verify(&self, did: &str, plain_pin: &str) -> Result<(), PinError> {
-        let hash = self
-            .get_hash(did)?
+        let mut map = self
+            .data
+            .write()
+            .map_err(|e| PinError::HashError(format!("lock poisoned: {e}")))?;
+        let record = map
+            .get_mut(did)
             .ok_or_else(|| PinError::HashError(format!("no PIN registered for DID: {did}")))?;
-        Pin::verify(plain_pin, &hash)
+        match Pin::verify(plain_pin, &record.hash) {
+            Ok(()) => {
+                record.failed_attempts = 0;
+                Ok(())
+            }
+            Err(PinError::VerifyFailed) => {
+                record.failed_attempts += 1;
+                if record.failed_attempts >= MAX_FAILED_ATTEMPTS {
+                    map.remove(did);
+                }
+                Err(PinError::VerifyFailed)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn remove(&self, did: &str) -> Result<bool, PinError> {
@@ -128,6 +158,67 @@ mod tests {
         assert!(store.remove("did:goya:dave").unwrap());
         assert!(!store.remove("did:goya:dave").unwrap());
         assert!(store.verify("did:goya:dave", pin.as_str()).is_err());
+    }
+
+    fn wrong_pin_for(pin: &Pin) -> String {
+        if pin.as_str() == "0000" {
+            "1111"
+        } else {
+            "0000"
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn five_wrong_pins_void_the_pin() {
+        let store = MemoryPinStore::new();
+        let pin = Pin::generate(4).unwrap();
+        store.set("did:goya:erin", &pin.hash().unwrap()).unwrap();
+
+        for _ in 0..MAX_FAILED_ATTEMPTS {
+            assert!(store.verify("did:goya:erin", &wrong_pin_for(&pin)).is_err());
+        }
+        assert!(store.verify("did:goya:erin", pin.as_str()).is_err());
+        assert!(store.get_hash("did:goya:erin").unwrap().is_none());
+    }
+
+    #[test]
+    fn right_pin_resets_the_failed_attempts() {
+        let store = MemoryPinStore::new();
+        let pin = Pin::generate(4).unwrap();
+        store.set("did:goya:frank", &pin.hash().unwrap()).unwrap();
+
+        for _ in 0..2 {
+            for _ in 1..MAX_FAILED_ATTEMPTS {
+                assert!(store
+                    .verify("did:goya:frank", &wrong_pin_for(&pin))
+                    .is_err());
+            }
+            assert!(store.verify("did:goya:frank", pin.as_str()).is_ok());
+        }
+    }
+
+    #[test]
+    fn new_pin_starts_with_no_failed_attempts() {
+        let store = MemoryPinStore::new();
+        let old_pin = Pin::generate(4).unwrap();
+        store
+            .set("did:goya:gina", &old_pin.hash().unwrap())
+            .unwrap();
+        for _ in 1..MAX_FAILED_ATTEMPTS {
+            assert!(store
+                .verify("did:goya:gina", &wrong_pin_for(&old_pin))
+                .is_err());
+        }
+
+        let new_pin = Pin::generate(4).unwrap();
+        store
+            .set("did:goya:gina", &new_pin.hash().unwrap())
+            .unwrap();
+        assert!(store
+            .verify("did:goya:gina", &wrong_pin_for(&new_pin))
+            .is_err());
+        assert!(store.verify("did:goya:gina", new_pin.as_str()).is_ok());
     }
 
     #[test]
