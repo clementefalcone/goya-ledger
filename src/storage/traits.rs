@@ -99,8 +99,6 @@ pub enum TxPayload {
     RegisterIdentity {
         record: IdentityRecord,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        civil_anchor: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         owner_signature: Option<String>,
     },
     RevokeIdentity {
@@ -132,6 +130,16 @@ pub enum TxPayload {
         did: String,
         recovery_commitment: String,
         committed_at: u64,
+        owner_signature: String,
+    },
+    BindCivilAnchor {
+        did: String,
+        anchor: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaces: Option<String>,
+        bound_at: u64,
+        issuer_public_key: String,
+        issuer_signature: String,
         owner_signature: String,
     },
     Notarize {
@@ -1468,8 +1476,7 @@ mod tests {
             fee: 0,
             payload: Some(TxPayload::RegisterIdentity {
                 record: record.clone(),
-                civil_anchor: Some("cafebabe".into()),
-                owner_signature: None,
+                owner_signature: Some("cafebabe".into()),
             }),
         };
         let json = serde_json::to_string(&tx).unwrap();
@@ -1477,11 +1484,10 @@ mod tests {
         match decoded.payload.unwrap() {
             TxPayload::RegisterIdentity {
                 record: r,
-                civil_anchor,
-                ..
+                owner_signature,
             } => {
                 assert_eq!(r.did, record.did);
-                assert_eq!(civil_anchor, Some("cafebabe".into()));
+                assert_eq!(owner_signature, Some("cafebabe".into()));
             }
             _ => panic!("wrong payload variant"),
         }

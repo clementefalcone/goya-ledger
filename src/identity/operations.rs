@@ -82,7 +82,6 @@ fn require_signature(
 pub fn check_register(
     store: &dyn BlockStore,
     record: &IdentityRecord,
-    civil_anchor: Option<&str>,
     owner_signature: Option<&str>,
 ) -> Result<Change, IdentityOpError> {
     if !did_matches_pubkey(&record.did, &record.public_key) {
@@ -95,6 +94,12 @@ pub fn check_register(
         return Err(IdentityOpError::Invalid(format!(
             "new identities must be active, got {:?}",
             record.status
+        )));
+    }
+    if record.civil_anchor.is_some() {
+        return Err(IdentityOpError::Invalid(format!(
+            "identity {} cannot register with a civil anchor; a trusted issuer binds it afterwards",
+            record.did
         )));
     }
     if record.recovery_commitment.as_deref() == Some(record.did.as_str()) {
@@ -110,15 +115,6 @@ pub fn check_register(
             signature,
             &record.did,
         )?;
-    }
-    if let Some(anchor) = civil_anchor {
-        if let Ok(anchored_did) = store.resolve_by_civil_anchor(anchor) {
-            if anchored_did != record.did {
-                return Err(IdentityOpError::Conflict(
-                    "identity with document already exists".to_string(),
-                ));
-            }
-        }
     }
     match store.read_identity(&record.did) {
         Ok(existing) if existing == *record => Ok(Change::AlreadyApplied),
@@ -224,17 +220,12 @@ pub fn check_rotate(
 pub fn apply_register(
     store: &dyn BlockStore,
     record: &IdentityRecord,
-    civil_anchor: Option<&str>,
     owner_signature: Option<&str>,
 ) -> StorageResult<()> {
-    if check_register(store, record, civil_anchor, owner_signature)? == Change::AlreadyApplied {
+    if check_register(store, record, owner_signature)? == Change::AlreadyApplied {
         return Ok(());
     }
-    store.write_identity(record)?;
-    if let Some(anchor) = civil_anchor {
-        store.write_civil_anchor(anchor, &record.did)?;
-    }
-    Ok(())
+    store.write_identity(record)
 }
 
 pub fn apply_revoke(
@@ -349,7 +340,7 @@ mod tests {
 
         fn register_on(&self, store: &dyn BlockStore) {
             let signature = self.sign(&register_message(&self.did, None));
-            apply_register(store, &self.record(), None, Some(&signature)).unwrap();
+            apply_register(store, &self.record(), Some(&signature)).unwrap();
         }
     }
 
@@ -393,7 +384,7 @@ mod tests {
             ..owner.record()
         };
         let signature = owner.sign(&register_message(&owner.did, Some(&recovery.did)));
-        apply_register(store, &record, None, Some(&signature)).unwrap();
+        apply_register(store, &record, Some(&signature)).unwrap();
     }
 
     #[test]
@@ -419,7 +410,7 @@ mod tests {
         let owner = Owner::ed25519();
         let attacker = Owner::ed25519();
         let forged = attacker.sign(&register_message(&owner.did, None));
-        let result = apply_register(&store, &owner.record(), None, Some(&forged));
+        let result = apply_register(&store, &owner.record(), Some(&forged));
         assert!(result.is_err());
         assert!(store.read_identity(&owner.did).is_err());
     }
@@ -434,7 +425,7 @@ mod tests {
             ..victim.record()
         };
         let signature = attacker.sign(&register_message(&victim.did, None));
-        assert!(apply_register(&store, &record, None, Some(&signature)).is_err());
+        assert!(apply_register(&store, &record, Some(&signature)).is_err());
     }
 
     #[test]
@@ -447,7 +438,22 @@ mod tests {
         };
         let signature = owner.sign(&register_message(&owner.did, None));
         assert!(matches!(
-            check_register(&store, &record, None, Some(&signature)),
+            check_register(&store, &record, Some(&signature)),
+            Err(IdentityOpError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn register_cannot_claim_a_civil_anchor() {
+        let store = MemoryStore::new();
+        let owner = Owner::ed25519();
+        let record = IdentityRecord {
+            civil_anchor: Some("ab".repeat(32)),
+            ..owner.record()
+        };
+        let signature = owner.sign(&register_message(&owner.did, None));
+        assert!(matches!(
+            check_register(&store, &record, Some(&signature)),
             Err(IdentityOpError::Invalid(_))
         ));
     }
@@ -472,7 +478,7 @@ mod tests {
         };
         let signature = owner.sign(&register_message(&owner.did, None));
         assert!(matches!(
-            check_register(&store, &altered, None, Some(&signature)),
+            check_register(&store, &altered, Some(&signature)),
             Err(IdentityOpError::Conflict(_))
         ));
     }
@@ -589,7 +595,7 @@ mod tests {
         };
         let signature_without_commitment = owner.sign(&register_message(&owner.did, None));
         assert!(matches!(
-            check_register(&store, &record, None, Some(&signature_without_commitment)),
+            check_register(&store, &record, Some(&signature_without_commitment)),
             Err(IdentityOpError::BadSignature(_))
         ));
     }
@@ -604,7 +610,7 @@ mod tests {
         };
         let signature = owner.sign(&register_message(&owner.did, Some(&owner.did)));
         assert!(matches!(
-            check_register(&store, &record, None, Some(&signature)),
+            check_register(&store, &record, Some(&signature)),
             Err(IdentityOpError::Invalid(_))
         ));
     }

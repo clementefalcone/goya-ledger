@@ -73,6 +73,7 @@ All configuration is via environment variables. No config files needed.
 | `RUST_BC_ENV` | — | Set to `production` to enforce TLS |
 | `ACL_MODE` | `permissive` | `strict` (deny without mTLS identity) or `permissive` (log-only) |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins (e.g. `https://app.example.com,https://admin.example.com`) |
+| `CIVIL_ANCHOR_ISSUERS` | — | Comma-separated hex public keys allowed to bind a civil document to a DID. Every node must carry the same list: a node with a different list rejects binds the others accepted, and its state diverges |
 
 ### Production Security Requirements
 

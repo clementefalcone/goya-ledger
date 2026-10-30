@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn migrates_civil_anchor() {
         let store = MemoryStore::new();
-        let anchor = crate::identity::did::civil_anchor_hash("RUT", "12345678-9");
+        let anchor = "4f1c2a9b8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170605f4e3".to_string();
         let mut rec = legacy_record("aabbccdd11223344ffffffffffffffff");
         rec.civil_anchor = Some(anchor.clone());
         store.write_identity(&rec).unwrap();

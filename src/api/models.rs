@@ -24,10 +24,6 @@ pub struct CreateBlockRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateIdentityRequest {
     pub metadata: Option<serde_json::Value>,
-    #[serde(default)]
-    pub document_type: Option<String>,
-    #[serde(default)]
-    pub document_number: Option<String>,
 }
 
 /// Identity response with public key
@@ -205,8 +201,6 @@ mod tests {
     fn test_create_identity_request_serialization() {
         let req = CreateIdentityRequest {
             metadata: Some(serde_json::json!({"key": "value"})),
-            document_type: None,
-            document_number: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let deserialized: CreateIdentityRequest = serde_json::from_str(&json).unwrap();

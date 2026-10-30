@@ -6,7 +6,7 @@ pub mod parallel;
 pub mod proposal;
 pub mod rwset;
 
-use crate::identity::{operations, recovery_commitment, vault_entries};
+use crate::identity::{civil_anchor, operations, recovery_commitment, vault_entries};
 use crate::storage::errors::StorageResult;
 use crate::storage::traits::{BlockStore, Transaction, TxPayload};
 
@@ -14,14 +14,8 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
     match &tx.payload {
         Some(TxPayload::RegisterIdentity {
             record,
-            civil_anchor,
             owner_signature,
-        }) => operations::apply_register(
-            store,
-            record,
-            civil_anchor.as_deref(),
-            owner_signature.as_deref(),
-        ),
+        }) => operations::apply_register(store, record, owner_signature.as_deref()),
         Some(TxPayload::RevokeIdentity {
             did,
             revoked_at,
@@ -87,6 +81,27 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
             },
             *committed_at,
         ),
+        Some(TxPayload::BindCivilAnchor {
+            did,
+            anchor,
+            replaces,
+            bound_at,
+            issuer_public_key,
+            issuer_signature,
+            owner_signature,
+        }) => civil_anchor::apply_bind_civil_anchor(
+            store,
+            civil_anchor::trusted_issuers(),
+            &civil_anchor::BindCivilAnchorRequest {
+                did,
+                anchor,
+                replaces: replaces.as_deref(),
+                issuer_public_key,
+                issuer_signature,
+                owner_signature,
+            },
+            *bound_at,
+        ),
         Some(TxPayload::Notarize { entry }) => store.write_notarization(entry),
         _ => Ok(()),
     }
@@ -148,7 +163,6 @@ mod tests {
                 recovery_commitment: recovery_commitment.map(str::to_string),
                 vault_entries: Vec::new(),
             },
-            civil_anchor: None,
             owner_signature: Some(sign(provider, &register_message(&did, recovery_commitment))),
         })
     }

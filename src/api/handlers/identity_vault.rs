@@ -4,6 +4,9 @@ use crate::api::handlers::identity::{
     commit_identity_op, identity_op_error, now_secs, OwnerActionRequest,
 };
 use crate::app_state::AppState;
+use crate::identity::civil_anchor::{
+    check_bind_civil_anchor, trusted_issuers, BindCivilAnchorRequest,
+};
 use crate::identity::operations::Change;
 use crate::identity::recovery_commitment::{check_commit_recovery, CommitRecoveryRequest};
 use crate::identity::vault_entries::{
@@ -169,6 +172,68 @@ pub async fn commit_recovery_key(
     )))
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct BindCivilAnchorBody {
+    pub anchor: String,
+    #[serde(default)]
+    pub replaces: Option<String>,
+    pub issuer_public_key: String,
+    pub issuer_signature: String,
+    pub signature: String,
+}
+
+#[post("/identity/{did}/civil-anchor")]
+pub async fn bind_civil_anchor(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<BindCivilAnchorBody>,
+    req: HttpRequest,
+) -> ApiResult<HttpResponse> {
+    let did = path.into_inner();
+    let trace_id = uuid::Uuid::new_v4().to_string();
+    let channel = channel_id_from_req(&req);
+    let store = get_channel_store(&state, channel)?;
+
+    let request = BindCivilAnchorRequest {
+        did: &did,
+        anchor: &body.anchor,
+        replaces: body.replaces.as_deref(),
+        issuer_public_key: &body.issuer_public_key,
+        issuer_signature: &body.issuer_signature,
+        owner_signature: &body.signature,
+    };
+    if check_bind_civil_anchor(store.as_ref(), trusted_issuers(), &request)
+        .map_err(identity_op_error)?
+        == Change::AlreadyApplied
+    {
+        return Ok(HttpResponse::Ok().json(ApiResponse::success(
+            serde_json::json!({ "did": did, "status": "already_bound" }),
+            trace_id,
+        )));
+    }
+
+    let bound_at = now_secs();
+    commit_identity_op(
+        &state,
+        store.as_ref(),
+        channel,
+        &did,
+        TxPayload::BindCivilAnchor {
+            did: did.clone(),
+            anchor: body.anchor.clone(),
+            replaces: body.replaces.clone(),
+            bound_at,
+            issuer_public_key: body.issuer_public_key.clone(),
+            issuer_signature: body.issuer_signature.clone(),
+            owner_signature: body.signature.clone(),
+        },
+    )?;
+    Ok(HttpResponse::Created().json(ApiResponse::success(
+        serde_json::json!({ "did": did, "bound_at": bound_at }),
+        trace_id,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,7 +292,8 @@ mod tests {
                 web::scope("/api/v1")
                     .service(add_vault_entry)
                     .service(revoke_vault_entry)
-                    .service(commit_recovery_key),
+                    .service(commit_recovery_key)
+                    .service(bind_civil_anchor),
             ),
         )
         .await;
@@ -346,5 +412,53 @@ mod tests {
             "signature": sign(&stranger, &commit_recovery_message(&owner.did, &stranger_did)),
         });
         assert_eq!(post(&owner, &uri, body).await, 401);
+    }
+
+    fn trusted_issuer() -> &'static MlDsaSigningProvider {
+        static ISSUER: std::sync::OnceLock<MlDsaSigningProvider> = std::sync::OnceLock::new();
+        ISSUER.get_or_init(|| {
+            let issuer = MlDsaSigningProvider::generate();
+            std::env::set_var("CIVIL_ANCHOR_ISSUERS", hex::encode(issuer.public_key()));
+            issuer
+        })
+    }
+
+    fn bind_body(owner: &Owner, anchor: &str, issuer: &MlDsaSigningProvider) -> serde_json::Value {
+        let message =
+            crate::identity::civil_anchor::bind_civil_anchor_message(&owner.did, anchor, None);
+        serde_json::json!({
+            "anchor": anchor,
+            "issuer_public_key": hex::encode(issuer.public_key()),
+            "issuer_signature": sign(issuer, &message),
+            "signature": sign(&owner.key, &message),
+        })
+    }
+
+    #[actix_web::test]
+    async fn trusted_issuer_binds_a_document_once_over_http() {
+        let owner = registered_owner();
+        let anchor = "ab".repeat(32);
+        let uri = format!("/api/v1/identity/{}/civil-anchor", owner.did);
+        let body = bind_body(&owner, &anchor, trusted_issuer());
+        assert_eq!(post(&owner, &uri, body.clone()).await, 201);
+        assert_eq!(post(&owner, &uri, body).await, 200);
+        let resolved = get_channel_store(&owner.state, "default")
+            .unwrap()
+            .resolve_by_civil_anchor(&anchor)
+            .unwrap();
+        assert_eq!(resolved, owner.did);
+    }
+
+    #[actix_web::test]
+    async fn untrusted_issuer_cannot_bind_over_http() {
+        trusted_issuer();
+        let owner = registered_owner();
+        let anchor = "cd".repeat(32);
+        let uri = format!("/api/v1/identity/{}/civil-anchor", owner.did);
+        let impostor = MlDsaSigningProvider::generate();
+        assert_eq!(
+            post(&owner, &uri, bind_body(&owner, &anchor, &impostor)).await,
+            401
+        );
     }
 }

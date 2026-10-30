@@ -1,4 +1,4 @@
-use crate::api::errors::{enforce_acl, ApiError, ApiResponse, ApiResult, ErrorDto};
+use crate::api::errors::{ApiError, ApiResponse, ApiResult, ErrorDto};
 use crate::api::handlers::channels::{
     channel_id_from_req, enforce_channel_membership, get_channel_store,
 };
@@ -63,7 +63,7 @@ pub(crate) fn commit_identity_op(
 #[post("/identity/create")]
 pub async fn create_identity(
     state: web::Data<AppState>,
-    body: web::Json<CreateIdentityRequest>,
+    _body: web::Json<CreateIdentityRequest>,
     req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let trace_id = uuid::Uuid::new_v4().to_string();
@@ -85,13 +85,6 @@ pub async fn create_identity(
     // Persist to store
     let _channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, _channel)?;
-    let civil_anchor = match (&body.document_type, &body.document_number) {
-        (Some(doc_type), Some(doc_number)) => Some(crate::identity::did::civil_anchor_hash(
-            doc_type, doc_number,
-        )),
-        _ => None,
-    };
-
     let record = crate::storage::traits::IdentityRecord {
         did: did.clone(),
         public_key: public_key_hex.clone(),
@@ -100,13 +93,12 @@ pub async fn create_identity(
         status: "active".to_string(),
         migrated_from: None,
         signature_algorithm: Some(format!("{:?}", algorithm)),
-        civil_anchor: civil_anchor.clone(),
+        civil_anchor: None,
         recovery_commitment: None,
         vault_entries: Vec::new(),
     };
 
-    operations::check_register(store.as_ref(), &record, civil_anchor.as_deref(), None)
-        .map_err(identity_op_error)?;
+    operations::check_register(store.as_ref(), &record, None).map_err(identity_op_error)?;
     commit_identity_op(
         &state,
         store.as_ref(),
@@ -114,7 +106,6 @@ pub async fn create_identity(
         &did,
         crate::storage::traits::TxPayload::RegisterIdentity {
             record,
-            civil_anchor: civil_anchor.clone(),
             owner_signature: None,
         },
     )?;
@@ -148,44 +139,6 @@ async fn get_identity(
     let trace_id = uuid::Uuid::new_v4().to_string();
     let _channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, _channel)?;
-
-    let record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
-        resource: format!("identity {did}"),
-    })?;
-
-    let response = IdentityResponse {
-        did: record.did,
-        public_key: record.public_key,
-        created_at: chrono::DateTime::from_timestamp(record.created_at as i64, 0)
-            .unwrap_or_else(Utc::now),
-    };
-    Ok(HttpResponse::Ok().json(ApiResponse::success(response, trace_id)))
-}
-
-#[get("/identity/resolve/{doc_type}/{doc_number}")]
-pub async fn resolve_by_document(
-    state: web::Data<AppState>,
-    path: web::Path<(String, String)>,
-    req: HttpRequest,
-) -> ApiResult<HttpResponse> {
-    let (doc_type, doc_number) = path.into_inner();
-    let trace_id = uuid::Uuid::new_v4().to_string();
-    let _channel = channel_id_from_req(&req);
-    let store = get_channel_store(&state, _channel)?;
-
-    enforce_acl(
-        state.acl_provider.as_deref(),
-        state.policy_store.as_deref(),
-        "peer/Identity",
-        &req,
-    )?;
-
-    let anchor = crate::identity::did::civil_anchor_hash(&doc_type, &doc_number);
-    let did = store
-        .resolve_by_civil_anchor(&anchor)
-        .map_err(|_| ApiError::NotFound {
-            resource: format!("identity for {doc_type}:{doc_number}"),
-        })?;
 
     let record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
         resource: format!("identity {did}"),
@@ -429,7 +382,7 @@ pub async fn store_write_identity(
     let _channel = channel_id_from_req(&req);
     enforce_channel_membership(&state, _channel, &req)?;
     let store = get_channel_store(&state, _channel)?;
-    let change = operations::check_register(store.as_ref(), &record, None, Some(&signature))
+    let change = operations::check_register(store.as_ref(), &record, Some(&signature))
         .map_err(identity_op_error)?;
     if change == operations::Change::AlreadyApplied {
         return Err(ApiError::Conflict {
@@ -443,7 +396,6 @@ pub async fn store_write_identity(
         &record.did,
         TxPayload::RegisterIdentity {
             record: record.clone(),
-            civil_anchor: None,
             owner_signature: Some(signature),
         },
     )?;

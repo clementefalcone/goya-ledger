@@ -1,129 +1,185 @@
-use rust_bc::identity::did::{civil_anchor_hash, did_from_pubkey_hex};
+use rust_bc::identity::civil_anchor::bind_civil_anchor_message;
+use rust_bc::identity::did::did_from_pubkey_hex;
+use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider};
 use rust_bc::mining::{MiningConfig, MiningService};
 use rust_bc::storage::traits::{BlockStore, IdentityRecord, Transaction, TxPayload};
 use rust_bc::storage::MemoryStore;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-fn identity_tx(pubkey: &str, doc_type: &str, doc_number: &str) -> Transaction {
-    let did = did_from_pubkey_hex(pubkey);
-    let anchor = civil_anchor_hash(doc_type, doc_number);
+const ANCHOR: &str = "4f1c2a9b8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170605f4e3";
+
+struct Person {
+    key: MlDsaSigningProvider,
+    did: String,
+}
+
+fn public_key_of(key: &MlDsaSigningProvider) -> String {
+    hex::encode(key.public_key())
+}
+
+fn sign(key: &MlDsaSigningProvider, message: &str) -> String {
+    hex::encode(key.sign(message.as_bytes()).unwrap())
+}
+
+fn trusted_issuer() -> &'static MlDsaSigningProvider {
+    static ISSUER: OnceLock<MlDsaSigningProvider> = OnceLock::new();
+    ISSUER.get_or_init(|| {
+        let issuer = MlDsaSigningProvider::generate();
+        std::env::set_var("CIVIL_ANCHOR_ISSUERS", public_key_of(&issuer));
+        issuer
+    })
+}
+
+fn person() -> Person {
+    let key = MlDsaSigningProvider::generate();
+    let did = did_from_pubkey_hex(&public_key_of(&key));
+    Person { key, did }
+}
+
+fn tx(id: String, author: &str, payload: TxPayload) -> Transaction {
     Transaction {
-        id: format!("id-{}", &pubkey[..8.min(pubkey.len())]),
+        id,
         block_height: 0,
         timestamp: 1000,
-        input_did: did.clone(),
-        output_recipient: did.clone(),
+        input_did: author.to_string(),
+        output_recipient: author.to_string(),
         amount: 0,
         state: "pending".to_string(),
         fee: 0,
-        payload: Some(TxPayload::RegisterIdentity {
-            record: IdentityRecord {
-                did,
-                public_key: pubkey.to_string(),
-                created_at: 1000,
-                updated_at: 1000,
-                status: "active".to_string(),
-                migrated_from: None,
-                signature_algorithm: None,
-                civil_anchor: Some(anchor.clone()),
-                recovery_commitment: None,
-                vault_entries: Vec::new(),
-            },
-            civil_anchor: Some(anchor),
-            owner_signature: None,
-        }),
+        payload: Some(payload),
     }
 }
 
-fn simulate_block_reception(source: &dyn BlockStore, target: &dyn BlockStore, height: u64) {
+fn register_tx(person: &Person) -> Transaction {
+    let record = IdentityRecord {
+        did: person.did.clone(),
+        public_key: public_key_of(&person.key),
+        created_at: 1000,
+        updated_at: 1000,
+        status: "active".to_string(),
+        migrated_from: None,
+        signature_algorithm: Some("MlDsa65".to_string()),
+        civil_anchor: None,
+        recovery_commitment: None,
+        vault_entries: Vec::new(),
+    };
+    tx(
+        format!("register-{}", &person.did[10..18]),
+        &person.did,
+        TxPayload::RegisterIdentity {
+            record,
+            owner_signature: None,
+        },
+    )
+}
+
+fn bind_tx(person: &Person, replaces: Option<&str>) -> Transaction {
+    let issuer = trusted_issuer();
+    let message = bind_civil_anchor_message(&person.did, ANCHOR, replaces);
+    tx(
+        format!("bind-{}", &person.did[10..18]),
+        &person.did,
+        TxPayload::BindCivilAnchor {
+            did: person.did.clone(),
+            anchor: ANCHOR.to_string(),
+            replaces: replaces.map(str::to_string),
+            bound_at: 1001,
+            issuer_public_key: public_key_of(issuer),
+            issuer_signature: sign(issuer, &message),
+            owner_signature: sign(&person.key, &message),
+        },
+    )
+}
+
+fn receive_block(source: &dyn BlockStore, target: &dyn BlockStore, height: u64) {
     let block = source.read_block(height).unwrap();
-    let _ = target.write_block(&block);
-    for tx in &block.transaction_data {
-        let mut committed = tx.clone();
-        if let Err(_e) = rust_bc::transaction::apply_tx_payload(target, tx) {
+    target.write_block(&block).unwrap();
+    for transaction in &block.transaction_data {
+        let mut committed = transaction.clone();
+        if rust_bc::transaction::apply_tx_payload(target, transaction).is_err() {
             committed.state = "invalid_payload".to_string();
         }
-        let _ = target.write_transaction(&committed);
+        target.write_transaction(&committed).unwrap();
+    }
+}
+
+fn two_nodes() -> (Arc<dyn BlockStore>, Arc<dyn BlockStore>, MiningService) {
+    let node_a: Arc<dyn BlockStore> = Arc::new(MemoryStore::new());
+    let node_b: Arc<dyn BlockStore> = Arc::new(MemoryStore::new());
+    let miner = MiningService::new(node_a.clone(), MiningConfig::default());
+    (node_a, node_b, miner)
+}
+
+fn holder(node: &dyn BlockStore) -> Option<String> {
+    node.resolve_by_civil_anchor(ANCHOR).ok()
+}
+
+fn anchor_of(node: &dyn BlockStore, person: &Person) -> Option<String> {
+    node.read_identity(&person.did).unwrap().civil_anchor
+}
+
+#[test]
+fn bound_document_replicates_to_another_node() {
+    let (node_a, node_b, miner) = two_nodes();
+    let alice = person();
+
+    miner
+        .mine_block("miner-a", vec![register_tx(&alice), bind_tx(&alice, None)])
+        .unwrap();
+    receive_block(node_a.as_ref(), node_b.as_ref(), 0);
+
+    assert_eq!(holder(node_b.as_ref()), Some(alice.did.clone()));
+    assert_eq!(anchor_of(node_b.as_ref(), &alice).as_deref(), Some(ANCHOR));
+}
+
+#[test]
+fn every_node_keeps_the_first_of_two_binds_in_one_block() {
+    let (node_a, node_b, miner) = two_nodes();
+    let first = person();
+    let second = person();
+
+    miner
+        .mine_block(
+            "miner-a",
+            vec![
+                register_tx(&first),
+                register_tx(&second),
+                bind_tx(&first, None),
+                bind_tx(&second, None),
+            ],
+        )
+        .unwrap();
+    receive_block(node_a.as_ref(), node_b.as_ref(), 0);
+
+    for node in [node_a.as_ref(), node_b.as_ref()] {
+        assert_eq!(holder(node), Some(first.did.clone()));
+        assert_eq!(anchor_of(node, &second), None);
+        let losing_bind = node.read_transaction(&bind_tx(&second, None).id).unwrap();
+        assert_eq!(losing_bind.state, "invalid_payload");
     }
 }
 
 #[test]
-fn identity_created_on_node_a_visible_on_node_b_after_block() {
-    let store_a: Arc<dyn BlockStore> = Arc::new(MemoryStore::new());
-    let store_b: Arc<dyn BlockStore> = Arc::new(MemoryStore::new());
-    let miner = MiningService::new(store_a.clone(), MiningConfig::default());
-
-    let tx = identity_tx("aabbccdd11223344", "RUT", "12345678-9");
-    let expected_did = did_from_pubkey_hex("aabbccdd11223344");
-    let expected_anchor = civil_anchor_hash("RUT", "12345678-9");
-
-    miner.mine_block("miner-a", vec![tx]).unwrap();
-
-    assert!(store_a.read_identity(&expected_did).is_ok());
-    assert!(store_b.read_identity(&expected_did).is_err());
-
-    simulate_block_reception(store_a.as_ref(), store_b.as_ref(), 0);
-
-    let identity_b = store_b.read_identity(&expected_did).unwrap();
-    assert_eq!(identity_b.public_key, "aabbccdd11223344");
-    assert_eq!(identity_b.status, "active");
-
-    let resolved = store_b.resolve_by_civil_anchor(&expected_anchor).unwrap();
-    assert_eq!(resolved, expected_did);
-}
-
-#[test]
-fn duplicate_anchor_rejected_on_node_b() {
-    let store_a: Arc<dyn BlockStore> = Arc::new(MemoryStore::new());
-    let store_b: Arc<dyn BlockStore> = Arc::new(MemoryStore::new());
-    let miner_a = MiningService::new(store_a.clone(), MiningConfig::default());
-    let miner_b = MiningService::new(store_b.clone(), MiningConfig::default());
-
-    let tx_a = identity_tx("aaaa1111", "RUT", "99999999-9");
-    miner_a.mine_block("miner-a", vec![tx_a]).unwrap();
-
-    let tx_b = identity_tx("bbbb2222", "RUT", "99999999-9");
-    miner_b.mine_block("miner-b", vec![tx_b]).unwrap();
-
-    simulate_block_reception(store_a.as_ref(), store_b.as_ref(), 0);
-
-    let anchor = civil_anchor_hash("RUT", "99999999-9");
-    let resolved = store_b.resolve_by_civil_anchor(&anchor).unwrap();
-    let did_b_local = did_from_pubkey_hex("bbbb2222");
-    assert_eq!(resolved, did_b_local);
-}
-
-#[test]
-fn state_sync_replays_multiple_blocks() {
-    let store_a: Arc<dyn BlockStore> = Arc::new(MemoryStore::new());
-    let store_c: Arc<dyn BlockStore> = Arc::new(MemoryStore::new());
-    let miner = MiningService::new(store_a.clone(), MiningConfig::default());
+fn rebind_replicates_and_unanchors_the_lost_did_everywhere() {
+    let (node_a, node_b, miner) = two_nodes();
+    let lost = person();
+    let fresh = person();
 
     miner
-        .mine_block("m", vec![identity_tx("aa11", "RUT", "11111111-1")])
+        .mine_block("miner-a", vec![register_tx(&lost), bind_tx(&lost, None)])
         .unwrap();
     miner
-        .mine_block("m", vec![identity_tx("bb22", "DNI", "22222222-2")])
+        .mine_block(
+            "miner-a",
+            vec![register_tx(&fresh), bind_tx(&fresh, Some(&lost.did))],
+        )
         .unwrap();
-    miner
-        .mine_block("m", vec![identity_tx("cc33", "PASSPORT", "33333333-3")])
-        .unwrap();
-
-    for h in 0..3 {
-        simulate_block_reception(store_a.as_ref(), store_c.as_ref(), h);
+    for height in 0..2 {
+        receive_block(node_a.as_ref(), node_b.as_ref(), height);
     }
 
-    assert!(store_c.read_identity(&did_from_pubkey_hex("aa11")).is_ok());
-    assert!(store_c.read_identity(&did_from_pubkey_hex("bb22")).is_ok());
-    assert!(store_c.read_identity(&did_from_pubkey_hex("cc33")).is_ok());
-
-    assert!(store_c
-        .resolve_by_civil_anchor(&civil_anchor_hash("RUT", "11111111-1"))
-        .is_ok());
-    assert!(store_c
-        .resolve_by_civil_anchor(&civil_anchor_hash("DNI", "22222222-2"))
-        .is_ok());
-    assert!(store_c
-        .resolve_by_civil_anchor(&civil_anchor_hash("PASSPORT", "33333333-3"))
-        .is_ok());
+    for node in [node_a.as_ref(), node_b.as_ref()] {
+        assert_eq!(holder(node), Some(fresh.did.clone()));
+        assert_eq!(anchor_of(node, &lost), None);
+    }
 }
