@@ -4,13 +4,6 @@
 
 Blockchain platform with post-quantum cryptography. Identity, notarization, wallet, and governance — all from a desktop app.
 
-## Download
-
-| Platform | Download |
-|----------|----------|
-| macOS (Apple Silicon) | [GOYA-ledger_0.3.0_aarch64.dmg](https://github.com/clementeaf/goya-ledger/releases/tag/v0.3.0) |
-| Windows | Coming soon |
-
 ## What can you do?
 
 ### Identity
@@ -34,7 +27,7 @@ Browse active proposals, create new ones, cast signed votes, and view the tally.
 Your Mac                           GOYA Network
 ┌──────────────┐                  ┌──────────────┐
 │ Desktop App  │───HTTPS/TLS────▶│  Seed Node   │
-│              │                  │  (Fly.io)    │
+│              │                  │  (VPS)       │
 │ • Identity   │                  │              │
 │ • Notarize   │                  │ • Consensus  │
 │ • Verify     │                  │ • Storage    │
@@ -64,14 +57,14 @@ cd tauri-app && cargo tauri build
 ### Run tests
 
 ```bash
-cargo test --lib                          # 1773 unit tests
-cargo test -p goya-ledger-app             # 32 desktop app tests
+cargo test --lib                          # 3007 unit tests
+cargo test -p goya-ledger-app             # 35 desktop app tests
 cargo test --test service_e2e             # 12 E2E tests against live seed node
 ```
 
 ### API
 
-66+ REST endpoints under `/api/v1`:
+300+ REST endpoints under `/api/v1`:
 
 | Endpoint | Description |
 |----------|-------------|
