@@ -44,9 +44,9 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn content_hash(def: &ContractDefinition) -> String {
+fn content_hash(contract_id: &str, def: &ContractDefinition) -> String {
     let canonical = serde_json::to_string(def).unwrap_or_default();
-    hex::encode(hash(canonical.as_bytes()))
+    hex::encode(hash(format!("{contract_id}:{canonical}").as_bytes()))
 }
 
 pub fn deploy_request(
@@ -111,7 +111,7 @@ pub fn deploy(
         .iter()
         .map(PartyState::from_definition)
         .collect();
-    let hash = content_hash(&definition);
+    let hash = content_hash(&id, &definition);
 
     let contract = LexContract {
         id: id.clone(),
@@ -646,6 +646,22 @@ mod tests {
         assert!(matches!(
             sign(&store, &contract.id, &forged),
             Err(LexChainError::SignerMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn sign_rejects_a_signature_made_for_another_contract_with_the_same_terms() {
+        let store = test_store();
+        register_key(&store, &key("alice"));
+        let signed_contract = deploy(&store, fes_definition()).unwrap();
+        let lookalike = deploy(&store, fes_definition()).unwrap();
+
+        let replayed = sign_as(&signed_contract, &key("alice"));
+        sign(&store, &signed_contract.id, &replayed).unwrap();
+
+        assert!(matches!(
+            sign(&store, &lookalike.id, &replayed),
+            Err(LexChainError::SignatureError(_))
         ));
     }
 
