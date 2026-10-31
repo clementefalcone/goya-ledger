@@ -278,6 +278,9 @@
     "/msp/{msp_id}": {
       "get": { "tags": ["MSP"], "summary": "Get MSP info", "parameters": [{ "name": "msp_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "MSP info" } } }
     },
+    "/identity/create": {
+      "post": { "tags": ["Identity"], "summary": "Create DID + keypair", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" } } } } } }, "responses": { "200": { "description": "DID created" } } }
+    },
     "/identity/{did}": {
       "get": { "tags": ["Identity"], "summary": "Get DID document", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "DID document" } } }
     },

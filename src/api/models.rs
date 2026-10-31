@@ -20,6 +20,12 @@ pub struct CreateBlockRequest {
     pub transactions: Vec<CreateTransactionRequest>,
 }
 
+/// Identity creation request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateIdentityRequest {
+    pub metadata: Option<serde_json::Value>,
+}
+
 /// Identity response with public key
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityResponse {
@@ -190,6 +196,16 @@ pub struct VersionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_create_identity_request_serialization() {
+        let req = CreateIdentityRequest {
+            metadata: Some(serde_json::json!({"key": "value"})),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: CreateIdentityRequest = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.metadata.is_some());
+    }
 
     #[test]
     fn test_identity_response_serialization() {

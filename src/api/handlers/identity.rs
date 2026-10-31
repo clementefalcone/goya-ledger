@@ -4,6 +4,7 @@ use crate::api::handlers::channels::{
 };
 use crate::api::models::*;
 use crate::app_state::AppState;
+use crate::identity::keys::KeyManager;
 use crate::identity::login_factors::{has_repeated_factor, login_message, DeviceFactor};
 use crate::identity::operations::{self, IdentityOpError};
 use crate::storage::traits::{BlockStore, Transaction, TxPayload};
@@ -56,6 +57,75 @@ pub(crate) fn commit_identity_op(
     crate::transaction::apply_tx_payload(store, &tx).map_err(|e| ApiError::StorageError {
         reason: format!("identity transaction {} not applied: {e}", tx.id),
     })
+}
+
+/// POST /identity/create - Create a new DID, generate Ed25519 keypair, persist to store.
+#[post("/identity/create")]
+pub async fn create_identity(
+    state: web::Data<AppState>,
+    _body: web::Json<CreateIdentityRequest>,
+    req: HttpRequest,
+) -> ApiResult<HttpResponse> {
+    let trace_id = uuid::Uuid::new_v4().to_string();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let algorithm = state
+        .signing_provider
+        .as_ref()
+        .map(|p| p.algorithm())
+        .unwrap_or_default();
+    let key_mgr = KeyManager::with_algorithm(algorithm, now);
+    let public_key_hex = hex::encode(key_mgr.public_key());
+    let did = crate::identity::did::did_from_pubkey_hex(&public_key_hex);
+
+    // Persist to store
+    let _channel = channel_id_from_req(&req);
+    let store = get_channel_store(&state, _channel)?;
+    let record = crate::storage::traits::IdentityRecord {
+        did: did.clone(),
+        public_key: public_key_hex.clone(),
+        created_at: now,
+        updated_at: now,
+        status: "active".to_string(),
+        migrated_from: None,
+        signature_algorithm: Some(format!("{:?}", algorithm)),
+        civil_anchor: None,
+        recovery_commitment: None,
+        vault_entries: Vec::new(),
+    };
+
+    operations::check_register(store.as_ref(), &record, None).map_err(identity_op_error)?;
+    commit_identity_op(
+        &state,
+        store.as_ref(),
+        _channel,
+        &did,
+        crate::storage::traits::TxPayload::RegisterIdentity {
+            record,
+            owner_signature: None,
+        },
+    )?;
+
+    crate::audit::emit_if_present(
+        &state.audit_store,
+        crate::audit::AuditAction::DidRegistered,
+        req.headers()
+            .get("X-Org-Id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown"),
+        Some(format!("did={did}")),
+    );
+
+    let response = IdentityResponse {
+        did,
+        public_key: public_key_hex,
+        created_at: Utc::now(),
+    };
+    Ok(HttpResponse::Created().json(ApiResponse::success(response, trace_id)))
 }
 
 /// GET /identity/{did} - Fetch DID document from store.
