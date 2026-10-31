@@ -263,29 +263,7 @@ footer a{color:var(--text);text-decoration:none}
     <div class="ep"><div class="eh" tabindex="0" onclick="this.parentElement.classList.toggle('open')"><span class="mt">GET</span><span class="ep-path">/lexchain</span><span class="ep-d" lang="en">List contracts</span><span class="ep-d" lang="es">Listar contratos</span></div><div class="eb"><p lang="en" style="color:var(--text-2);font-size:12px">All deployed contracts with current states.</p><p lang="es" style="color:var(--text-2);font-size:12px">Todos los contratos desplegados con estados actuales.</p></div></div>
     <div class="ep"><div class="eh" tabindex="0" onclick="this.parentElement.classList.toggle('open')"><span class="mt">GET</span><span class="ep-path">/lexchain/templates</span><span class="ep-d" lang="en">List templates</span><span class="ep-d" lang="es">Listar templates</span></div><div class="eb"><p lang="en" style="color:var(--text-2);font-size:12px">Built-in and custom templates with role definitions.</p><p lang="es" style="color:var(--text-2);font-size:12px">Templates integrados y custom con definiciones de roles.</p></div></div>
 
-    <h3 style="margin-top:24px" lang="en">Bulk FES — Sign &amp; verify multiple files</h3><h3 style="margin-top:24px" lang="es">FES Masivo — Firmar y verificar m&uacute;ltiples archivos</h3>
-
-    <div class="ep">
-      <div class="eh" tabindex="0" onclick="this.parentElement.classList.toggle('open')">
-        <span class="mt mt-p">POST</span><span class="ep-path">/sign/fes/bulk</span>
-        <span class="ep-d" lang="en">Bulk sign files (server-side)</span><span class="ep-d" lang="es">Firma masiva (server-side)</span>
-      </div>
-      <div class="eb">
-        <p lang="en" style="color:var(--text-2);font-size:12px;margin-bottom:8px">Upload up to 100 files (base64). Node hashes, signs, timestamps each. Returns all proofs in one response. Duplicates detected automatically.</p>
-        <p lang="es" style="color:var(--text-2);font-size:12px;margin-bottom:8px">Sube hasta 100 archivos (base64). El nodo hashea, firma y timestampea cada uno. Retorna todas las pruebas en una respuesta. Duplicados detectados autom&aacute;ticamente.</p>
-<pre>curl -X POST https://goya-node.fly.dev/api/v1/sign/fes/bulk \
-  -H "Content-Type: application/json" \
-  -d '{
-    "signer": "did:goya:company",
-    "files": [
-      {"data_base64": "JVBERi0x...", "filename": "contract_1.pdf"},
-      {"data_base64": "JVBERi0x...", "filename": "contract_2.pdf"}
-    ]
-  }'</pre>
-        <p style="color:var(--text-2);font-size:11px;margin-top:8px" lang="en">Response: <code>{"total": 2, "signed": 2, "results": [{"status": "signed", "content_hash": "...", "signature": "...", ...}]}</code></p>
-        <p style="color:var(--text-2);font-size:11px;margin-top:8px" lang="es">Respuesta: <code>{"total": 2, "signed": 2, "results": [{"status": "signed", "content_hash": "...", "signature": "...", ...}]}</code></p>
-      </div>
-    </div>
+    <h3 style="margin-top:24px" lang="en">Bulk FES — Verify multiple files</h3><h3 style="margin-top:24px" lang="es">FES Masivo — Verificar m&uacute;ltiples archivos</h3>
 
     <div class="ep">
       <div class="eh" tabindex="0" onclick="this.parentElement.classList.toggle('open')">
