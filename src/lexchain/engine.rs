@@ -25,6 +25,8 @@ pub enum LexChainError {
     NoParties,
     #[error("invalid webhook: {0}")]
     InvalidWebhook(String),
+    #[error("contract storage failed: {0}")]
+    Storage(#[from] crate::storage::errors::StorageError),
     #[error("DID not registered: {0}")]
     DidNotRegistered(String),
     #[error("signing key does not belong to DID: {0}")]
@@ -131,7 +133,7 @@ pub fn deploy(
         preservation_records: Vec::new(),
     };
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -153,7 +155,7 @@ pub fn sign(
 
     if contract.is_expired(now_secs()) {
         contract.state = ContractState::Expired;
-        store.save(contract);
+        store.save(contract)?;
         return Err(LexChainError::Expired);
     }
 
@@ -223,7 +225,7 @@ pub fn sign(
         contract.state = ContractState::FullySigned;
     }
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -258,7 +260,7 @@ pub fn notarize(
     contract.tsa_token = resp.token;
     contract.state = ContractState::Notarized;
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -303,7 +305,7 @@ pub fn archive(store: &LexChainStore, contract_id: &str) -> Result<LexContract, 
     contract.block_height = Some(height);
     contract.state = ContractState::Archived;
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -359,7 +361,7 @@ pub fn deliver(
         contract.state = ContractState::Delivered;
     }
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -395,7 +397,7 @@ pub fn acknowledge_delivery(
     receipt.received_at = Some(now);
     receipt.receipt_tsa_token = if resp.status == 0 { resp.token } else { None };
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -454,7 +456,7 @@ pub fn preserve_contract(
         reason: reason.to_string(),
     });
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -509,8 +511,10 @@ pub fn expire_pending(store: &LexChainStore) -> Vec<String> {
     for mut contract in store.list() {
         if contract.is_expired(now) {
             contract.state = ContractState::Expired;
-            store.save(contract.clone());
-            expired.push(contract.id);
+            match store.save(contract.clone()) {
+                Ok(()) => expired.push(contract.id),
+                Err(e) => log::error!("expire contract {}: {e}", contract.id),
+            }
         }
     }
     expired
@@ -536,8 +540,10 @@ pub fn quarantine_classical_contracts(
         });
         if all_compromised {
             contract.state = ContractState::Quarantined;
-            store.save(contract.clone());
-            quarantined.push(contract.id);
+            match store.save(contract.clone()) {
+                Ok(()) => quarantined.push(contract.id),
+                Err(e) => log::error!("quarantine contract {}: {e}", contract.id),
+            }
         }
     }
     quarantined

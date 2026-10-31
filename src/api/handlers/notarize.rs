@@ -126,6 +126,39 @@ fn build_transfer_payload(
     }
 }
 
+fn commit_notarization(
+    state: &AppState,
+    store: &dyn crate::storage::traits::BlockStore,
+    entry: &NotarizationEntry,
+) -> ApiResult<()> {
+    let tx = crate::storage::traits::Transaction {
+        id: format!("notarize:{}", entry.id),
+        block_height: 0,
+        timestamp: entry.notarized_at,
+        input_did: entry.signer.clone(),
+        output_recipient: entry.content_hash.clone(),
+        amount: 0,
+        state: "pending".to_string(),
+        fee: 0,
+        payload: Some(crate::storage::traits::TxPayload::Notarize {
+            entry: Box::new(entry.clone()),
+        }),
+    };
+    state
+        .tx_pool
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .add(tx)
+        .map_err(|reason| crate::api::errors::ApiError::ConsensusError {
+            reason: format!("notarization {} not queued: {reason}", entry.id),
+        })?;
+    store
+        .write_notarization(entry)
+        .map_err(|e| crate::api::errors::ApiError::StorageError {
+            reason: format!("notarization {} not recorded: {e}", entry.id),
+        })
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 /// Register a document hash for on-chain timestamping.
@@ -226,30 +259,7 @@ pub async fn submit_notarization(
         biometric_evidence: body.biometric_evidence.clone(),
     };
 
-    store
-        .write_notarization(&entry)
-        .map_err(|e| crate::api::errors::ApiError::StorageError {
-            reason: e.to_string(),
-        })?;
-
-    // Enqueue as transaction so it gets included in the next block and propagated.
-    {
-        let tx = crate::storage::traits::Transaction {
-            id: format!("notarize:{}", entry.id),
-            block_height: 0,
-            timestamp: entry.notarized_at,
-            input_did: entry.signer.clone(),
-            output_recipient: entry.content_hash.clone(),
-            amount: 0,
-            state: "pending".to_string(),
-            fee: 0,
-            payload: Some(crate::storage::traits::TxPayload::Notarize {
-                entry: Box::new(entry.clone()),
-            }),
-        };
-        let mut pool = state.tx_pool.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = pool.add(tx);
-    }
+    commit_notarization(&state, store.as_ref(), &entry)?;
 
     Ok(HttpResponse::Created().json(ApiResponse::success(
         serde_json::json!({
@@ -413,29 +423,7 @@ pub async fn notarize_pdf(
         biometric_evidence: body.biometric_evidence.clone(),
     };
 
-    store
-        .write_notarization(&entry)
-        .map_err(|e| crate::api::errors::ApiError::StorageError {
-            reason: e.to_string(),
-        })?;
-
-    {
-        let tx = crate::storage::traits::Transaction {
-            id: format!("notarize:{}", entry.id),
-            block_height: 0,
-            timestamp: entry.notarized_at,
-            input_did: entry.signer.clone(),
-            output_recipient: entry.content_hash.clone(),
-            amount: 0,
-            state: "pending".to_string(),
-            fee: 0,
-            payload: Some(crate::storage::traits::TxPayload::Notarize {
-                entry: Box::new(entry.clone()),
-            }),
-        };
-        let mut pool = state.tx_pool.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = pool.add(tx);
-    }
+    commit_notarization(&state, store.as_ref(), &entry)?;
 
     crate::audit::emit_if_present(
         &state.audit_store,
@@ -1746,6 +1734,37 @@ mod tests {
             test::read_body_json(test::call_service(&app, req).await).await;
         assert_eq!(body["data"]["verified"], 0);
         assert_eq!(body["data"]["results"][0]["status"], "invalid_signature");
+    }
+
+    #[actix_web::test]
+    async fn notarize_fails_without_writing_when_the_mempool_refuses_it() {
+        let mut state = AppState::test_default();
+        state.tx_pool = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::transaction::mempool::TransactionPool::with_max_size(0),
+        ));
+        let state = web::Data::new(state);
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(web::scope("/api/v1").service(submit_notarization)),
+        )
+        .await;
+        let (did, pk_hex, provider) = ed25519_identity();
+        let hash = content_hash();
+        let payload = format!("notarize:{did}:{hash}");
+        let req = test::TestRequest::post()
+            .uri("/api/v1/notarize")
+            .set_json(serde_json::json!({
+                "content_hash": hash,
+                "signer": did,
+                "public_key": pk_hex,
+                "signature": hex::encode(provider.sign(payload.as_bytes()).unwrap()),
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_server_error());
+        let store = crate::api::handlers::channels::get_channel_store(&state, "default").unwrap();
+        assert!(store.read_notarization_by_hash(&hash).is_err());
     }
 
     // ── E2E: Simple (FES) with Ed25519 ──────────────────────────────
