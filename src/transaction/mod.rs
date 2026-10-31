@@ -102,7 +102,9 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
             },
             *bound_at,
         ),
-        Some(TxPayload::Notarize { entry }) => store.write_notarization(entry),
+        Some(TxPayload::Notarize { entry }) => {
+            crate::signature::notarization::apply_notarization(store, entry)
+        }
         _ => Ok(()),
     }
 }

@@ -23,6 +23,7 @@
 pub mod cades;
 pub mod cades_der;
 pub mod iso19794;
+pub mod notarization;
 pub mod pades;
 pub mod pades_der;
 pub mod verify;

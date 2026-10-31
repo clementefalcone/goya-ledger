@@ -21,6 +21,7 @@ use crate::app_state::AppState;
 use crate::document::DocumentFingerprint;
 use crate::identity::operations;
 use crate::identity::signing::SigningAlgorithm;
+use crate::signature::notarization::notarize_payload;
 use crate::signature::{
     compute_biometrics_hash, is_signer_proven, verify_signature, BiometricEvidence, SignatureLevel,
     SignerClaim, SignerProof,
@@ -108,25 +109,6 @@ pub struct NotarizeListQuery {
 
 // ── Signing payload construction ─────────────────────────────────────────────
 
-/// Build the signing payload based on signature level.
-///
-/// - Simple:   `"notarize:{signer}:{content_hash}"`
-/// - Advanced: `"notarize_fea:{signer}:{content_hash}:{biometrics_hash}"`
-fn build_notarize_payload(
-    level: SignatureLevel,
-    signer: &str,
-    content_hash: &str,
-    biometric_evidence: &[BiometricEvidence],
-) -> String {
-    match level {
-        SignatureLevel::Simple => format!("notarize:{signer}:{content_hash}"),
-        SignatureLevel::Advanced | SignatureLevel::Qualified | SignatureLevel::Seal => {
-            let bio_hash = compute_biometrics_hash(biometric_evidence);
-            format!("notarize_fea:{signer}:{content_hash}:{bio_hash}")
-        }
-    }
-}
-
 /// Build the transfer signing payload based on signature level.
 fn build_transfer_payload(
     level: SignatureLevel,
@@ -185,7 +167,7 @@ pub async fn submit_notarization(
     }
 
     // Build and verify signature over the level-appropriate payload
-    let sign_msg = build_notarize_payload(
+    let sign_msg = notarize_payload(
         body.signature_level,
         &body.signer,
         &body.content_hash,
@@ -510,7 +492,7 @@ fn verify_entry(
             signer: false,
         };
     }
-    let payload = build_notarize_payload(
+    let payload = notarize_payload(
         entry.signature_level,
         &entry.signer,
         &entry.content_hash,
@@ -1218,7 +1200,7 @@ pub async fn verify_raw_document(
             let signature_verified = if entry.public_key.is_empty() {
                 None
             } else {
-                let payload = build_notarize_payload(
+                let payload = notarize_payload(
                     entry.signature_level,
                     &entry.signer,
                     &entry.content_hash,
