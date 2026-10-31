@@ -386,7 +386,10 @@ fn verify_wte(
 
 /// Serves the issuer's public key as JWKS for SD-JWT VC signature verification.
 #[get("/.well-known/jwt-vc-issuer")]
-pub async fn jwt_vc_issuer_metadata(req: HttpRequest) -> ApiResult<HttpResponse> {
+pub async fn jwt_vc_issuer_metadata(
+    state: web::Data<AppState>,
+    req: HttpRequest,
+) -> ApiResult<HttpResponse> {
     use crate::identity::signing::SigningProvider;
     let host = req
         .headers()
@@ -395,7 +398,7 @@ pub async fn jwt_vc_issuer_metadata(req: HttpRequest) -> ApiResult<HttpResponse>
         .unwrap_or("localhost:8080");
     let base = format!("https://{host}");
 
-    let provider = oid4vci_es256_provider();
+    let provider = state.credential_issuer_key.as_ref();
     let kid = crate::identity::sd_jwt::compute_kid(provider);
     let pk = provider.public_key();
 
@@ -1473,10 +1476,13 @@ pub async fn credential_endpoint(
     };
 
     match resolved_format.as_str() {
-        "dc+sd-jwt" | "vc+sd-jwt" => {
-            issue_sd_jwt_credential(provider.as_ref(), &body, status_ref.as_ref(), &req)
-        }
-        "jwt_vc_json-ld" => issue_jwt_vc_jsonld(&body, &req),
+        "dc+sd-jwt" | "vc+sd-jwt" => issue_sd_jwt_credential(
+            state.credential_issuer_key.as_ref(),
+            &body,
+            status_ref.as_ref(),
+            &req,
+        ),
+        "jwt_vc_json-ld" => issue_jwt_vc_jsonld(state.credential_issuer_key.as_ref(), &body, &req),
         "mso_mdoc" => issue_mdoc_credential(provider.as_ref(), &body, status_ref.as_ref()),
         other => Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
             err_dto(
@@ -1568,16 +1574,6 @@ pub async fn credential_offer_get(
     }
 }
 
-fn oid4vci_es256_provider() -> &'static crate::identity::signing::EcdsaP256SigningProvider {
-    use std::sync::OnceLock;
-    static PROVIDER: OnceLock<crate::identity::signing::EcdsaP256SigningProvider> = OnceLock::new();
-    PROVIDER.get_or_init(|| {
-        let seed = hash_with(HashAlgorithm::Sha256, b"goya-oid4vci-es256-issuer-key-v1");
-        crate::identity::signing::EcdsaP256SigningProvider::from_bytes(&seed)
-            .expect("deterministic ES256 key derivation")
-    })
-}
-
 fn extract_jwk_from_jwt(jwt: &str) -> Option<serde_json::Value> {
     let parts: Vec<&str> = jwt.split('.').collect();
     if parts.len() < 2 {
@@ -1643,9 +1639,9 @@ fn extract_holder_jwk(req: &CredentialRequest) -> Option<serde_json::Value> {
 }
 
 fn issue_sd_jwt_credential(
-    _provider: &dyn crate::identity::signing::SigningProvider,
+    provider: &dyn crate::identity::signing::SigningProvider,
     req: &CredentialRequest,
-    _status_ref: Option<&(String, usize)>,
+    status_ref: Option<&(String, usize)>,
     http_req: &HttpRequest,
 ) -> ApiResult<HttpResponse> {
     use crate::identity::sd_jwt::{issue_sd_jwt_vc, VcClaims};
@@ -1695,8 +1691,7 @@ fn issue_sd_jwt_credential(
         .unwrap_or("localhost:8080");
     let issuer_url = format!("https://{host}");
 
-    let status =
-        _status_ref.map(|(uri, idx)| crate::identity::status_list::status_claim(uri, *idx));
+    let status = status_ref.map(|(uri, idx)| crate::identity::status_list::status_claim(uri, *idx));
 
     let vc_claims = VcClaims {
         iss: issuer_url,
@@ -1709,10 +1704,7 @@ fn issue_sd_jwt_credential(
         status,
     };
 
-    let effective_provider: &dyn crate::identity::signing::SigningProvider =
-        oid4vci_es256_provider();
-
-    match issue_sd_jwt_vc(&vc_claims, effective_provider) {
+    match issue_sd_jwt_vc(&vc_claims, provider) {
         Ok(sd_jwt) => {
             log::info!(
                 "OID4VCI issued credential: len={} has_cnf={}",
@@ -1738,7 +1730,11 @@ fn issue_sd_jwt_credential(
     }
 }
 
-fn issue_jwt_vc_jsonld(req: &CredentialRequest, http_req: &HttpRequest) -> ApiResult<HttpResponse> {
+fn issue_jwt_vc_jsonld(
+    provider: &dyn crate::identity::signing::SigningProvider,
+    req: &CredentialRequest,
+    http_req: &HttpRequest,
+) -> ApiResult<HttpResponse> {
     use crate::identity::sd_jwt::{issue_sd_jwt_vc_w3c, VcClaims};
 
     let now = now_secs();
@@ -1779,8 +1775,6 @@ fn issue_jwt_vc_jsonld(req: &CredentialRequest, http_req: &HttpRequest) -> ApiRe
         cnf,
         status: None,
     };
-
-    let provider: &dyn crate::identity::signing::SigningProvider = oid4vci_es256_provider();
 
     match issue_sd_jwt_vc_w3c(&vc_claims, provider) {
         Ok(sd_jwt) => Ok(HttpResponse::Ok().json(serde_json::json!({
@@ -1935,6 +1929,21 @@ mod tests {
             )
             .await
         };
+    }
+
+    #[actix_web::test]
+    async fn jwt_vc_issuer_publishes_the_node_issuer_key() {
+        let state = make_state();
+        let issuer_public_key = state.credential_issuer_key.public_key();
+        let app =
+            test::init_service(App::new().app_data(state).service(jwt_vc_issuer_metadata)).await;
+        let req = test::TestRequest::get()
+            .uri("/.well-known/jwt-vc-issuer")
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+        let jwk = &body["jwks"]["keys"][0];
+        assert_eq!(jwk["x"], base64url_encode(&issuer_public_key[1..33]));
+        assert_eq!(jwk["y"], base64url_encode(&issuer_public_key[33..65]));
     }
 
     #[actix_web::test]

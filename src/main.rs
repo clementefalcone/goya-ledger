@@ -917,6 +917,14 @@ async fn async_main_inner() -> std::io::Result<()> {
                 .with_economics(economics_state.clone()),
         )),
         signing_provider: Some(signing_provider.clone()),
+        credential_issuer_key: {
+            let key_dir = std::env::var("STORAGE_PATH").unwrap_or_else(|_| "/app/data".into());
+            let key_path = std::path::Path::new(&key_dir).join("credential_issuer_key_p256.bin");
+            Arc::new(
+                crate::identity::signing::EcdsaP256SigningProvider::load_or_generate(&key_path)
+                    .unwrap_or_else(|e| panic!("FATAL: credential issuer key unavailable: {e}")),
+            )
+        },
         tx_pool: Arc::new(std::sync::Mutex::new(
             transaction::mempool::TransactionPool::new(),
         )),
@@ -1243,15 +1251,7 @@ async fn async_main_inner() -> std::io::Result<()> {
 
     let nonce_store = web::Data::new(crate::api::handlers::oid4vci::NonceStore::new());
     let status_list_store = web::Data::new(crate::api::handlers::oid4vci::StatusListStore::new());
-    {
-        let seed = crate::crypto::hasher::hash_with(
-            crate::crypto::hasher::HashAlgorithm::Sha256,
-            b"goya-oid4vci-es256-issuer-key-v1",
-        );
-        let provider = crate::identity::signing::EcdsaP256SigningProvider::from_bytes(&seed)
-            .expect("deterministic ES256 key");
-        status_list_store.set_signing_provider(std::sync::Arc::new(provider));
-    }
+    status_list_store.set_signing_provider(app_state.credential_issuer_key.clone());
     let credential_offer_store =
         web::Data::new(crate::api::handlers::oid4vci::CredentialOfferStore::new());
     let vp_request_store = web::Data::new(crate::api::handlers::oid4vp::VpRequestStore::new());
