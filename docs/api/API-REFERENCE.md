@@ -319,10 +319,6 @@ Get MSP info (CRL size).
 
 ## Identity & Credentials
 
-### POST /identity/create
-
-Create a DID + Ed25519 keypair. Body: `{ "name": "Alice" }`.
-
 ### GET /identity/{did}
 
 Fetch DID document.

@@ -1,8 +1,8 @@
 use chrono::Utc;
 use rust_bc::api::errors::{ApiError, ApiResponse, ErrorDto};
 use rust_bc::api::models::{
-    BlockResponse, BlockchainHealthResponse, ConsensusStateResponse, CreateIdentityRequest,
-    CredentialResponse, HealthResponse, IdentityResponse, ProofResponse, VersionResponse,
+    BlockResponse, BlockchainHealthResponse, ConsensusStateResponse, CredentialResponse,
+    HealthResponse, IdentityResponse, ProofResponse, VersionResponse,
 };
 
 #[test]
@@ -104,17 +104,6 @@ fn test_api_response_error_wrapper() {
     assert_eq!(resp.status, "Failure");
     assert_eq!(resp.status_code, 400);
     assert!(resp.error.is_some());
-}
-
-#[test]
-fn test_create_identity_request_validation() {
-    let req = CreateIdentityRequest {
-        metadata: Some(serde_json::json!({"org": "test_org"})),
-    };
-
-    let json = serde_json::to_string(&req).unwrap();
-    let deserialized: CreateIdentityRequest = serde_json::from_str(&json).unwrap();
-    assert!(deserialized.metadata.is_some());
 }
 
 #[test]
