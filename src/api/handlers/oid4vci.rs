@@ -13,21 +13,40 @@ use serde::{Deserialize, Serialize};
 
 pub struct CredentialOfferStore {
     offers: std::sync::RwLock<std::collections::HashMap<String, (CredentialOffer, u64)>>,
+    pre_authorized_codes: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl CredentialOfferStore {
     pub fn new() -> Self {
         Self {
             offers: std::sync::RwLock::new(std::collections::HashMap::new()),
+            pre_authorized_codes: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
-    pub fn store(&self, session_id: &str, offer: CredentialOffer) {
-        let ttl = now_secs() + 600;
+    pub fn store(&self, session_id: &str, offer: CredentialOffer, pre_authorized_code: &str) {
+        let now = now_secs();
+        let expires_at = now + 600;
         self.offers
             .write()
             .unwrap()
-            .insert(session_id.to_string(), (offer, ttl));
+            .insert(session_id.to_string(), (offer, expires_at));
+        let mut codes = self.pre_authorized_codes.lock().unwrap();
+        codes.retain(|_, code_expires_at| now < *code_expires_at);
+        codes.insert(pre_authorized_code.to_string(), expires_at);
+    }
+
+    pub fn consume_pre_authorized_code(&self, code: &str) -> Result<(), &'static str> {
+        let expires_at = self
+            .pre_authorized_codes
+            .lock()
+            .unwrap()
+            .remove(code)
+            .ok_or("unknown or already used pre-authorized_code")?;
+        if now_secs() >= expires_at {
+            return Err("pre-authorized_code expired");
+        }
+        Ok(())
     }
 
     pub fn get(&self, session_id: &str) -> Option<CredentialOffer> {
@@ -483,6 +502,45 @@ impl NonceStore {
 }
 
 impl Default for NonceStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct AccessTokenStore {
+    expiry_by_token: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+}
+
+impl AccessTokenStore {
+    pub fn new() -> Self {
+        Self {
+            expiry_by_token: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    pub fn issue(&self, ttl_secs: u64) -> String {
+        use pqc_crypto_module::legacy::rng::OsRng;
+        use rand_core::RngCore;
+        let mut buf = [0u8; 32];
+        OsRng.fill_bytes(&mut buf);
+        let token = format!("goya_at_{}", hex::encode(buf));
+        let now = now_secs();
+        let mut tokens = self.expiry_by_token.lock().unwrap();
+        tokens.retain(|_, expires_at| now < *expires_at);
+        tokens.insert(token.clone(), now + ttl_secs);
+        token
+    }
+
+    pub fn is_live(&self, token: &str) -> bool {
+        self.expiry_by_token
+            .lock()
+            .unwrap()
+            .get(token)
+            .is_some_and(|expires_at| now_secs() < *expires_at)
+    }
+}
+
+impl Default for AccessTokenStore {
     fn default() -> Self {
         Self::new()
     }
@@ -985,7 +1043,9 @@ pub async fn token_endpoint(
     body: web::Form<TokenRequest>,
     req: HttpRequest,
     wia_registry: Option<web::Data<WalletProviderRegistry>>,
-    auth_store: Option<web::Data<AuthorizationStore>>,
+    auth_store: web::Data<AuthorizationStore>,
+    offer_store: web::Data<CredentialOfferStore>,
+    token_store: web::Data<AccessTokenStore>,
 ) -> ApiResult<HttpResponse> {
     log::info!(
         "OID4VCI /token: grant_type={} has_pre_auth={} has_code={}",
@@ -993,7 +1053,7 @@ pub async fn token_endpoint(
         body.pre_authorized_code.is_some(),
         body.code.is_some()
     );
-    let code = match body.grant_type.as_str() {
+    match body.grant_type.as_str() {
         "urn:ietf:params:oauth:grant-type:pre-authorized_code" => {
             let c = body.pre_authorized_code.as_deref().unwrap_or("");
             if c.is_empty() {
@@ -1002,7 +1062,10 @@ pub async fn token_endpoint(
                     400,
                 )));
             }
-            c
+            if let Err(e) = offer_store.consume_pre_authorized_code(c) {
+                return Ok(HttpResponse::BadRequest()
+                    .json(ApiResponse::<()>::error(err_dto("invalid_grant", e), 400)));
+            }
         }
         "authorization_code" => {
             let c = body.code.as_deref().unwrap_or("");
@@ -1022,13 +1085,10 @@ pub async fn token_endpoint(
                     400,
                 )));
             }
-            if let Some(store) = &auth_store {
-                if let Err(e) = store.exchange(c, verifier) {
-                    return Ok(HttpResponse::BadRequest()
-                        .json(ApiResponse::<()>::error(err_dto("invalid_grant", e), 400)));
-                }
+            if let Err(e) = auth_store.exchange(c, verifier) {
+                return Ok(HttpResponse::BadRequest()
+                    .json(ApiResponse::<()>::error(err_dto("invalid_grant", e), 400)));
             }
-            c
         }
         _ => {
             return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
@@ -1091,21 +1151,7 @@ pub async fn token_endpoint(
         None
     };
 
-    // Validate code has minimum entropy (at least 16 chars, hex or base64)
-    if code.len() < 16 {
-        return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-            err_dto(
-                "invalid_grant",
-                "pre-authorized_code too short (min 16 chars)",
-            ),
-            400,
-        )));
-    }
-
-    let access_token = format!(
-        "goya_at_{}",
-        hex::encode(hash_with(HashAlgorithm::Sha256, code.as_bytes()))
-    );
+    let access_token = token_store.issue(3600);
 
     let token_type = if dpop_jkt.is_some() { "DPoP" } else { "Bearer" };
 
@@ -1313,6 +1359,7 @@ pub async fn credential_endpoint(
     nonce_store: web::Data<NonceStore>,
     att_registry: Option<web::Data<crate::identity::attestation::AttestationTypeRegistry>>,
     sl_store: Option<web::Data<StatusListStore>>,
+    token_store: web::Data<AccessTokenStore>,
 ) -> ApiResult<HttpResponse> {
     // Accept both "Bearer" and "DPoP" token types
     let auth = req
@@ -1330,9 +1377,9 @@ pub async fn credential_endpoint(
             401,
         )));
     };
-    if token.len() < 3 {
+    if !token_store.is_live(token) {
         return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
-            err_dto("invalid_token", "token too short"),
+            err_dto("invalid_token", "access token unknown or expired"),
             401,
         )));
     }
@@ -1543,7 +1590,7 @@ pub async fn credential_offer_endpoint(
         }),
     };
 
-    offer_store.store(&session_id, offer.clone());
+    offer_store.store(&session_id, offer.clone(), &pre_auth_code);
 
     let offer_uri = format!(
         "openid-credential-offer://?credential_offer_uri={}",
@@ -1899,6 +1946,8 @@ mod tests {
                     .app_data($state)
                     .app_data($nonce)
                     .app_data(web::Data::new(CredentialOfferStore::new()))
+                    .app_data(web::Data::new(AuthorizationStore::new()))
+                    .app_data(web::Data::new(AccessTokenStore::new()))
                     .service(issuer_metadata)
                     .service(oauth_as_metadata)
                     .service(token_endpoint)
@@ -1918,6 +1967,8 @@ mod tests {
                     .app_data($sl)
                     .app_data($att)
                     .app_data(web::Data::new(CredentialOfferStore::new()))
+                    .app_data(web::Data::new(AuthorizationStore::new()))
+                    .app_data(web::Data::new(AccessTokenStore::new()))
                     .service(issuer_metadata)
                     .service(oauth_as_metadata)
                     .service(token_endpoint)
@@ -1929,6 +1980,33 @@ mod tests {
             )
             .await
         };
+    }
+
+    macro_rules! pre_authorized_code {
+        ($app:expr) => {{
+            let req = test::TestRequest::post()
+                .uri("/credential_offer")
+                .set_json(serde_json::json!({}))
+                .to_request();
+            let body: serde_json::Value = test::call_and_read_body_json(&$app, req).await;
+            body["credential_offer"]["grants"]
+                ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }};
+    }
+
+    macro_rules! access_token {
+        ($app:expr) => {{
+            let code = pre_authorized_code!($app);
+            let req = test::TestRequest::post()
+                .uri("/token")
+                .set_form(make_token_form(&code))
+                .to_request();
+            let body: serde_json::Value = test::call_and_read_body_json(&$app, req).await;
+            body["access_token"].as_str().unwrap().to_string()
+        }};
     }
 
     #[actix_web::test]
@@ -2047,9 +2125,10 @@ mod tests {
     async fn e2e_token_exchange() {
         let state = make_state();
         let app = oid4vci_app!(state);
+        let code = pre_authorized_code!(app);
         let req = test::TestRequest::post()
             .uri("/token")
-            .set_form(make_token_form("test-code-1234567890"))
+            .set_form(make_token_form(&code))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -2066,15 +2145,57 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn token_rejects_a_pre_authorized_code_no_offer_issued() {
+        let app = oid4vci_app!(make_state());
+        let req = test::TestRequest::post()
+            .uri("/token")
+            .set_form(make_token_form("forged-code-1234567890"))
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn token_rejects_a_pre_authorized_code_used_twice() {
+        let app = oid4vci_app!(make_state());
+        let code = pre_authorized_code!(app);
+        let first = test::TestRequest::post()
+            .uri("/token")
+            .set_form(make_token_form(&code))
+            .to_request();
+        assert_eq!(test::call_service(&app, first).await.status(), 200);
+        let second = test::TestRequest::post()
+            .uri("/token")
+            .set_form(make_token_form(&code))
+            .to_request();
+        assert_eq!(test::call_service(&app, second).await.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn credential_rejects_an_access_token_the_node_never_issued() {
+        let app = oid4vci_app!(make_state());
+        let req = test::TestRequest::post()
+            .uri("/credential")
+            .insert_header(("authorization", "Bearer goya_at_forged"))
+            .set_json(serde_json::json!({
+                "format": "vc+sd-jwt",
+                "vct": "IdentityCredential",
+                "claims": { "given_name": "Mallory" }
+            }))
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 401);
+    }
+
+    #[actix_web::test]
     async fn e2e_token_with_dpop() {
         let state = make_state();
         let app = oid4vci_app!(state);
+        let code = pre_authorized_code!(app);
         let dpop = make_dpop_jwt("POST", "https://localhost:8080/token", now_secs());
         let req = test::TestRequest::post()
             .uri("/token")
             .insert_header(("host", "localhost:8080"))
             .insert_header(("dpop", dpop.as_str()))
-            .set_form(make_token_form("test-code-dpop-1234"))
+            .set_form(make_token_form(&code))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -2087,12 +2208,13 @@ mod tests {
     async fn e2e_token_dpop_bad_htm() {
         let state = make_state();
         let app = oid4vci_app!(state);
+        let code = pre_authorized_code!(app);
         let dpop = make_dpop_jwt("GET", "https://localhost:8080/token", now_secs());
         let req = test::TestRequest::post()
             .uri("/token")
             .insert_header(("host", "localhost:8080"))
             .insert_header(("dpop", dpop.as_str()))
-            .set_form(make_token_form("test-code-fallback1"))
+            .set_form(make_token_form(&code))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
@@ -2102,6 +2224,7 @@ mod tests {
     async fn e2e_token_with_wia() {
         let state = make_state();
         let app = oid4vci_app!(state);
+        let code = pre_authorized_code!(app);
         let wia = make_wia_jwt(
             "wia+jwt",
             "wallet-provider",
@@ -2112,7 +2235,7 @@ mod tests {
             .uri("/token")
             .set_form(TokenRequest {
                 grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
-                pre_authorized_code: Some("code-wia-1234567890".to_string()),
+                pre_authorized_code: Some(code.clone()),
                 client_id: None,
                 tx_code: None,
                 code: None,
@@ -2131,12 +2254,13 @@ mod tests {
     async fn e2e_token_rejects_expired_wia() {
         let state = make_state();
         let app = oid4vci_app!(state);
+        let code = pre_authorized_code!(app);
         let wia = make_wia_jwt("wia+jwt", "wallet-provider", "device-123", 1000);
         let req = test::TestRequest::post()
             .uri("/token")
             .set_form(TokenRequest {
                 grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
-                pre_authorized_code: Some("code-wia-1234567890".to_string()),
+                pre_authorized_code: Some(code.clone()),
                 client_id: None,
                 tx_code: None,
                 code: None,
@@ -2192,6 +2316,7 @@ mod tests {
         let state = make_state();
         let nonce_store = make_nonce_store();
         let app = oid4vci_app!(state, nonce_store.clone());
+        let token = access_token!(app);
 
         // Step 1: Get nonce from dedicated endpoint
         let req = test::TestRequest::post().uri("/nonce").to_request();
@@ -2205,7 +2330,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/credential")
             .insert_header(("host", "localhost:8080"))
-            .insert_header(("authorization", "Bearer goya_at_test_1234"))
+            .insert_header(("authorization", format!("Bearer {token}")))
             .set_json(serde_json::json!({
                 "format": "vc+sd-jwt",
                 "vct": "IdentityCredential",
@@ -2221,11 +2346,12 @@ mod tests {
     async fn e2e_credential_rejects_unknown_nonce() {
         let state = make_state();
         let app = oid4vci_app!(state);
+        let token = access_token!(app);
         let proof_jwt = make_proof_jwt("unknown-nonce-value", "https://localhost:8080", now_secs());
         let req = test::TestRequest::post()
             .uri("/credential")
             .insert_header(("host", "localhost:8080"))
-            .insert_header(("authorization", "Bearer goya_at_test"))
+            .insert_header(("authorization", format!("Bearer {token}")))
             .set_json(serde_json::json!({
                 "format": "vc+sd-jwt",
                 "proof": { "proof_type": "jwt", "jwt": proof_jwt },
@@ -2246,6 +2372,7 @@ mod tests {
         let state = make_state();
         let nonce_store = make_nonce_store();
         let app = oid4vci_app!(state, nonce_store.clone());
+        let token = access_token!(app);
 
         // Get a nonce
         let req = test::TestRequest::post().uri("/nonce").to_request();
@@ -2258,7 +2385,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/credential")
             .insert_header(("host", "localhost:8080"))
-            .insert_header(("authorization", "Bearer goya_at_replay_test"))
+            .insert_header(("authorization", format!("Bearer {token}")))
             .set_json(serde_json::json!({
                 "format": "vc+sd-jwt",
                 "vct": "IdentityCredential",
@@ -2274,7 +2401,7 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/credential")
             .insert_header(("host", "localhost:8080"))
-            .insert_header(("authorization", "Bearer goya_at_replay_test2"))
+            .insert_header(("authorization", format!("Bearer {token}")))
             .set_json(serde_json::json!({
                 "format": "vc+sd-jwt",
                 "vct": "IdentityCredential",
@@ -2331,9 +2458,10 @@ mod tests {
     async fn e2e_credential_accepts_dpop_token() {
         let state = make_state();
         let app = oid4vci_app!(state);
+        let token = access_token!(app);
         let req = test::TestRequest::post()
             .uri("/credential")
-            .insert_header(("authorization", "DPoP goya_at_dpop_test"))
+            .insert_header(("authorization", format!("DPoP {token}")))
             .set_json(serde_json::json!({
                 "format": "vc+sd-jwt",
                 "vct": "IdentityCredential",
@@ -2348,9 +2476,10 @@ mod tests {
     async fn e2e_issue_sd_jwt_vc() {
         let state = make_state();
         let app = oid4vci_app!(state);
+        let token = access_token!(app);
         let req = test::TestRequest::post()
             .uri("/credential")
-            .insert_header(("authorization", "Bearer goya_at_test"))
+            .insert_header(("authorization", format!("Bearer {token}")))
             .set_json(serde_json::json!({
                 "format": "vc+sd-jwt",
                 "vct": "IdentityCredential",
@@ -2372,9 +2501,10 @@ mod tests {
     async fn e2e_issue_mdoc() {
         let state = make_state();
         let app = oid4vci_app!(state);
+        let token = access_token!(app);
         let req = test::TestRequest::post()
             .uri("/credential")
-            .insert_header(("authorization", "Bearer goya_at_test"))
+            .insert_header(("authorization", format!("Bearer {token}")))
             .set_json(serde_json::json!({
                 "format": "mso_mdoc",
                 "doctype": "eu.europa.ec.eudi.pid.1",
@@ -2395,9 +2525,10 @@ mod tests {
     async fn e2e_rejects_unsupported_format() {
         let state = make_state();
         let app = oid4vci_app!(state);
+        let token = access_token!(app);
         let req = test::TestRequest::post()
             .uri("/credential")
-            .insert_header(("authorization", "Bearer goya_at_test"))
+            .insert_header(("authorization", format!("Bearer {token}")))
             .set_json(serde_json::json!({
                 "format": "jwt_vc_json",
             }))
@@ -2770,6 +2901,8 @@ mod tests {
                 .app_data(nonce_store.clone())
                 .app_data(sl_store.clone())
                 .app_data(offer_store)
+                .app_data(web::Data::new(AuthorizationStore::new()))
+                .app_data(web::Data::new(AccessTokenStore::new()))
                 .service(issuer_metadata)
                 .service(token_endpoint)
                 .service(credential_endpoint)
@@ -2795,9 +2928,10 @@ mod tests {
             .contains(&serde_json::json!("ES256")));
 
         // 2. Token
+        let code = pre_authorized_code!(app);
         let req = test::TestRequest::post()
             .uri("/token")
-            .set_form(make_token_form("test-eudi-e2e-code-123"))
+            .set_form(make_token_form(&code))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
@@ -2903,10 +3037,11 @@ mod tests {
         // PID rulebook exists but NO issuer is registered → fail-closed
 
         let app = oid4vci_app!(state, nonce_store, sl_store, att_registry);
+        let token = access_token!(app);
 
         let req = test::TestRequest::post()
             .uri("/credential")
-            .insert_header(("authorization", "Bearer goya_at_test_auth_xyz"))
+            .insert_header(("authorization", format!("Bearer {token}")))
             .set_json(serde_json::json!({
                 "format": "vc+sd-jwt",
                 "vct": "eu.europa.ec.eudi.pid.1",
@@ -2950,10 +3085,11 @@ mod tests {
         let nonce_store = make_nonce_store();
         let sl_store = make_sl_store();
         let app = oid4vci_app!(state, nonce_store, sl_store, att_registry);
+        let token = access_token!(app);
 
         let req = test::TestRequest::post()
             .uri("/credential")
-            .insert_header(("authorization", "Bearer goya_at_pid_issuer_test"))
+            .insert_header(("authorization", format!("Bearer {token}")))
             .set_json(serde_json::json!({
                 "format": "vc+sd-jwt",
                 "vct": "eu.europa.ec.eudi.pid.1",
@@ -2979,6 +3115,8 @@ mod tests {
                     .app_data($state)
                     .app_data(make_nonce_store())
                     .app_data($auth)
+                    .app_data(web::Data::new(CredentialOfferStore::new()))
+                    .app_data(web::Data::new(AccessTokenStore::new()))
                     .service(par_endpoint)
                     .service(authorize_endpoint)
                     .service(token_endpoint)
