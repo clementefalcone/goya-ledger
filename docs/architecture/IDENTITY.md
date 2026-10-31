@@ -213,7 +213,7 @@ Light client: `LocalIdentityStore` persists identities as JSON in `~/.goya/ident
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | /identity/create | Create DID + keypair |
+| POST | /store/identities | Register a DID: the key holder signs `identity:register:{did}` |
 | GET | /identity/{did} | Fetch identity |
 | POST | /identity/{did}/verify-signature | `{message, signature}` → `valid` only if the DID is active and its current registry key signed `message` |
 | POST | /identity/{did}/revoke | Revoke (current key) |
