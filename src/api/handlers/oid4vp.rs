@@ -425,6 +425,24 @@ pub async fn submit_response(
             )));
         }
     };
+    if !vr.valid {
+        return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+            err_dto(
+                "VERIFICATION_FAILED",
+                "issuer signature missing or not verifiable against a registered issuer key",
+            ),
+            400,
+        )));
+    }
+    if !vr.nonce_verified {
+        return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+            err_dto(
+                "NONCE_MISMATCH",
+                "presentation is not bound to this request's nonce",
+            ),
+            400,
+        )));
+    }
 
     // Match against DCQL query
     let format = &vr.format;
@@ -526,9 +544,11 @@ fn verify_sd_jwt_presentation(
 }
 
 fn verify_mdoc_presentation(vp_token: &str, nonce: &str) -> Result<VerificationResult, String> {
-    let response: crate::identity::mdoc::DeviceResponse = serde_json::from_str(vp_token)
-        .unwrap_or_else(|_| {
-            let mdoc: crate::identity::mdoc::Mdoc = serde_json::from_str(vp_token).unwrap();
+    let response: crate::identity::mdoc::DeviceResponse = match serde_json::from_str(vp_token) {
+        Ok(response) => response,
+        Err(_) => {
+            let mdoc: crate::identity::mdoc::Mdoc = serde_json::from_str(vp_token)
+                .map_err(|e| format!("vp_token is neither a DeviceResponse nor an mdoc: {e}"))?;
             crate::identity::mdoc::DeviceResponse {
                 version: "1.0".into(),
                 documents: vec![crate::identity::mdoc::Document {
@@ -538,7 +558,8 @@ fn verify_mdoc_presentation(vp_token: &str, nonce: &str) -> Result<VerificationR
                 }],
                 status: 0,
             }
-        });
+        }
+    };
 
     let doc = response.documents.first().ok_or("empty DeviceResponse")?;
     let verified = crate::identity::mdoc::verify_mdoc(&doc.issuer_signed)?;
@@ -577,6 +598,42 @@ mod tests {
 
     fn make_store() -> web::Data<VpRequestStore> {
         web::Data::new(VpRequestStore::new())
+    }
+
+    fn bound_sd_jwt_presentation(
+        issuer: &dyn SigningProvider,
+        issuer_did: &str,
+        claims: Vec<(String, serde_json::Value)>,
+        nonce: &str,
+    ) -> String {
+        use crate::identity::sd_jwt::{issue_sd_jwt_vc_with_kb, present_sd_jwt_with_kb, VcClaims};
+        let holder = crate::identity::signing::SoftwareSigningProvider::generate();
+        let disclosed: Vec<usize> = (0..claims.len()).collect();
+        let sd_jwt = issue_sd_jwt_vc_with_kb(
+            &VcClaims {
+                iss: issuer_did.into(),
+                sub: "did:goya:holder".into(),
+                iat: 1_700_000_000,
+                exp: 2_000_000_000,
+                vct: "IdentityCredential".into(),
+                claims,
+                cnf: None,
+                status: None,
+            },
+            issuer,
+            &hex::encode(holder.public_key()),
+            holder.algorithm(),
+        )
+        .unwrap();
+        present_sd_jwt_with_kb(
+            &sd_jwt,
+            &disclosed,
+            &holder,
+            "v.example.com",
+            nonce,
+            1_700_000_000,
+        )
+        .unwrap()
     }
 
     fn test_dcql() -> DcqlQuery {
@@ -708,7 +765,6 @@ mod tests {
 
     #[actix_web::test]
     async fn e2e_submit_sd_jwt_via_dcql() {
-        use crate::identity::sd_jwt::{issue_sd_jwt_vc, VcClaims};
         use crate::identity::signing::SoftwareSigningProvider;
 
         let provider = SoftwareSigningProvider::generate();
@@ -732,26 +788,19 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         let body: serde_json::Value = test::read_body_json(resp).await;
         let state = body["data"]["state"].as_str().unwrap().to_string();
+        let nonce = body["data"]["nonce"].as_str().unwrap().to_string();
 
-        let sd_jwt = issue_sd_jwt_vc(
-            &VcClaims {
-                iss: iss_did,
-                sub: "did:goya:holder".into(),
-                iat: 1_700_000_000,
-                exp: 2_000_000_000,
-                vct: "IdentityCredential".into(),
-                claims: vec![("given_name".into(), serde_json::json!("Juan"))],
-                cnf: None,
-                status: None,
-            },
+        let vp_token = bound_sd_jwt_presentation(
             &provider,
-        )
-        .unwrap();
+            &iss_did,
+            vec![("given_name".into(), serde_json::json!("Juan"))],
+            &nonce,
+        );
 
         let req = test::TestRequest::post()
             .uri("/api/v1/oid4vp/response")
             .set_json(serde_json::json!({
-                "vp_token": sd_jwt.compact,
+                "vp_token": vp_token,
                 "state": state,
             }))
             .to_request();
@@ -788,11 +837,15 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         let body: serde_json::Value = test::read_body_json(resp).await;
         let state = body["data"]["state"].as_str().unwrap().to_string();
+        let nonce = body["data"]["nonce"].as_str().unwrap().to_string();
 
-        use crate::identity::mdoc::{issue_mdoc, MdocParams};
+        use crate::identity::mdoc::{
+            issue_mdoc, sign_device_auth, DeviceResponse, Document, MdocParams,
+        };
         use crate::identity::signing::SoftwareSigningProvider;
         use std::collections::BTreeMap;
         let provider = SoftwareSigningProvider::generate();
+        let device = SoftwareSigningProvider::generate();
         let mut elements = BTreeMap::new();
         elements.insert(
             "eu.europa.ec.eudi.pid.1".to_string(),
@@ -804,16 +857,25 @@ mod tests {
                 elements,
                 valid_from: 1_700_000_000,
                 valid_until: 2_000_000_000,
-                device_key: None,
+                device_key: Some(hex::encode(device.public_key())),
             },
             &provider,
         )
         .unwrap();
+        let response = DeviceResponse {
+            version: "1.0".into(),
+            documents: vec![Document {
+                doc_type: mdoc.doc_type.clone(),
+                issuer_signed: mdoc,
+                device_auth: Some(sign_device_auth(&device, nonce.as_bytes()).unwrap()),
+            }],
+            status: 0,
+        };
 
         let req = test::TestRequest::post()
             .uri("/api/v1/oid4vp/response")
             .set_json(serde_json::json!({
-                "vp_token": serde_json::to_string(&mdoc).unwrap(),
+                "vp_token": serde_json::to_string(&response).unwrap(),
                 "state": state,
             }))
             .to_request();
@@ -828,12 +890,14 @@ mod tests {
 
     #[actix_web::test]
     async fn e2e_dcql_missing_claim_rejects() {
-        use crate::identity::sd_jwt::{issue_sd_jwt_vc, VcClaims};
         use crate::identity::signing::SoftwareSigningProvider;
 
         let provider = SoftwareSigningProvider::generate();
+        let iss_did =
+            crate::identity::did::did_from_pubkey_hex(&hex::encode(provider.public_key()));
         let store = make_store();
         register_test_rp(&store, "v.example.com");
+        store.register_issuer_key(&iss_did, &hex::encode(provider.public_key()));
         let app = vp_app!(store.clone());
 
         let req = test::TestRequest::post()
@@ -847,32 +911,106 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         let body: serde_json::Value = test::read_body_json(resp).await;
         let state = body["data"]["state"].as_str().unwrap().to_string();
+        let nonce = body["data"]["nonce"].as_str().unwrap().to_string();
 
         // SD-JWT WITHOUT given_name (required by DCQL)
-        let sd_jwt = issue_sd_jwt_vc(
-            &VcClaims {
-                iss: "did:goya:issuer".into(),
-                sub: "did:goya:holder".into(),
-                iat: 1_700_000_000,
-                exp: 2_000_000_000,
-                vct: "IdentityCredential".into(),
-                claims: vec![("age_over_18".into(), serde_json::json!(true))],
-                cnf: None,
-                status: None,
-            },
+        let vp_token = bound_sd_jwt_presentation(
             &provider,
-        )
-        .unwrap();
+            &iss_did,
+            vec![("age_over_18".into(), serde_json::json!(true))],
+            &nonce,
+        );
 
         let req = test::TestRequest::post()
             .uri("/api/v1/oid4vp/response")
             .set_json(serde_json::json!({
-                "vp_token": sd_jwt.compact,
+                "vp_token": vp_token,
                 "state": state,
             }))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"]["code"], "DEFINITION_MISMATCH");
+    }
+
+    async fn submit_to_fresh_request(
+        store: &web::Data<VpRequestStore>,
+        vp_token_for_nonce: impl FnOnce(&str) -> String,
+    ) -> (u16, serde_json::Value) {
+        let app = vp_app!(store.clone());
+        let req = test::TestRequest::post()
+            .uri("/api/v1/oid4vp/request")
+            .set_json(serde_json::json!({
+                "client_id": "v.example.com",
+                "response_uri": "https://v.example.com/cb",
+                "dcql_query": test_dcql(),
+            }))
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+        let state = body["data"]["state"].as_str().unwrap().to_string();
+        let nonce = body["data"]["nonce"].as_str().unwrap().to_string();
+        let req = test::TestRequest::post()
+            .uri("/api/v1/oid4vp/response")
+            .set_json(serde_json::json!({
+                "vp_token": vp_token_for_nonce(&nonce),
+                "state": state,
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status().as_u16();
+        (status, test::read_body_json(resp).await)
+    }
+
+    #[actix_web::test]
+    async fn rejects_a_presentation_from_an_unregistered_issuer() {
+        use crate::identity::signing::SoftwareSigningProvider;
+        let provider = SoftwareSigningProvider::generate();
+        let store = make_store();
+        register_test_rp(&store, "v.example.com");
+        let (status, body) = submit_to_fresh_request(&store, |nonce| {
+            bound_sd_jwt_presentation(
+                &provider,
+                "did:goya:unregistered",
+                vec![("given_name".into(), serde_json::json!("Juan"))],
+                nonce,
+            )
+        })
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "VERIFICATION_FAILED");
+    }
+
+    #[actix_web::test]
+    async fn rejects_a_presentation_not_bound_to_the_request_nonce() {
+        use crate::identity::signing::SoftwareSigningProvider;
+        let provider = SoftwareSigningProvider::generate();
+        let iss_did =
+            crate::identity::did::did_from_pubkey_hex(&hex::encode(provider.public_key()));
+        let store = make_store();
+        register_test_rp(&store, "v.example.com");
+        store.register_issuer_key(&iss_did, &hex::encode(provider.public_key()));
+        let (status, body) = submit_to_fresh_request(&store, |_| {
+            bound_sd_jwt_presentation(
+                &provider,
+                &iss_did,
+                vec![("given_name".into(), serde_json::json!("Juan"))],
+                "nonce-of-another-request",
+            )
+        })
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "NONCE_MISMATCH");
+    }
+
+    #[actix_web::test]
+    async fn rejects_a_malformed_mdoc_without_crashing() {
+        let store = make_store();
+        register_test_rp(&store, "v.example.com");
+        let (status, body) =
+            submit_to_fresh_request(&store, |_| "{\"not\":\"an mdoc\"}".to_string()).await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "VERIFICATION_FAILED");
     }
 
     #[actix_web::test]
