@@ -283,7 +283,7 @@ pub struct PdfNotarizeRequest {
     pub pdf_base64: String,
     /// Signer DID.
     pub signer: String,
-    /// Biometric evidence (required — FEA server-side signing).
+    /// Biometric evidence (required for the electronic seal).
     pub biometric_evidence: Vec<BiometricEvidence>,
     pub signer_proof: SignerProof,
 }
@@ -419,7 +419,7 @@ pub async fn notarize_pdf(
         public_key: hex::encode(provider.public_key()),
         cades_der: Some(hex::encode(&cades_der)),
         signature_algorithm: provider.algorithm(),
-        signature_level: SignatureLevel::Advanced,
+        signature_level: SignatureLevel::Seal,
         biometric_evidence: body.biometric_evidence.clone(),
     };
 
@@ -881,7 +881,7 @@ pub async fn get_document_provenance(
 // ── Server-side FEA signing ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-pub struct SignFeaRequest {
+pub struct SignSealRequest {
     /// SHA-256 hash of the document (64 hex chars).
     pub content_hash: String,
     /// DID of the signer.
@@ -894,15 +894,15 @@ pub struct SignFeaRequest {
     pub signer_proof: SignerProof,
 }
 
-/// POST /api/v1/sign/fea — server-side FEA signature with CAdES DER.
+/// POST /api/v1/sign/seal — electronic seal by the node, with the signer's consent proof.
 ///
 /// Uses the node's persistent signing provider (not ephemeral keys).
 /// Produces both a JSON response and a CAdES DER binary signature
 /// with biometric hash in signed attributes.
-#[post("/sign/fea")]
-pub async fn sign_fea(
+#[post("/sign/seal")]
+pub async fn sign_seal(
     state: web::Data<AppState>,
-    body: web::Json<SignFeaRequest>,
+    body: web::Json<SignSealRequest>,
 ) -> ApiResult<HttpResponse> {
     let trace = uuid::Uuid::new_v4().to_string();
     let store = get_channel_store(&state, "default")?;
@@ -918,7 +918,7 @@ pub async fn sign_fea(
         return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
             err_dto(
                 "BIOMETRIC_REQUIRED",
-                "FEA requires at least one biometric evidence",
+                "electronic seal requires at least one biometric evidence",
             ),
             400,
         )));
@@ -943,7 +943,7 @@ pub async fn sign_fea(
             HttpResponse::InternalServerError().json(ApiResponse::<()>::error(
                 err_dto(
                     "ALGORITHM_MISMATCH",
-                    "FEA requires ML-DSA-65 but node signing provider is not post-quantum",
+                    "electronic seal requires ML-DSA-65 but node signing provider is not post-quantum",
                 ),
                 500,
             )),
@@ -1001,7 +1001,7 @@ pub async fn sign_fea(
         &state.audit_store,
         crate::audit::AuditAction::CertificateIssued,
         "",
-        Some(format!("fea:signer={}", body.signer)),
+        Some(format!("seal:signer={}", body.signer)),
     );
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
@@ -1010,6 +1010,7 @@ pub async fn sign_fea(
             "public_key": hex::encode(provider.public_key()),
             "signature_algorithm": provider.algorithm(),
             "signing_payload": payload,
+            "signature_level": SignatureLevel::Seal,
             "cades_der": hex::encode(&cades_der),
             "biometric_hash": bio_hash,
         }),
@@ -1493,7 +1494,7 @@ mod tests {
         })
     }
 
-    fn sign_fea_body(
+    fn sign_seal_body(
         content_hash: &str,
         biometric_evidence: serde_json::Value,
     ) -> serde_json::Value {
@@ -1546,23 +1547,23 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn sign_fea_rejects_signer_proof_from_another_key() {
+    async fn sign_seal_rejects_signer_proof_from_another_key() {
         let mut state = AppState::test_default();
         state.signing_provider = Some(std::sync::Arc::new(MlDsaSigningProvider::generate()));
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(state))
-                .service(web::scope("/api/v1").service(sign_fea)),
+                .service(web::scope("/api/v1").service(sign_seal)),
         )
         .await;
         let (victim_did, _, _) = ed25519_identity();
         let (_, _, attacker) = ed25519_identity();
-        let mut body = sign_fea_body(&"a".repeat(64), fingerprint_evidence());
+        let mut body = sign_seal_body(&"a".repeat(64), fingerprint_evidence());
         body["signer"] = serde_json::json!(victim_did);
         body["signer_proof"] = signer_proof_for(&attacker, "anything");
 
         let req = test::TestRequest::post()
-            .uri("/api/v1/sign/fea")
+            .uri("/api/v1/sign/seal")
             .set_json(body)
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -2547,21 +2548,21 @@ mod tests {
         assert_eq!(body["error"]["code"], "VALIDATION");
     }
 
-    // ── sign_fea: rejection paths ───────────────────────────────────────
+    // ── sign_seal: rejection paths ───────────────────────────────────────
 
     #[actix_web::test]
-    async fn sign_fea_rejects_invalid_hash() {
+    async fn sign_seal_rejects_invalid_hash() {
         let state = make_app_data();
         let app = test::init_service(
             App::new()
                 .app_data(state)
-                .service(web::scope("/api/v1").service(sign_fea)),
+                .service(web::scope("/api/v1").service(sign_seal)),
         )
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/api/v1/sign/fea")
-            .set_json(sign_fea_body(
+            .uri("/api/v1/sign/seal")
+            .set_json(sign_seal_body(
                 "short",
                 serde_json::json!([{
                     "evidence_type": "fingerprint",
@@ -2577,18 +2578,18 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn sign_fea_rejects_empty_biometrics() {
+    async fn sign_seal_rejects_empty_biometrics() {
         let state = make_app_data();
         let app = test::init_service(
             App::new()
                 .app_data(state)
-                .service(web::scope("/api/v1").service(sign_fea)),
+                .service(web::scope("/api/v1").service(sign_seal)),
         )
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/api/v1/sign/fea")
-            .set_json(sign_fea_body(&"a".repeat(64), serde_json::json!([])))
+            .uri("/api/v1/sign/seal")
+            .set_json(sign_seal_body(&"a".repeat(64), serde_json::json!([])))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
@@ -2597,18 +2598,18 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn sign_fea_rejects_invalid_biometric() {
+    async fn sign_seal_rejects_invalid_biometric() {
         let state = make_app_data();
         let app = test::init_service(
             App::new()
                 .app_data(state)
-                .service(web::scope("/api/v1").service(sign_fea)),
+                .service(web::scope("/api/v1").service(sign_seal)),
         )
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/api/v1/sign/fea")
-            .set_json(sign_fea_body(
+            .uri("/api/v1/sign/seal")
+            .set_json(sign_seal_body(
                 &"a".repeat(64),
                 serde_json::json!([{
                     "evidence_type": "fingerprint",
@@ -2624,20 +2625,20 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn sign_fea_rejects_ed25519_provider() {
+    async fn sign_seal_rejects_ed25519_provider() {
         let mut state = AppState::test_default();
         state.signing_provider = Some(std::sync::Arc::new(SoftwareSigningProvider::generate()));
         let state = web::Data::new(state);
         let app = test::init_service(
             App::new()
                 .app_data(state)
-                .service(web::scope("/api/v1").service(sign_fea)),
+                .service(web::scope("/api/v1").service(sign_seal)),
         )
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/api/v1/sign/fea")
-            .set_json(sign_fea_body(
+            .uri("/api/v1/sign/seal")
+            .set_json(sign_seal_body(
                 &"a".repeat(64),
                 serde_json::json!([{
                     "evidence_type": "fingerprint",
@@ -2653,20 +2654,20 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn sign_fea_succeeds_with_mldsa65_provider() {
+    async fn sign_seal_succeeds_with_mldsa65_provider() {
         let mut state = AppState::test_default();
         state.signing_provider = Some(std::sync::Arc::new(MlDsaSigningProvider::generate()));
         let state = web::Data::new(state);
         let app = test::init_service(
             App::new()
                 .app_data(state)
-                .service(web::scope("/api/v1").service(sign_fea)),
+                .service(web::scope("/api/v1").service(sign_seal)),
         )
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/api/v1/sign/fea")
-            .set_json(sign_fea_body(
+            .uri("/api/v1/sign/seal")
+            .set_json(sign_seal_body(
                 &"a".repeat(64),
                 serde_json::json!([{
                     "evidence_type": "fingerprint",
@@ -2683,6 +2684,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("MlDsa65"));
+        assert_eq!(body["data"]["signature_level"], "seal");
     }
 
     // ── E2E: Qualified rejected (QTSP not supported) ──────────────────
