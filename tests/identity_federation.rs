@@ -1,5 +1,6 @@
 use rust_bc::identity::civil_anchor::bind_civil_anchor_message;
 use rust_bc::identity::did::did_from_pubkey_hex;
+use rust_bc::identity::operations::register_message;
 use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider};
 use rust_bc::mining::{MiningConfig, MiningService};
 use rust_bc::storage::traits::{BlockStore, IdentityRecord, Transaction, TxPayload};
@@ -68,7 +69,7 @@ fn register_tx(person: &Person) -> Transaction {
         &person.did,
         TxPayload::RegisterIdentity {
             record,
-            owner_signature: None,
+            owner_signature: Some(sign(&person.key, &register_message(&person.did, None))),
         },
     )
 }

@@ -266,6 +266,24 @@ mod tests {
         assert!(node.read_identity(&did).is_err());
     }
 
+    #[test]
+    fn unsigned_registration_in_a_block_is_rejected_by_receiving_node() {
+        let node = MemoryStore::new();
+        let victim = MlDsaSigningProvider::generate();
+        let attacker_recovery = MlDsaSigningProvider::generate();
+        let (did, _) = identity_of(&victim);
+        let (attacker_recovery_did, _) = identity_of(&attacker_recovery);
+        let mut tx = register_tx_with_recovery(&victim, Some(&attacker_recovery_did));
+        if let Some(TxPayload::RegisterIdentity {
+            owner_signature, ..
+        }) = &mut tx.payload
+        {
+            *owner_signature = None;
+        }
+        assert!(apply_tx_payload(&node, &tx).is_err());
+        assert!(node.read_identity(&did).is_err());
+    }
+
     fn phone_copy() -> VaultEntry {
         VaultEntry {
             entry_id: "0378ffe5".to_string(),

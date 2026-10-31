@@ -108,14 +108,18 @@ pub fn check_register(
             record.did
         )));
     }
-    if let Some(signature) = owner_signature {
-        require_signature(
-            &record.public_key,
-            &register_message(&record.did, record.recovery_commitment.as_deref()),
-            signature,
-            &record.did,
-        )?;
-    }
+    let signature = owner_signature.ok_or_else(|| {
+        IdentityOpError::BadSignature(format!(
+            "registration of {} carries no owner signature",
+            record.did
+        ))
+    })?;
+    require_signature(
+        &record.public_key,
+        &register_message(&record.did, record.recovery_commitment.as_deref()),
+        signature,
+        &record.did,
+    )?;
     match store.read_identity(&record.did) {
         Ok(existing) if existing == *record => Ok(Change::AlreadyApplied),
         Ok(_) => Err(IdentityOpError::Conflict(format!(
