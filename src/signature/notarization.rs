@@ -1,4 +1,4 @@
-use crate::identity::operations::key_controls_did;
+use crate::identity::operations::key_controls_identity;
 use crate::signature::{
     compute_biometrics_hash, is_signer_proven, verify_signature, BiometricEvidence, SignatureLevel,
     SignerClaim,
@@ -46,7 +46,7 @@ pub fn apply_notarization(store: &dyn BlockStore, entry: &NotarizationEntry) -> 
             proof: entry.signer_proof.as_ref(),
             payload: payload.as_bytes(),
         },
-        &|did, key| key_controls_did(store, did, key),
+        &|did, key| key_controls_identity(store, did, key),
     );
     if !signer_is_proven {
         return Err(StorageError::Other(format!(

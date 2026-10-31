@@ -213,7 +213,7 @@ pub async fn submit_notarization(
             proof: body.signer_proof.as_ref(),
             payload: sign_msg.as_bytes(),
         },
-        &|did, key| operations::key_controls_did(store.as_ref(), did, key),
+        &|did, key| operations::key_controls_identity(store.as_ref(), did, key),
     ) {
         return Ok(signer_not_proven(&body.signer));
     }
@@ -373,7 +373,7 @@ pub async fn notarize_pdf(
             proof: Some(&body.signer_proof),
             payload: payload.as_bytes(),
         },
-        &|did, key| operations::key_controls_did(store.as_ref(), did, key),
+        &|did, key| operations::key_controls_identity(store.as_ref(), did, key),
     ) {
         return Ok(signer_not_proven(&body.signer));
     }
@@ -505,7 +505,7 @@ fn verify_entry(
         },
         &|did, key| {
             crate::identity::did::did_matches_pubkey(did, key)
-                || operations::key_controls_did(store, did, key)
+                || operations::key_controls_identity(store, did, key)
         },
     );
     EntryVerification {
@@ -720,7 +720,7 @@ pub async fn transfer_document(
     }
 
     // Verify from_did matches public_key
-    if !operations::key_controls_did(store.as_ref(), &body.from_did, &body.public_key) {
+    if !operations::key_controls_identity(store.as_ref(), &body.from_did, &body.public_key) {
         return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
             err_dto("SIGNER_MISMATCH", "from_did does not match public key"),
             401,
@@ -969,7 +969,7 @@ pub async fn sign_fea(
             proof: Some(&body.signer_proof),
             payload: payload.as_bytes(),
         },
-        &|did, key| operations::key_controls_did(store.as_ref(), did, key),
+        &|did, key| operations::key_controls_identity(store.as_ref(), did, key),
     ) {
         return Ok(signer_not_proven(&body.signer));
     }
@@ -1734,6 +1734,37 @@ mod tests {
             test::read_body_json(test::call_service(&app, req).await).await;
         assert_eq!(body["data"]["verified"], 0);
         assert_eq!(body["data"]["results"][0]["status"], "invalid_signature");
+    }
+
+    #[actix_web::test]
+    async fn notarize_rejects_a_wallet_address_as_signer() {
+        let state = make_app_data();
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .service(web::scope("/api/v1").service(submit_notarization)),
+        )
+        .await;
+        let (_, pk_hex, provider) = ed25519_identity();
+        let wallet_did = format!(
+            "did:goya:{}",
+            operations::wallet_address_of(&pk_hex).unwrap()
+        );
+        let hash = content_hash();
+        let payload = format!("notarize:{wallet_did}:{hash}");
+        let req = test::TestRequest::post()
+            .uri("/api/v1/notarize")
+            .set_json(serde_json::json!({
+                "content_hash": hash,
+                "signer": wallet_did,
+                "public_key": pk_hex,
+                "signature": hex::encode(provider.sign(payload.as_bytes()).unwrap()),
+            }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"]["code"], "SIGNER_MISMATCH");
     }
 
     #[actix_web::test]

@@ -171,7 +171,11 @@ pub fn sign(
         return Err(LexChainError::AlreadySigned(req.did.clone()));
     }
 
-    if !crate::identity::operations::key_controls_did(store.backend(), &req.did, &req.public_key) {
+    if !crate::identity::operations::key_controls_identity(
+        store.backend(),
+        &req.did,
+        &req.public_key,
+    ) {
         return Err(LexChainError::SignerMismatch(req.did.clone()));
     }
 

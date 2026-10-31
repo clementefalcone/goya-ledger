@@ -283,6 +283,10 @@ pub fn key_controls_did(store: &dyn BlockStore, did: &str, public_key: &str) -> 
     if let Some(address) = wallet_address {
         return wallet_address_of(public_key).as_deref() == Some(address);
     }
+    key_controls_identity(store, did, public_key)
+}
+
+pub fn key_controls_identity(store: &dyn BlockStore, did: &str, public_key: &str) -> bool {
     match store.read_identity(did) {
         Ok(record) => record.status == "active" && record.public_key == public_key,
         Err(StorageError::IdentityNotFound(_)) => did_matches_pubkey(did, public_key),
@@ -555,6 +559,19 @@ mod tests {
             "did:goya:0000000000000000000000000000000000000000",
             &owner.public_key
         ));
+    }
+
+    #[test]
+    fn wallet_address_did_does_not_control_an_identity() {
+        let store = MemoryStore::new();
+        let owner = Owner::ed25519();
+        let wallet_did = format!("did:goya:{}", wallet_address_of(&owner.public_key).unwrap());
+        assert!(!key_controls_identity(
+            &store,
+            &wallet_did,
+            &owner.public_key
+        ));
+        assert!(key_controls_identity(&store, &owner.did, &owner.public_key));
     }
 
     #[test]
