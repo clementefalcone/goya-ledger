@@ -23,6 +23,8 @@ pub enum LexChainError {
     NotarizationFailed(String),
     #[error("contract requires at least one party")]
     NoParties,
+    #[error("invalid webhook: {0}")]
+    InvalidWebhook(String),
     #[error("DID not registered: {0}")]
     DidNotRegistered(String),
     #[error("signing key does not belong to DID: {0}")]
@@ -103,6 +105,9 @@ pub fn deploy(
 ) -> Result<LexContract, LexChainError> {
     if definition.parties.is_empty() {
         return Err(LexChainError::NoParties);
+    }
+    if let Some(url) = &definition.webhook_url {
+        super::webhook::validate_webhook_url(url).map_err(LexChainError::InvalidWebhook)?;
     }
 
     let id = format!("lxc-{}", uuid::Uuid::new_v4());
@@ -673,6 +678,17 @@ mod tests {
         assert_eq!(contract.parties.len(), 1);
         assert!(!contract.parties[0].signed);
         assert!(store.get(&contract.id).is_some());
+    }
+
+    #[test]
+    fn deploy_rejects_a_webhook_aimed_at_cloud_metadata() {
+        let store = test_store();
+        let mut def = fes_definition();
+        def.webhook_url = Some("https://169.254.169.254/latest/meta-data".into());
+        assert!(matches!(
+            deploy(&store, def),
+            Err(LexChainError::InvalidWebhook(_))
+        ));
     }
 
     #[test]

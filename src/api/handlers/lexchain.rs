@@ -20,15 +20,30 @@ fn fire_webhook(contract: &LexContract, event: &str) {
     };
     let url = url.clone();
     tokio::spawn(async move {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build();
-        if let Ok(client) = client {
-            if let Err(e) = client.post(&url).json(&payload).send().await {
-                log::warn!("webhook POST to {url} failed: {e}");
-            }
+        if let Err(e) = post_webhook(&url, &payload).await {
+            log::warn!("webhook for contract {}: {e}", payload.contract_id);
         }
     });
+}
+
+async fn post_webhook(raw_url: &str, payload: &WebhookEvent) -> Result<(), String> {
+    use crate::lexchain::webhook::{resolve_public_address, validate_webhook_url};
+    let url = validate_webhook_url(raw_url)?;
+    let address = resolve_public_address(&url).await?;
+    let host = url.host_str().unwrap_or_default().to_string();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve(&host, address)
+        .build()
+        .map_err(|e| format!("webhook client for {raw_url}: {e}"))?;
+    client
+        .post(url)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|e| format!("POST {raw_url}: {e}"))?;
+    Ok(())
 }
 
 #[post("/lexchain/deploy")]
