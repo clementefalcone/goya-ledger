@@ -461,7 +461,7 @@ async fn uc_document_ownership_transfer() {
 
     // Alice transfers to Bob
     let (bob_did, _, _) = ed25519_identity();
-    let transfer_payload = format!("transfer_doc:{hash}:{alice_did}:{bob_did}");
+    let transfer_payload = format!("transfer_doc:{hash}:0:{alice_did}:{bob_did}");
     let transfer_sig = hex::encode(alice_provider.sign(transfer_payload.as_bytes()).unwrap());
 
     let req = test::TestRequest::post()

@@ -758,10 +758,16 @@ pub async fn transfer_document(
         biometric_evidence: body.biometric_evidence.clone(),
     };
 
+    let sequence = store
+        .read_ownership_transfers(&content_hash)
+        .map_err(|e| crate::api::errors::ApiError::StorageError {
+            reason: format!("transfers of {content_hash} unreadable: {e}"),
+        })?
+        .len();
     if !verify_signature(
         transfer.signature_algorithm,
         &transfer.public_key,
-        transfer_payload(&transfer).as_bytes(),
+        transfer_payload(&transfer, sequence).as_bytes(),
         &transfer.signature,
     ) {
         return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
@@ -2404,7 +2410,7 @@ mod tests {
         assert_eq!(test::call_service(&app, req).await.status(), 201);
 
         let wrong_did = "did:goya:0000000000000000";
-        let transfer_payload = format!("transfer_doc:{hash}:{wrong_did}:did:goya:recipient");
+        let transfer_payload = format!("transfer_doc:{hash}:0:{wrong_did}:did:goya:recipient");
         let sig = hex::encode(provider.sign(transfer_payload.as_bytes()).unwrap());
 
         let req = test::TestRequest::post()
@@ -2480,7 +2486,7 @@ mod tests {
 
         // Bob tries to transfer Alice's document
         let (bob_did, bob_pk, bob_provider) = ed25519_identity();
-        let transfer_payload = format!("transfer_doc:{hash}:{bob_did}:did:goya:thief");
+        let transfer_payload = format!("transfer_doc:{hash}:0:{bob_did}:did:goya:thief");
         let sig = hex::encode(bob_provider.sign(transfer_payload.as_bytes()).unwrap());
 
         let req = test::TestRequest::post()
@@ -2517,7 +2523,7 @@ mod tests {
             .to_request();
         assert_eq!(test::call_service(&app, req).await.status(), 201);
 
-        let message = format!("transfer_doc:{hash}:{alice_did}:did:goya:bob");
+        let message = format!("transfer_doc:{hash}:0:{alice_did}:did:goya:bob");
         let req = test::TestRequest::post()
             .uri(&format!("/api/v1/notarize/{hash}/transfer"))
             .set_json(serde_json::json!({

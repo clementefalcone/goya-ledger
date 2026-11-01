@@ -21,7 +21,7 @@ pub fn notarize_payload(
     }
 }
 
-pub fn transfer_payload(transfer: &OwnershipTransfer) -> String {
+pub fn transfer_payload(transfer: &OwnershipTransfer, sequence: usize) -> String {
     let OwnershipTransfer {
         content_hash,
         from_did,
@@ -29,10 +29,12 @@ pub fn transfer_payload(transfer: &OwnershipTransfer) -> String {
         ..
     } = transfer;
     match transfer.signature_level {
-        SignatureLevel::Simple => format!("transfer_doc:{content_hash}:{from_did}:{to_did}"),
+        SignatureLevel::Simple => {
+            format!("transfer_doc:{content_hash}:{sequence}:{from_did}:{to_did}")
+        }
         SignatureLevel::Advanced | SignatureLevel::Qualified | SignatureLevel::Seal => {
             let bio_hash = compute_biometrics_hash(&transfer.biometric_evidence);
-            format!("transfer_fea:{content_hash}:{from_did}:{to_did}:{bio_hash}")
+            format!("transfer_fea:{content_hash}:{sequence}:{from_did}:{to_did}:{bio_hash}")
         }
     }
 }
@@ -57,11 +59,12 @@ pub fn apply_ownership_transfer(
     if !verify_signature(
         transfer.signature_algorithm,
         &transfer.public_key,
-        transfer_payload(transfer).as_bytes(),
+        transfer_payload(transfer, transfers.len()).as_bytes(),
         &transfer.signature,
     ) {
         return Err(StorageError::Other(format!(
-            "transfer of {hash} from {}: signature does not verify against its public_key",
+            "transfer #{} of {hash} from {}: signature does not verify against its public_key",
+            transfers.len(),
             transfer.from_did
         )));
     }
@@ -156,6 +159,14 @@ mod tests {
     }
 
     fn signed_transfer(from: &SoftwareSigningProvider, to_did: &str) -> OwnershipTransfer {
+        signed_transfer_at(from, to_did, 0)
+    }
+
+    fn signed_transfer_at(
+        from: &SoftwareSigningProvider,
+        to_did: &str,
+        sequence: usize,
+    ) -> OwnershipTransfer {
         let public_key = hex::encode(from.public_key());
         let mut transfer = OwnershipTransfer {
             content_hash: HASH.to_string(),
@@ -168,8 +179,8 @@ mod tests {
             signature_level: SignatureLevel::Simple,
             biometric_evidence: Vec::new(),
         };
-        transfer.signature =
-            hex::encode(from.sign(transfer_payload(&transfer).as_bytes()).unwrap());
+        let message = transfer_payload(&transfer, sequence);
+        transfer.signature = hex::encode(from.sign(message.as_bytes()).unwrap());
         transfer
     }
 
@@ -228,6 +239,20 @@ mod tests {
         apply_ownership_transfer(&store, &transfer).unwrap();
         apply_ownership_transfer(&store, &transfer).unwrap();
         assert_eq!(store.read_ownership_transfers(HASH).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rejects_a_replayed_transfer_after_the_document_came_back() {
+        let (alice, bob) = (
+            SoftwareSigningProvider::generate(),
+            SoftwareSigningProvider::generate(),
+        );
+        let store = notarized_by(&alice);
+        let alice_to_bob = signed_transfer(&alice, &did_of(&bob));
+        apply_ownership_transfer(&store, &alice_to_bob).unwrap();
+        apply_ownership_transfer(&store, &signed_transfer_at(&bob, &did_of(&alice), 1)).unwrap();
+        assert!(apply_ownership_transfer(&store, &alice_to_bob).is_err());
+        assert_eq!(current_owner(&store, HASH).unwrap(), did_of(&alice));
     }
 
     #[test]

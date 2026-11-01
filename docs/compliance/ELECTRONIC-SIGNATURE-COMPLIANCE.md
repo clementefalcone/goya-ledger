@@ -173,7 +173,7 @@ All endpoints that accept cryptographic signatures support both FES and FEA:
 | Endpoint | Simple payload | Advanced payload |
 |---|---|---|
 | `POST /notarize` | `notarize:{s}:{h}` | `notarize_fea:{s}:{h}:{bio}` |
-| `POST /notarize/{h}/transfer` | `transfer_doc:{h}:{f}:{t}` | `transfer_fea:{h}:{f}:{t}:{bio}` |
+| `POST /notarize/{h}/transfer` | `transfer_doc:{h}:{n}:{f}:{t}` | `transfer_fea:{h}:{n}:{f}:{t}:{bio}` |
 | `POST /governance/vote/{id}` | `vote:{id}:{opt}:{pk}` | `vote_fea:{id}:{opt}:{pk}:{bio}` |
 | `POST /inference/submit` | `inference:submit:{m}:{o}` | `inference:submit:{m}:{o}:{bio}` |
 | `POST /inference/submit-proven` | `inference:submit:{m}:{o}` | `inference:submit:{m}:{o}:{bio}` |
