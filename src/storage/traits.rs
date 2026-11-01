@@ -145,6 +145,9 @@ pub enum TxPayload {
     Notarize {
         entry: Box<NotarizationEntry>,
     },
+    TransferOwnership {
+        transfer: Box<OwnershipTransfer>,
+    },
     SignedTransfer {
         nonce: u64,
     },
@@ -429,7 +432,7 @@ pub struct NotarizationEntry {
 ///
 /// Current owner = last `to_did` in the chain, or `signer` of the original
 /// notarization if no transfers exist.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OwnershipTransfer {
     /// Content hash of the notarized document.
     pub content_hash: String,

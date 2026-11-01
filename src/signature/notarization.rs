@@ -4,7 +4,7 @@ use crate::signature::{
     SignerClaim,
 };
 use crate::storage::errors::{StorageError, StorageResult};
-use crate::storage::traits::{BlockStore, NotarizationEntry};
+use crate::storage::traits::{BlockStore, NotarizationEntry, OwnershipTransfer};
 
 pub fn notarize_payload(
     level: SignatureLevel,
@@ -19,6 +19,66 @@ pub fn notarize_payload(
             format!("notarize_fea:{signer}:{content_hash}:{bio_hash}")
         }
     }
+}
+
+pub fn transfer_payload(transfer: &OwnershipTransfer) -> String {
+    let OwnershipTransfer {
+        content_hash,
+        from_did,
+        to_did,
+        ..
+    } = transfer;
+    match transfer.signature_level {
+        SignatureLevel::Simple => format!("transfer_doc:{content_hash}:{from_did}:{to_did}"),
+        SignatureLevel::Advanced | SignatureLevel::Qualified | SignatureLevel::Seal => {
+            let bio_hash = compute_biometrics_hash(&transfer.biometric_evidence);
+            format!("transfer_fea:{content_hash}:{from_did}:{to_did}:{bio_hash}")
+        }
+    }
+}
+
+pub fn current_owner(store: &dyn BlockStore, content_hash: &str) -> StorageResult<String> {
+    let notarization = store.read_notarization_by_hash(content_hash)?;
+    let transfers = store.read_ownership_transfers(content_hash)?;
+    Ok(transfers
+        .last()
+        .map_or(notarization.signer, |t| t.to_did.clone()))
+}
+
+pub fn apply_ownership_transfer(
+    store: &dyn BlockStore,
+    transfer: &OwnershipTransfer,
+) -> StorageResult<()> {
+    let hash = &transfer.content_hash;
+    let transfers = store.read_ownership_transfers(hash)?;
+    if transfers.last() == Some(transfer) {
+        return Ok(());
+    }
+    if !verify_signature(
+        transfer.signature_algorithm,
+        &transfer.public_key,
+        transfer_payload(transfer).as_bytes(),
+        &transfer.signature,
+    ) {
+        return Err(StorageError::Other(format!(
+            "transfer of {hash} from {}: signature does not verify against its public_key",
+            transfer.from_did
+        )));
+    }
+    if !key_controls_identity(store, &transfer.from_did, &transfer.public_key) {
+        return Err(StorageError::Other(format!(
+            "transfer of {hash}: public_key does not control {}",
+            transfer.from_did
+        )));
+    }
+    let owner = current_owner(store, hash)?;
+    if owner != transfer.from_did {
+        return Err(StorageError::Other(format!(
+            "transfer of {hash} from {}: current owner is {owner}",
+            transfer.from_did
+        )));
+    }
+    store.write_ownership_transfer(transfer)
 }
 
 pub fn apply_notarization(store: &dyn BlockStore, entry: &NotarizationEntry) -> StorageResult<()> {
@@ -93,6 +153,81 @@ mod tests {
             biometric_evidence: Vec::new(),
             signer_proof: None,
         }
+    }
+
+    fn signed_transfer(from: &SoftwareSigningProvider, to_did: &str) -> OwnershipTransfer {
+        let public_key = hex::encode(from.public_key());
+        let mut transfer = OwnershipTransfer {
+            content_hash: HASH.to_string(),
+            from_did: did_from_pubkey_hex(&public_key),
+            to_did: to_did.to_string(),
+            signature: String::new(),
+            public_key,
+            transferred_at: 200,
+            signature_algorithm: SigningAlgorithm::Ed25519,
+            signature_level: SignatureLevel::Simple,
+            biometric_evidence: Vec::new(),
+        };
+        transfer.signature =
+            hex::encode(from.sign(transfer_payload(&transfer).as_bytes()).unwrap());
+        transfer
+    }
+
+    fn did_of(key: &SoftwareSigningProvider) -> String {
+        did_from_pubkey_hex(&hex::encode(key.public_key()))
+    }
+
+    fn notarized_by(owner: &SoftwareSigningProvider) -> MemoryStore {
+        let store = MemoryStore::new();
+        apply_notarization(&store, &signed_entry(owner, "n-1")).unwrap();
+        store
+    }
+
+    #[test]
+    fn transfers_ownership_signed_by_the_owner() {
+        let (alice, bob) = (
+            SoftwareSigningProvider::generate(),
+            SoftwareSigningProvider::generate(),
+        );
+        let store = notarized_by(&alice);
+        apply_ownership_transfer(&store, &signed_transfer(&alice, &did_of(&bob))).unwrap();
+        assert_eq!(current_owner(&store, HASH).unwrap(), did_of(&bob));
+    }
+
+    #[test]
+    fn rejects_a_transfer_with_a_forged_signature() {
+        let alice = SoftwareSigningProvider::generate();
+        let store = notarized_by(&alice);
+        let mut transfer = signed_transfer(&alice, "did:goya:thief");
+        transfer.signature = "00".repeat(64);
+        assert!(apply_ownership_transfer(&store, &transfer).is_err());
+        assert_eq!(current_owner(&store, HASH).unwrap(), did_of(&alice));
+    }
+
+    #[test]
+    fn rejects_a_transfer_from_someone_who_is_not_the_owner() {
+        let (alice, mallory) = (
+            SoftwareSigningProvider::generate(),
+            SoftwareSigningProvider::generate(),
+        );
+        let store = notarized_by(&alice);
+        assert!(
+            apply_ownership_transfer(&store, &signed_transfer(&mallory, "did:goya:x")).is_err()
+        );
+        assert_eq!(current_owner(&store, HASH).unwrap(), did_of(&alice));
+    }
+
+    #[test]
+    fn reapplying_the_same_transfer_is_a_no_op() {
+        let (alice, bob) = (
+            SoftwareSigningProvider::generate(),
+            SoftwareSigningProvider::generate(),
+        );
+        let store = notarized_by(&alice);
+        let transfer = signed_transfer(&alice, &did_of(&bob));
+        apply_ownership_transfer(&store, &transfer).unwrap();
+        apply_ownership_transfer(&store, &transfer).unwrap();
+        assert_eq!(store.read_ownership_transfers(HASH).unwrap().len(), 1);
     }
 
     #[test]

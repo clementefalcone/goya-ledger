@@ -21,7 +21,7 @@ use crate::app_state::AppState;
 use crate::document::DocumentFingerprint;
 use crate::identity::operations;
 use crate::identity::signing::SigningAlgorithm;
-use crate::signature::notarization::notarize_payload;
+use crate::signature::notarization::{current_owner, notarize_payload, transfer_payload};
 use crate::signature::{
     compute_biometrics_hash, is_signer_proven, verify_signature, BiometricEvidence, SignatureLevel,
     SignerClaim, SignerProof,
@@ -107,23 +107,16 @@ pub struct NotarizeListQuery {
     pub signer: Option<String>,
 }
 
-// ── Signing payload construction ─────────────────────────────────────────────
-
-/// Build the transfer signing payload based on signature level.
-fn build_transfer_payload(
-    level: SignatureLevel,
-    content_hash: &str,
-    from_did: &str,
-    to_did: &str,
-    biometric_evidence: &[BiometricEvidence],
-) -> String {
-    match level {
-        SignatureLevel::Simple => format!("transfer_doc:{content_hash}:{from_did}:{to_did}"),
-        SignatureLevel::Advanced | SignatureLevel::Qualified | SignatureLevel::Seal => {
-            let bio_hash = compute_biometrics_hash(biometric_evidence);
-            format!("transfer_fea:{content_hash}:{from_did}:{to_did}:{bio_hash}")
-        }
-    }
+fn queue_payload(state: &AppState, tx: crate::storage::traits::Transaction) -> ApiResult<()> {
+    let id = tx.id.clone();
+    state
+        .tx_pool
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .add(tx)
+        .map_err(|reason| crate::api::errors::ApiError::ConsensusError {
+            reason: format!("{id} not queued: {reason}"),
+        })
 }
 
 fn commit_notarization(
@@ -131,32 +124,58 @@ fn commit_notarization(
     store: &dyn crate::storage::traits::BlockStore,
     entry: &NotarizationEntry,
 ) -> ApiResult<()> {
-    let tx = crate::storage::traits::Transaction {
-        id: format!("notarize:{}", entry.id),
-        block_height: 0,
-        timestamp: entry.notarized_at,
-        input_did: entry.signer.clone(),
-        output_recipient: entry.content_hash.clone(),
-        amount: 0,
-        state: "pending".to_string(),
-        fee: 0,
-        payload: Some(crate::storage::traits::TxPayload::Notarize {
-            entry: Box::new(entry.clone()),
-        }),
-    };
-    state
-        .tx_pool
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .add(tx)
-        .map_err(|reason| crate::api::errors::ApiError::ConsensusError {
-            reason: format!("notarization {} not queued: {reason}", entry.id),
-        })?;
+    queue_payload(
+        state,
+        crate::storage::traits::Transaction {
+            id: format!("notarize:{}", entry.id),
+            block_height: 0,
+            timestamp: entry.notarized_at,
+            input_did: entry.signer.clone(),
+            output_recipient: entry.content_hash.clone(),
+            amount: 0,
+            state: "pending".to_string(),
+            fee: 0,
+            payload: Some(crate::storage::traits::TxPayload::Notarize {
+                entry: Box::new(entry.clone()),
+            }),
+        },
+    )?;
     store
         .write_notarization(entry)
         .map_err(|e| crate::api::errors::ApiError::StorageError {
             reason: format!("notarization {} not recorded: {e}", entry.id),
         })
+}
+
+fn commit_transfer(
+    state: &AppState,
+    store: &dyn crate::storage::traits::BlockStore,
+    transfer: &OwnershipTransfer,
+) -> ApiResult<()> {
+    queue_payload(
+        state,
+        crate::storage::traits::Transaction {
+            id: format!(
+                "transfer:{}:{}:{}",
+                transfer.content_hash, transfer.from_did, transfer.transferred_at
+            ),
+            block_height: 0,
+            timestamp: transfer.transferred_at,
+            input_did: transfer.from_did.clone(),
+            output_recipient: transfer.to_did.clone(),
+            amount: 0,
+            state: "pending".to_string(),
+            fee: 0,
+            payload: Some(crate::storage::traits::TxPayload::TransferOwnership {
+                transfer: Box::new(transfer.clone()),
+            }),
+        },
+    )?;
+    store.write_ownership_transfer(transfer).map_err(|e| {
+        crate::api::errors::ApiError::StorageError {
+            reason: format!("transfer of {} not recorded: {e}", transfer.content_hash),
+        }
+    })
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -727,55 +746,6 @@ pub async fn transfer_document(
         )));
     }
 
-    // Verify signature
-    let sign_msg = build_transfer_payload(
-        body.signature_level,
-        &content_hash,
-        &body.from_did,
-        &body.to_did,
-        &body.biometric_evidence,
-    );
-    if !verify_signature(
-        body.signature_algorithm,
-        &body.public_key,
-        sign_msg.as_bytes(),
-        &body.signature,
-    ) {
-        return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
-            err_dto("INVALID_SIGNATURE", "signature verification failed"),
-            401,
-        )));
-    }
-
-    // Resolve current owner: last transfer recipient, or original signer
-    let transfers = store
-        .read_ownership_transfers(&content_hash)
-        .unwrap_or_default();
-    let notarization = match store.read_notarization_by_hash(&content_hash) {
-        Ok(n) => n,
-        Err(_) => {
-            return Ok(HttpResponse::NotFound().json(ApiResponse::<()>::error(
-                err_dto("NOT_FOUND", "notarization not found for this content hash"),
-                404,
-            )));
-        }
-    };
-    let current_owner = transfers
-        .last()
-        .map(|t| t.to_did.as_str())
-        .unwrap_or(&notarization.signer);
-
-    // Only current owner can transfer
-    if body.from_did != current_owner {
-        return Ok(HttpResponse::Forbidden().json(ApiResponse::<()>::error(
-            err_dto(
-                "NOT_OWNER",
-                &format!("only the current owner ({current_owner}) can transfer"),
-            ),
-            403,
-        )));
-    }
-
     let transfer = OwnershipTransfer {
         content_hash: content_hash.clone(),
         from_did: body.from_did.clone(),
@@ -788,11 +758,34 @@ pub async fn transfer_document(
         biometric_evidence: body.biometric_evidence.clone(),
     };
 
-    store.write_ownership_transfer(&transfer).map_err(|e| {
+    if !verify_signature(
+        transfer.signature_algorithm,
+        &transfer.public_key,
+        transfer_payload(&transfer).as_bytes(),
+        &transfer.signature,
+    ) {
+        return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
+            err_dto("INVALID_SIGNATURE", "signature verification failed"),
+            401,
+        )));
+    }
+
+    let owner = current_owner(store.as_ref(), &content_hash).map_err(|e| {
         crate::api::errors::ApiError::StorageError {
-            reason: e.to_string(),
+            reason: format!("owner of {content_hash} unreadable: {e}"),
         }
     })?;
+    if body.from_did != owner {
+        return Ok(HttpResponse::Forbidden().json(ApiResponse::<()>::error(
+            err_dto(
+                "NOT_OWNER",
+                &format!("only the current owner ({owner}) can transfer"),
+            ),
+            403,
+        )));
+    }
+
+    commit_transfer(&state, store.as_ref(), &transfer)?;
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         serde_json::json!({
@@ -2503,6 +2496,47 @@ mod tests {
         assert_eq!(resp.status(), 403);
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["error"]["code"], "NOT_OWNER");
+    }
+
+    #[actix_web::test]
+    async fn transfer_by_the_owner_is_queued_for_the_chain() {
+        let state = make_app_data();
+        let app = test::init_service(
+            App::new().app_data(state.clone()).service(
+                web::scope("/api/v1")
+                    .service(submit_notarization)
+                    .service(transfer_document),
+            ),
+        )
+        .await;
+        let (alice_did, alice_pk, alice_provider) = ed25519_identity();
+        let hash = content_hash();
+        let req = test::TestRequest::post()
+            .uri("/api/v1/notarize")
+            .set_json(notarize_json(&alice_did, &alice_pk, &alice_provider, &hash))
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 201);
+
+        let message = format!("transfer_doc:{hash}:{alice_did}:did:goya:bob");
+        let req = test::TestRequest::post()
+            .uri(&format!("/api/v1/notarize/{hash}/transfer"))
+            .set_json(serde_json::json!({
+                "from_did": alice_did,
+                "to_did": "did:goya:bob",
+                "public_key": alice_pk,
+                "signature": hex::encode(alice_provider.sign(message.as_bytes()).unwrap()),
+            }))
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 200);
+
+        let pool = state.tx_pool.lock().unwrap();
+        let queued = pool.all().iter().find_map(|tx| match &tx.payload {
+            Some(crate::storage::traits::TxPayload::TransferOwnership { transfer }) => {
+                Some(transfer.to_did.clone())
+            }
+            _ => None,
+        });
+        assert_eq!(queued.as_deref(), Some("did:goya:bob"));
     }
 
     #[actix_web::test]

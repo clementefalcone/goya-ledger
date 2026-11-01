@@ -105,6 +105,9 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
         Some(TxPayload::Notarize { entry }) => {
             crate::signature::notarization::apply_notarization(store, entry)
         }
+        Some(TxPayload::TransferOwnership { transfer }) => {
+            crate::signature::notarization::apply_ownership_transfer(store, transfer)
+        }
         _ => Ok(()),
     }
 }
