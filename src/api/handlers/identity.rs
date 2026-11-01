@@ -22,7 +22,7 @@ pub(crate) fn identity_op_error(error: IdentityOpError) -> ApiError {
     }
 }
 
-pub(crate) fn commit_identity_op(
+pub(crate) fn commit_ledger_op(
     state: &AppState,
     store: &dyn BlockStore,
     channel: &str,
@@ -30,7 +30,7 @@ pub(crate) fn commit_identity_op(
     payload: TxPayload,
 ) -> Result<(), ApiError> {
     let tx = Transaction {
-        id: format!("identity-{}", uuid::Uuid::new_v4()),
+        id: format!("ledger-{}", uuid::Uuid::new_v4()),
         block_height: 0,
         timestamp: now_secs(),
         input_did: author.to_string(),
@@ -44,17 +44,17 @@ pub(crate) fn commit_identity_op(
         let mut pool = state.tx_pool.lock().unwrap_or_else(|e| e.into_inner());
         pool.add(tx.clone())
             .map_err(|reason| ApiError::ConsensusError {
-                reason: format!("identity transaction {} not queued: {reason}", tx.id),
+                reason: format!("transaction {} not queued: {reason}", tx.id),
             })?;
     } else {
         store
             .write_transaction(&tx)
             .map_err(|e| ApiError::StorageError {
-                reason: format!("identity transaction {} not recorded: {e}", tx.id),
+                reason: format!("transaction {} not recorded: {e}", tx.id),
             })?;
     }
     crate::transaction::apply_tx_payload(store, &tx).map_err(|e| ApiError::StorageError {
-        reason: format!("identity transaction {} not applied: {e}", tx.id),
+        reason: format!("transaction {} not applied: {e}", tx.id),
     })
 }
 
@@ -164,7 +164,7 @@ pub async fn revoke_identity(
     }
 
     let now = now_secs();
-    commit_identity_op(
+    commit_ledger_op(
         &state,
         store.as_ref(),
         channel,
@@ -263,7 +263,7 @@ pub async fn rotate_key(
     }
 
     let now = now_secs();
-    commit_identity_op(
+    commit_ledger_op(
         &state,
         store.as_ref(),
         channel,
@@ -319,7 +319,7 @@ pub async fn store_write_identity(
             reason: format!("identity {} already registered", record.did),
         });
     }
-    commit_identity_op(
+    commit_ledger_op(
         &state,
         store.as_ref(),
         _channel,

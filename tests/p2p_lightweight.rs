@@ -227,17 +227,25 @@ fn p2p_identity_and_credentials_cross_check() {
         subject["status"], "Success",
         "subject creation failed: {subject}"
     );
-    let cred = post_json(
-        &node1.api_url("/store/credentials"),
-        serde_json::json!({
-            "id": "cred-p2p-test",
-            "issuer_did": issuer_did,
-            "subject_did": subject_did,
-            "cred_type": "Test Certificate",
-            "issued_at": now,
-            "expires_at": 0
-        }),
-    );
+    let mut credential = rust_bc::storage::traits::Credential {
+        id: "cred-p2p-test".to_string(),
+        issuer_did: issuer_did.clone(),
+        subject_did: subject_did.clone(),
+        cred_type: "Test Certificate".to_string(),
+        issued_at: now,
+        expires_at: 0,
+        revoked_at: None,
+        claims: serde_json::Value::Null,
+        signature: String::new(),
+        status: "active".to_string(),
+        claims_commitment: Some("ab".repeat(32)),
+        claims_salt: None,
+    };
+    let message = rust_bc::identity::credential_ops::issue_message(&credential);
+    credential.signature = hex::encode(issuer_signer.sign(message.as_bytes()).unwrap());
+    let mut body = serde_json::to_value(&credential).unwrap();
+    body["issuer_public_key"] = issuer_key.clone().into();
+    let cred = post_json(&node1.api_url("/store/credentials"), body);
     assert_eq!(cred["status"], "Success", "credential issuance failed");
 
     // Verify credential

@@ -288,7 +288,10 @@
       "get": { "tags": ["Identity"], "summary": "Read identity record", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Identity record" } } }
     },
     "/store/credentials": {
-      "post": { "tags": ["Credentials"], "summary": "Persist credential", "responses": { "201": { "description": "Credential stored" } } }
+      "post": { "tags": ["Credentials"], "summary": "Record credential signed by its issuer", "responses": { "201": { "description": "Credential recorded" }, "400": { "description": "Claims sent instead of a commitment" }, "401": { "description": "Not signed by the issuer" } } }
+    },
+    "/store/credentials/{cred_id}/revoke": {
+      "post": { "tags": ["Credentials"], "summary": "Revoke credential with the issuer's signature", "parameters": [{ "name": "cred_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Credential revoked" }, "401": { "description": "Not signed by the issuer" } } }
     },
     "/store/credentials/{cred_id}": {
       "get": { "tags": ["Credentials"], "summary": "Read credential", "parameters": [{ "name": "cred_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Credential" } } }

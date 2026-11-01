@@ -68,6 +68,7 @@ impl ApiRoutes {
             .service(identity_session::verify_subject_signature)
             .service(identity_session::subject_status)
             .service(credentials::store_write_credential)
+            .service(credentials::store_revoke_credential)
             .service(credentials::store_list_credentials)
             .service(credentials::store_get_credential)
             .service(credentials::store_get_credentials_by_subject)
@@ -447,6 +448,7 @@ impl LightRoutes {
             .service(tokenomics::inflation);
         // Credentials (VCs)
         cfg.service(credentials::store_write_credential)
+            .service(credentials::store_revoke_credential)
             .service(credentials::store_list_credentials)
             .service(credentials::store_get_credential)
             .service(credentials::store_get_credentials_by_subject)

@@ -224,11 +224,10 @@ Light client: `LocalIdentityStore` persists identities as JSON in `~/.goya/ident
 | GET | /identity/auth/session-key | Public key that signs session JWTs |
 | POST | /identity/auth/session/redeem | Verify and consume a session JWT once |
 | GET | /did/{did} | W3C DID Resolution |
-| POST | /credentials/issue | Issue credential |
-| GET | /credentials/{id} | Fetch credential |
+| POST | /store/credentials | Record a credential signed by its issuer (claims commitment only) |
+| POST | /store/credentials/{id}/revoke | Revoke with the issuer's signature |
+| GET | /store/credentials/{id} | Fetch credential |
 | GET | /credentials/{id}/vc | W3C VC export |
-| POST | /credentials/{id}/verify | Verify credential |
-| POST | /credentials/{id}/revoke | Revoke credential |
 
 OpenID4VCI and OpenID4VP endpoints in `oid4vci.rs` and `oid4vp.rs`.
 

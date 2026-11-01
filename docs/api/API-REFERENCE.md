@@ -331,17 +331,13 @@ Persist identity record. `did` must be derived from `public_key`, and `signature
 
 Read identity record.
 
-### POST /credentials/issue
-
-Issue a verifiable credential.
-
-### POST /credentials/{id}/verify
-
-Verify credential signature and expiry.
-
 ### POST /store/credentials
 
-Persist credential to store.
+Record a credential signed by its issuer. Body: `id`, `issuer_did` (registered), `subject_did`, `cred_type`, `issued_at`, `expires_at`, `claims_commitment` (64 hex), `signature`, `issuer_public_key`. `signature` is the issuer's signature over `credential:issue:{id}:{issuer_did}:{subject_did}:{cred_type}:{issued_at}:{expires_at}:{claims_commitment}`. Claims and their salt stay with the issuer; a body with `claims` or `claims_salt` returns 400. Wrong signature returns 401, an existing id 409. The credential is replicated on chain.
+
+### POST /store/credentials/{cred_id}/revoke
+
+Revoke a credential. Body: `revoked_at`, `issuer_public_key`, `signature` over `credential:revoke:{cred_id}:{revoked_at}`. Only the issuer's key is accepted (401 otherwise). Replicated on chain.
 
 ### GET /store/credentials/{cred_id}
 

@@ -1,7 +1,7 @@
 use crate::api::errors::{ApiResponse, ApiResult};
 use crate::api::handlers::channels::{channel_id_from_req, get_channel_store};
 use crate::api::handlers::identity::{
-    commit_identity_op, identity_op_error, now_secs, OwnerActionRequest,
+    commit_ledger_op, identity_op_error, now_secs, OwnerActionRequest,
 };
 use crate::app_state::AppState;
 use crate::identity::civil_anchor::{
@@ -58,7 +58,7 @@ pub async fn add_vault_entry(
         )));
     }
 
-    commit_identity_op(
+    commit_ledger_op(
         &state,
         store.as_ref(),
         channel,
@@ -103,7 +103,7 @@ pub async fn revoke_vault_entry(
         )));
     }
 
-    commit_identity_op(
+    commit_ledger_op(
         &state,
         store.as_ref(),
         channel,
@@ -154,7 +154,7 @@ pub async fn commit_recovery_key(
     }
 
     let committed_at = now_secs();
-    commit_identity_op(
+    commit_ledger_op(
         &state,
         store.as_ref(),
         channel,
@@ -213,7 +213,7 @@ pub async fn bind_civil_anchor(
     }
 
     let bound_at = now_secs();
-    commit_identity_op(
+    commit_ledger_op(
         &state,
         store.as_ref(),
         channel,

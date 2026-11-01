@@ -148,6 +148,16 @@ pub enum TxPayload {
     TransferOwnership {
         transfer: Box<OwnershipTransfer>,
     },
+    IssueCredential {
+        credential: Box<Credential>,
+        issuer_public_key: String,
+    },
+    RevokeCredential {
+        id: String,
+        revoked_at: u64,
+        issuer_public_key: String,
+        signature: String,
+    },
     SignedTransfer {
         nonce: u64,
     },
@@ -231,7 +241,7 @@ pub struct VaultEntry {
 }
 
 /// Credential structure
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Credential {
     pub id: String,
     pub issuer_did: String,

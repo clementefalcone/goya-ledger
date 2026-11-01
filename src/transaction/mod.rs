@@ -6,7 +6,9 @@ pub mod parallel;
 pub mod proposal;
 pub mod rwset;
 
-use crate::identity::{civil_anchor, operations, recovery_commitment, vault_entries};
+use crate::identity::{
+    civil_anchor, credential_ops, operations, recovery_commitment, vault_entries,
+};
 use crate::storage::errors::StorageResult;
 use crate::storage::traits::{BlockStore, Transaction, TxPayload};
 
@@ -108,6 +110,24 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
         Some(TxPayload::TransferOwnership { transfer }) => {
             crate::signature::notarization::apply_ownership_transfer(store, transfer)
         }
+        Some(TxPayload::IssueCredential {
+            credential,
+            issuer_public_key,
+        }) => credential_ops::apply_issue(store, credential, issuer_public_key),
+        Some(TxPayload::RevokeCredential {
+            id,
+            revoked_at,
+            issuer_public_key,
+            signature,
+        }) => credential_ops::apply_revoke(
+            store,
+            &credential_ops::RevokeRequest {
+                id,
+                revoked_at: *revoked_at,
+                issuer_public_key,
+                signature,
+            },
+        ),
         _ => Ok(()),
     }
 }

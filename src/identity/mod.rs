@@ -1,5 +1,6 @@
 pub mod attestation;
 pub mod civil_anchor;
+pub mod credential_ops;
 pub mod did;
 pub mod dual_signing;
 pub mod hsm;
