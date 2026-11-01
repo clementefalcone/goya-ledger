@@ -6,14 +6,22 @@
 //! - `POST /credential` — issue SD-JWT VC or mdoc
 
 use crate::api::errors::{ApiResponse, ApiResult, ErrorDto};
+use crate::api::handlers::channels::get_channel_store;
 use crate::app_state::AppState;
 use crate::crypto::hasher::{hash_with, HashAlgorithm};
+use crate::identity::operations::{is_signed_by, key_controls_identity};
 use actix_web::{get, post, web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuanceGrant {
+    pub issuer_did: String,
+    pub configuration_id: String,
+}
+
 pub struct CredentialOfferStore {
     offers: std::sync::RwLock<std::collections::HashMap<String, (CredentialOffer, u64)>>,
-    pre_authorized_codes: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    pre_authorized_codes: std::sync::Mutex<std::collections::HashMap<String, (IssuanceGrant, u64)>>,
 }
 
 impl CredentialOfferStore {
@@ -24,7 +32,13 @@ impl CredentialOfferStore {
         }
     }
 
-    pub fn store(&self, session_id: &str, offer: CredentialOffer, pre_authorized_code: &str) {
+    pub fn store(
+        &self,
+        session_id: &str,
+        offer: CredentialOffer,
+        pre_authorized_code: &str,
+        grant: IssuanceGrant,
+    ) {
         let now = now_secs();
         let expires_at = now + 600;
         self.offers
@@ -32,12 +46,12 @@ impl CredentialOfferStore {
             .unwrap()
             .insert(session_id.to_string(), (offer, expires_at));
         let mut codes = self.pre_authorized_codes.lock().unwrap();
-        codes.retain(|_, code_expires_at| now < *code_expires_at);
-        codes.insert(pre_authorized_code.to_string(), expires_at);
+        codes.retain(|_, (_, code_expires_at)| now < *code_expires_at);
+        codes.insert(pre_authorized_code.to_string(), (grant, expires_at));
     }
 
-    pub fn consume_pre_authorized_code(&self, code: &str) -> Result<(), &'static str> {
-        let expires_at = self
+    pub fn consume_pre_authorized_code(&self, code: &str) -> Result<IssuanceGrant, &'static str> {
+        let (grant, expires_at) = self
             .pre_authorized_codes
             .lock()
             .unwrap()
@@ -46,7 +60,7 @@ impl CredentialOfferStore {
         if now_secs() >= expires_at {
             return Err("pre-authorized_code expired");
         }
-        Ok(())
+        Ok(grant)
     }
 
     pub fn get(&self, session_id: &str) -> Option<CredentialOffer> {
@@ -508,35 +522,36 @@ impl Default for NonceStore {
 }
 
 pub struct AccessTokenStore {
-    expiry_by_token: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    grants_by_token: std::sync::Mutex<std::collections::HashMap<String, (IssuanceGrant, u64)>>,
 }
 
 impl AccessTokenStore {
     pub fn new() -> Self {
         Self {
-            expiry_by_token: std::sync::Mutex::new(std::collections::HashMap::new()),
+            grants_by_token: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
-    pub fn issue(&self, ttl_secs: u64) -> String {
+    pub fn issue(&self, grant: IssuanceGrant, ttl_secs: u64) -> String {
         use pqc_crypto_module::legacy::rng::OsRng;
         use rand_core::RngCore;
         let mut buf = [0u8; 32];
         OsRng.fill_bytes(&mut buf);
         let token = format!("goya_at_{}", hex::encode(buf));
         let now = now_secs();
-        let mut tokens = self.expiry_by_token.lock().unwrap();
-        tokens.retain(|_, expires_at| now < *expires_at);
-        tokens.insert(token.clone(), now + ttl_secs);
+        let mut tokens = self.grants_by_token.lock().unwrap();
+        tokens.retain(|_, (_, expires_at)| now < *expires_at);
+        tokens.insert(token.clone(), (grant, now + ttl_secs));
         token
     }
 
-    pub fn is_live(&self, token: &str) -> bool {
-        self.expiry_by_token
+    pub fn grant_for(&self, token: &str) -> Option<IssuanceGrant> {
+        self.grants_by_token
             .lock()
             .unwrap()
             .get(token)
-            .is_some_and(|expires_at| now_secs() < *expires_at)
+            .filter(|(_, expires_at)| now_secs() < *expires_at)
+            .map(|(grant, _)| grant.clone())
     }
 }
 
@@ -632,188 +647,6 @@ pub async fn nonce_endpoint(nonce_store: web::Data<NonceStore>) -> ApiResult<Htt
         })))
 }
 
-// ── Authorization Session Store (RFC 9126 PAR + RFC 7636 PKCE) ──────────
-
-pub struct AuthorizationSession {
-    pub client_id: String,
-    pub code_challenge: String,
-    pub redirect_uri: String,
-    pub credential_configuration_ids: Vec<String>,
-    pub created_at: u64,
-    pub authorization_code: Option<String>,
-}
-
-pub struct AuthorizationStore {
-    sessions: std::sync::Mutex<std::collections::HashMap<String, AuthorizationSession>>,
-}
-
-impl AuthorizationStore {
-    pub fn new() -> Self {
-        Self {
-            sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-
-    pub fn create_par(
-        &self,
-        client_id: String,
-        code_challenge: String,
-        redirect_uri: String,
-        credential_configuration_ids: Vec<String>,
-    ) -> String {
-        let request_uri = format!("urn:ietf:params:oauth:request_uri:{}", uuid::Uuid::new_v4());
-        let mut sessions = self.sessions.lock().unwrap();
-        let now = now_secs();
-        sessions.retain(|_, s| now < s.created_at + 600);
-        sessions.insert(
-            request_uri.clone(),
-            AuthorizationSession {
-                client_id,
-                code_challenge,
-                redirect_uri,
-                credential_configuration_ids,
-                created_at: now,
-                authorization_code: None,
-            },
-        );
-        request_uri
-    }
-
-    pub fn authorize(&self, request_uri: &str) -> Result<(String, String), &'static str> {
-        let mut sessions = self.sessions.lock().unwrap();
-        let session = sessions.get_mut(request_uri).ok_or("unknown request_uri")?;
-        if session.authorization_code.is_some() {
-            return Err("already authorized");
-        }
-        use pqc_crypto_module::legacy::rng::OsRng;
-        use rand_core::RngCore;
-        let mut buf = [0u8; 32];
-        OsRng.fill_bytes(&mut buf);
-        let code = hex::encode(buf);
-        session.authorization_code = Some(code.clone());
-        Ok((code, session.redirect_uri.clone()))
-    }
-
-    pub fn exchange(
-        &self,
-        code: &str,
-        code_verifier: &str,
-    ) -> Result<AuthExchangeResult, &'static str> {
-        let mut sessions = self.sessions.lock().unwrap();
-        let (uri, session) = sessions
-            .iter()
-            .find(|(_, s)| s.authorization_code.as_deref() == Some(code))
-            .map(|(k, v)| (k.clone(), v))
-            .ok_or("unknown authorization code")?;
-        if !verify_pkce(code_verifier, &session.code_challenge) {
-            return Err("PKCE verification failed");
-        }
-        let result = AuthExchangeResult {
-            client_id: session.client_id.clone(),
-            credential_configuration_ids: session.credential_configuration_ids.clone(),
-        };
-        sessions.remove(&uri);
-        Ok(result)
-    }
-}
-
-impl Default for AuthorizationStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub struct AuthExchangeResult {
-    pub client_id: String,
-    pub credential_configuration_ids: Vec<String>,
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct ParRequest {
-    pub client_id: String,
-    pub response_type: String,
-    pub code_challenge: String,
-    #[serde(default)]
-    pub code_challenge_method: Option<String>,
-    pub redirect_uri: String,
-    #[serde(default)]
-    pub authorization_details: Option<String>,
-    #[serde(default)]
-    pub scope: Option<String>,
-}
-
-#[post("/as/par")]
-pub async fn par_endpoint(
-    body: web::Form<ParRequest>,
-    auth_store: web::Data<AuthorizationStore>,
-) -> ApiResult<HttpResponse> {
-    if body.response_type != "code" {
-        return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-            err_dto("unsupported_response_type", "only 'code' is supported"),
-            400,
-        )));
-    }
-    let method = body.code_challenge_method.as_deref().unwrap_or("S256");
-    if method != "S256" {
-        return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-            err_dto(
-                "invalid_request",
-                "only S256 code_challenge_method is supported",
-            ),
-            400,
-        )));
-    }
-
-    let config_ids: Vec<String> = body
-        .scope
-        .as_deref()
-        .map(|s| s.split_whitespace().map(String::from).collect())
-        .unwrap_or_else(|| vec!["eudi_pid_sd_jwt".into()]);
-
-    let request_uri = auth_store.create_par(
-        body.client_id.clone(),
-        body.code_challenge.clone(),
-        body.redirect_uri.clone(),
-        config_ids,
-    );
-
-    Ok(HttpResponse::Created()
-        .insert_header(("Cache-Control", "no-store"))
-        .json(serde_json::json!({
-            "request_uri": request_uri,
-            "expires_in": 600,
-        })))
-}
-
-#[derive(Deserialize)]
-pub struct AuthorizeQuery {
-    pub request_uri: String,
-}
-
-#[get("/authorize")]
-pub async fn authorize_endpoint(
-    query: web::Query<AuthorizeQuery>,
-    auth_store: web::Data<AuthorizationStore>,
-) -> ApiResult<HttpResponse> {
-    match auth_store.authorize(&query.request_uri) {
-        Ok((code, redirect_uri)) => {
-            let location = if redirect_uri.contains('?') {
-                format!("{redirect_uri}&code={code}")
-            } else {
-                format!("{redirect_uri}?code={code}")
-            };
-            Ok(HttpResponse::Found()
-                .insert_header(("Location", location.as_str()))
-                .json(serde_json::json!({
-                    "code": code,
-                    "redirect_uri": location,
-                })))
-        }
-        Err(e) => Ok(HttpResponse::BadRequest()
-            .json(ApiResponse::<()>::error(err_dto("invalid_request", e), 400))),
-    }
-}
-
 // ── OAuth Authorization Server Metadata (RFC 8414) ──────────────────────
 
 /// EUDI Wallet fetches this after issuer metadata — mandatory for the flow.
@@ -829,15 +662,8 @@ pub async fn oauth_as_metadata(req: HttpRequest) -> ApiResult<HttpResponse> {
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "issuer": base,
-        "authorization_endpoint": format!("{api}/authorize"),
         "token_endpoint": format!("{api}/token"),
-        "pushed_authorization_request_endpoint": format!("{api}/as/par"),
-        "response_types_supported": ["code"],
-        "grant_types_supported": [
-            "urn:ietf:params:oauth:grant-type:pre-authorized_code",
-            "authorization_code"
-        ],
-        "code_challenge_methods_supported": ["S256"],
+        "grant_types_supported": [PRE_AUTHORIZED_CODE_GRANT],
         "token_endpoint_auth_methods_supported": ["none", "attest_jwt_client_auth"],
         "dpop_signing_alg_values_supported": ["ES256"],
         "client_attestation_signing_alg_values_supported": ["ES256"],
@@ -865,114 +691,8 @@ pub async fn issuer_metadata(req: HttpRequest) -> ApiResult<HttpResponse> {
         "nonce_endpoint": format!("{api}/nonce"),
         "token_endpoint": format!("{api}/token"),
         "credential_offer_endpoint": format!("{api}/credential_offer"),
-        "grant_types_supported": [
-            "urn:ietf:params:oauth:grant-type:pre-authorized_code",
-            "authorization_code"
-        ],
-        "credential_configurations_supported": {
-            "IdentityCredential_sd_jwt": {
-                "format": "vc+sd-jwt",
-                "vct": "IdentityCredential",
-                "credential_definition": {
-                    "@context": ["https://www.w3.org/ns/credentials/v2"],
-                    "type": ["VerifiableCredential", "IdentityCredential"]
-                },
-                "cryptographic_binding_methods_supported": ["jwk"],
-                "credential_signing_alg_values_supported": ["ES256", "EdDSA", "ML-DSA-65"],
-                "proof_types_supported": {
-                    "jwt": {
-                        "proof_signing_alg_values_supported": ["ES256", "ES384", "ES512"]
-                    }
-                },
-                "display": [{
-                    "name": "Identity Credential",
-                    "locale": "en"
-                }],
-                "claims": [
-                    { "path": ["given_name"], "mandatory": false, "value_type": "string", "display": [{"name": "Given Name", "locale": "en"}] },
-                    { "path": ["family_name"], "mandatory": false, "value_type": "string", "display": [{"name": "Family Name", "locale": "en"}] },
-                    { "path": ["birth_date"], "mandatory": false, "value_type": "full-date", "display": [{"name": "Birth Date", "locale": "en"}] },
-                    { "path": ["nationality"], "mandatory": false, "value_type": "string", "display": [{"name": "Nationality", "locale": "en"}] },
-                    { "path": ["age_over_18"], "mandatory": false, "value_type": "bool", "display": [{"name": "Age Over 18", "locale": "en"}] }
-                ]
-            },
-            "eudi_pid_sd_jwt": {
-                "format": "vc+sd-jwt",
-                "vct": "urn:eudi:pid:1",
-                "scope": "eudi_pid_sd_jwt",
-                "cryptographic_binding_methods_supported": ["jwk"],
-                "credential_signing_alg_values_supported": ["ES256"],
-                "proof_types_supported": {
-                    "jwt": {
-                        "proof_signing_alg_values_supported": ["ES256"]
-                    }
-                },
-                "credential_definition": {
-                    "@context": ["https://www.w3.org/ns/credentials/v2"],
-                    "type": ["VerifiableCredential", "EudiPid"],
-                    "claims": {
-                        "family_name": { "mandatory": true, "display": [{"name": "Family Name", "locale": "en"}] },
-                        "given_name": { "mandatory": true, "display": [{"name": "Given Name", "locale": "en"}] },
-                        "birthdate": { "mandatory": true, "display": [{"name": "Birth Date", "locale": "en"}] },
-                        "nationalities": { "mandatory": false, "display": [{"name": "Nationalities", "locale": "en"}] },
-                        "issuing_country": { "mandatory": true, "display": [{"name": "Issuing Country", "locale": "en"}] },
-                        "issuing_authority": { "mandatory": true, "display": [{"name": "Issuance Authority", "locale": "en"}] }
-                    }
-                },
-                "display": [{
-                    "name": "EU PID",
-                    "locale": "en",
-                    "description": "Personal Identification Data",
-                    "background_color": "#2C3E50",
-                    "text_color": "#FFFFFF"
-                }],
-            },
-            "eudi_pid_mdoc": {
-                "format": "mso_mdoc",
-                "doctype": "eu.europa.ec.eudi.pid.1",
-                "credential_definition": {
-                    "@context": ["https://www.w3.org/ns/credentials/v2"],
-                    "type": ["VerifiableCredential"],
-                    "doctype": "eu.europa.ec.eudi.pid.1"
-                },
-                "cryptographic_binding_methods_supported": ["cose_key"],
-                "credential_signing_alg_values_supported": ["ES256", "EdDSA"],
-                "proof_types_supported": {
-                    "jwt": {
-                        "proof_signing_alg_values_supported": ["ES256"]
-                    }
-                },
-            },
-            "goya_identity_jwt_vc_json_ld": {
-                "format": "jwt_vc_json-ld",
-                "credential_definition": {
-                    "@context": [
-                        "https://www.w3.org/ns/credentials/v2"
-                    ],
-                    "type": ["VerifiableCredential", "IdentityCredential"]
-                },
-                "cryptographic_binding_methods_supported": ["did:jwk", "jwk"],
-                "credential_signing_alg_values_supported": ["ES256", "EdDSA"],
-                "proof_types_supported": {
-                    "jwt": {
-                        "proof_signing_alg_values_supported": ["ES256"]
-                    }
-                },
-                "display": [{
-                    "name": "Identity Credential",
-                    "locale": "en",
-                    "description": "W3C Verifiable Credential (JSON-LD)",
-                    "background_color": "#1A9E8F",
-                    "text_color": "#FFFFFF"
-                }],
-                "claims": [
-                    { "path": ["credentialSubject", "given_name"], "mandatory": false, "display": [{"name": "Given Name", "locale": "en"}] },
-                    { "path": ["credentialSubject", "family_name"], "mandatory": false, "display": [{"name": "Family Name", "locale": "en"}] },
-                    { "path": ["credentialSubject", "birth_date"], "mandatory": false, "display": [{"name": "Birth Date", "locale": "en"}] },
-                    { "path": ["credentialSubject", "nationality"], "mandatory": false, "display": [{"name": "Nationality", "locale": "en"}] }
-                ]
-            }
-        },
+        "grant_types_supported": [PRE_AUTHORIZED_CODE_GRANT],
+        "credential_configurations_supported": credential_configurations(),
         "display": [{
             "name": "Goya Ledger",
             "locale": "en",
@@ -982,7 +702,117 @@ pub async fn issuer_metadata(req: HttpRequest) -> ApiResult<HttpResponse> {
     Ok(HttpResponse::Ok().json(metadata))
 }
 
+fn credential_configurations() -> serde_json::Value {
+    serde_json::json!({
+        "IdentityCredential_sd_jwt": {
+            "format": "vc+sd-jwt",
+            "vct": "IdentityCredential",
+            "credential_definition": {
+                "@context": ["https://www.w3.org/ns/credentials/v2"],
+                "type": ["VerifiableCredential", "IdentityCredential"]
+            },
+            "cryptographic_binding_methods_supported": ["jwk"],
+            "credential_signing_alg_values_supported": ["ES256", "EdDSA", "ML-DSA-65"],
+            "proof_types_supported": {
+                "jwt": {
+                    "proof_signing_alg_values_supported": ["ES256", "ES384", "ES512"]
+                }
+            },
+            "display": [{
+                "name": "Identity Credential",
+                "locale": "en"
+            }],
+            "claims": [
+                { "path": ["given_name"], "mandatory": false, "value_type": "string", "display": [{"name": "Given Name", "locale": "en"}] },
+                { "path": ["family_name"], "mandatory": false, "value_type": "string", "display": [{"name": "Family Name", "locale": "en"}] },
+                { "path": ["birth_date"], "mandatory": false, "value_type": "full-date", "display": [{"name": "Birth Date", "locale": "en"}] },
+                { "path": ["nationality"], "mandatory": false, "value_type": "string", "display": [{"name": "Nationality", "locale": "en"}] },
+                { "path": ["age_over_18"], "mandatory": false, "value_type": "bool", "display": [{"name": "Age Over 18", "locale": "en"}] }
+            ]
+        },
+        "eudi_pid_sd_jwt": {
+            "format": "vc+sd-jwt",
+            "vct": "urn:eudi:pid:1",
+            "scope": "eudi_pid_sd_jwt",
+            "cryptographic_binding_methods_supported": ["jwk"],
+            "credential_signing_alg_values_supported": ["ES256"],
+            "proof_types_supported": {
+                "jwt": {
+                    "proof_signing_alg_values_supported": ["ES256"]
+                }
+            },
+            "credential_definition": {
+                "@context": ["https://www.w3.org/ns/credentials/v2"],
+                "type": ["VerifiableCredential", "EudiPid"],
+                "claims": {
+                    "family_name": { "mandatory": true, "display": [{"name": "Family Name", "locale": "en"}] },
+                    "given_name": { "mandatory": true, "display": [{"name": "Given Name", "locale": "en"}] },
+                    "birthdate": { "mandatory": true, "display": [{"name": "Birth Date", "locale": "en"}] },
+                    "nationalities": { "mandatory": false, "display": [{"name": "Nationalities", "locale": "en"}] },
+                    "issuing_country": { "mandatory": true, "display": [{"name": "Issuing Country", "locale": "en"}] },
+                    "issuing_authority": { "mandatory": true, "display": [{"name": "Issuance Authority", "locale": "en"}] }
+                }
+            },
+            "display": [{
+                "name": "EU PID",
+                "locale": "en",
+                "description": "Personal Identification Data",
+                "background_color": "#2C3E50",
+                "text_color": "#FFFFFF"
+            }],
+        },
+        "eudi_pid_mdoc": {
+            "format": "mso_mdoc",
+            "doctype": "eu.europa.ec.eudi.pid.1",
+            "credential_definition": {
+                "@context": ["https://www.w3.org/ns/credentials/v2"],
+                "type": ["VerifiableCredential"],
+                "doctype": "eu.europa.ec.eudi.pid.1"
+            },
+            "cryptographic_binding_methods_supported": ["cose_key"],
+            "credential_signing_alg_values_supported": ["ES256", "EdDSA"],
+            "proof_types_supported": {
+                "jwt": {
+                    "proof_signing_alg_values_supported": ["ES256"]
+                }
+            },
+        },
+        "goya_identity_jwt_vc_json_ld": {
+            "format": "jwt_vc_json-ld",
+            "credential_definition": {
+                "@context": [
+                    "https://www.w3.org/ns/credentials/v2"
+                ],
+                "type": ["VerifiableCredential", "IdentityCredential"]
+            },
+            "cryptographic_binding_methods_supported": ["did:jwk", "jwk"],
+            "credential_signing_alg_values_supported": ["ES256", "EdDSA"],
+            "proof_types_supported": {
+                "jwt": {
+                    "proof_signing_alg_values_supported": ["ES256"]
+                }
+            },
+            "display": [{
+                "name": "Identity Credential",
+                "locale": "en",
+                "description": "W3C Verifiable Credential (JSON-LD)",
+                "background_color": "#1A9E8F",
+                "text_color": "#FFFFFF"
+            }],
+            "claims": [
+                { "path": ["credentialSubject", "given_name"], "mandatory": false, "display": [{"name": "Given Name", "locale": "en"}] },
+                { "path": ["credentialSubject", "family_name"], "mandatory": false, "display": [{"name": "Family Name", "locale": "en"}] },
+                { "path": ["credentialSubject", "birth_date"], "mandatory": false, "display": [{"name": "Birth Date", "locale": "en"}] },
+                { "path": ["credentialSubject", "nationality"], "mandatory": false, "display": [{"name": "Nationality", "locale": "en"}] }
+            ]
+        }
+    })
+}
+
 // ── Token Endpoint ────────────────────────────────────────────────────────
+
+const PRE_AUTHORIZED_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:pre-authorized_code";
+const ACCESS_TOKEN_TTL_SECS: u64 = 3600;
 
 #[derive(Deserialize, Serialize)]
 pub struct TokenRequest {
@@ -994,24 +824,11 @@ pub struct TokenRequest {
     #[serde(default)]
     pub tx_code: Option<String>,
     #[serde(default)]
-    pub code: Option<String>,
-    #[serde(default)]
-    pub code_verifier: Option<String>,
-    #[serde(default)]
-    pub redirect_uri: Option<String>,
-    #[serde(default)]
     pub wallet_instance_attestation: Option<String>,
     #[serde(default)]
     pub wallet_trust_evidence: Option<String>,
     #[serde(default)]
     pub authorization_details: Option<String>,
-}
-
-/// Verify PKCE S256 challenge (RFC 7636 §4.6).
-pub fn verify_pkce(code_verifier: &str, code_challenge: &str) -> bool {
-    let hash = hash_with(HashAlgorithm::Sha256, code_verifier.as_bytes());
-    let computed = base64url_encode(&hash);
-    computed == code_challenge
 }
 
 /// Credential Offer (OpenID4VCI §4.1).
@@ -1029,75 +846,42 @@ struct TokenResponse {
     expires_in: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     dpop_jkt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    c_nonce: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    c_nonce_expires_in: Option<u64>,
 }
 
-/// Token endpoint — exchange pre-authorized code or authorization code for access token.
-/// Supports DPoP (RFC 9449) via `DPoP` header, WIA/WTE via form fields,
-/// and PKCE (RFC 7636) for the authorization_code grant.
 #[post("/token")]
 pub async fn token_endpoint(
     body: web::Form<TokenRequest>,
     req: HttpRequest,
     wia_registry: Option<web::Data<WalletProviderRegistry>>,
-    auth_store: web::Data<AuthorizationStore>,
     offer_store: web::Data<CredentialOfferStore>,
     token_store: web::Data<AccessTokenStore>,
 ) -> ApiResult<HttpResponse> {
     log::info!(
-        "OID4VCI /token: grant_type={} has_pre_auth={} has_code={}",
+        "OID4VCI /token: grant_type={} has_pre_auth={}",
         body.grant_type,
-        body.pre_authorized_code.is_some(),
-        body.code.is_some()
+        body.pre_authorized_code.is_some()
     );
-    match body.grant_type.as_str() {
-        "urn:ietf:params:oauth:grant-type:pre-authorized_code" => {
-            let c = body.pre_authorized_code.as_deref().unwrap_or("");
-            if c.is_empty() {
-                return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-                    err_dto("invalid_grant", "pre-authorized_code required"),
-                    400,
-                )));
-            }
-            if let Err(e) = offer_store.consume_pre_authorized_code(c) {
-                return Ok(HttpResponse::BadRequest()
-                    .json(ApiResponse::<()>::error(err_dto("invalid_grant", e), 400)));
-            }
-        }
-        "authorization_code" => {
-            let c = body.code.as_deref().unwrap_or("");
-            if c.is_empty() {
-                return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-                    err_dto(
-                        "invalid_grant",
-                        "code required for authorization_code grant",
-                    ),
-                    400,
-                )));
-            }
-            let verifier = body.code_verifier.as_deref().unwrap_or("");
-            if verifier.is_empty() {
-                return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-                    err_dto("invalid_request", "code_verifier required for PKCE"),
-                    400,
-                )));
-            }
-            if let Err(e) = auth_store.exchange(c, verifier) {
-                return Ok(HttpResponse::BadRequest()
-                    .json(ApiResponse::<()>::error(err_dto("invalid_grant", e), 400)));
-            }
-        }
-        _ => {
-            return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-                err_dto(
-                    "unsupported_grant_type",
-                    "supported: pre-authorized_code, authorization_code",
-                ),
-                400,
-            )));
+    if body.grant_type != PRE_AUTHORIZED_CODE_GRANT {
+        return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+            err_dto(
+                "unsupported_grant_type",
+                &format!("supported: {PRE_AUTHORIZED_CODE_GRANT}"),
+            ),
+            400,
+        )));
+    }
+    let code = body.pre_authorized_code.as_deref().unwrap_or("");
+    if code.is_empty() {
+        return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+            err_dto("invalid_grant", "pre-authorized_code required"),
+            400,
+        )));
+    }
+    let grant = match offer_store.consume_pre_authorized_code(code) {
+        Ok(grant) => grant,
+        Err(e) => {
+            return Ok(HttpResponse::BadRequest()
+                .json(ApiResponse::<()>::error(err_dto("invalid_grant", e), 400)));
         }
     };
 
@@ -1151,22 +935,15 @@ pub async fn token_endpoint(
         None
     };
 
-    let access_token = token_store.issue(3600);
+    let access_token = token_store.issue(grant, ACCESS_TOKEN_TTL_SECS);
 
     let token_type = if dpop_jkt.is_some() { "DPoP" } else { "Bearer" };
-
-    let c_nonce = hex::encode(hash_with(
-        HashAlgorithm::Sha256,
-        format!("nonce:{access_token}").as_bytes(),
-    ));
 
     Ok(HttpResponse::Ok().json(TokenResponse {
         access_token,
         token_type: token_type.to_string(),
-        expires_in: 3600,
+        expires_in: ACCESS_TOKEN_TTL_SECS,
         dpop_jkt,
-        c_nonce: Some(c_nonce),
-        c_nonce_expires_in: Some(86400),
     }))
 }
 
@@ -1377,7 +1154,7 @@ pub async fn credential_endpoint(
             401,
         )));
     };
-    if !token_store.is_live(token) {
+    if token_store.grant_for(token).is_none() {
         return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
             err_dto("invalid_token", "access token unknown or expired"),
             401,
@@ -1545,33 +1322,82 @@ pub async fn credential_endpoint(
 
 // ── Credential Offer Endpoint ────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CredentialOfferRequest {
-    #[serde(default)]
-    pub credential_configuration_ids: Vec<String>,
+    pub issuer_did: String,
+    pub issuer_public_key: String,
+    pub credential_configuration_id: String,
+    pub issued_at: u64,
+    pub signature: String,
 }
 
-/// Generate a credential offer (OpenID4VCI §4.1).
-/// Stores the offer by session ID and returns a by-reference URI
-/// compatible with Partisia wallet and EUDI wallets.
+const OFFER_FRESHNESS_SECS: u64 = 300;
+
+pub fn offer_message(issuer_did: &str, configuration_id: &str, issued_at: u64) -> String {
+    format!("oid4vci:offer:{issuer_did}:{configuration_id}:{issued_at}")
+}
+
 #[post("/credential_offer")]
 pub async fn credential_offer_endpoint(
+    state: web::Data<AppState>,
     body: web::Json<CredentialOfferRequest>,
     req: HttpRequest,
     offer_store: web::Data<CredentialOfferStore>,
 ) -> ApiResult<HttpResponse> {
+    if credential_configurations()
+        .get(&body.credential_configuration_id)
+        .is_none()
+    {
+        return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+            err_dto(
+                "invalid_request",
+                &format!(
+                    "credential_configuration_id '{}' is not advertised by this issuer",
+                    body.credential_configuration_id
+                ),
+            ),
+            400,
+        )));
+    }
+    if now_secs().abs_diff(body.issued_at) > OFFER_FRESHNESS_SECS {
+        return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
+            err_dto(
+                "invalid_request",
+                &format!(
+                    "issued_at {} is more than {OFFER_FRESHNESS_SECS} s from now",
+                    body.issued_at
+                ),
+            ),
+            400,
+        )));
+    }
+    let store = get_channel_store(&state, "default")?;
+    let message = offer_message(
+        &body.issuer_did,
+        &body.credential_configuration_id,
+        body.issued_at,
+    );
+    if !key_controls_identity(store.as_ref(), &body.issuer_did, &body.issuer_public_key)
+        || !is_signed_by(&body.issuer_public_key, &message, &body.signature)
+    {
+        return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
+            err_dto(
+                "invalid_issuer_signature",
+                &format!(
+                    "issuer_public_key does not control {} or signature does not verify over {message}",
+                    body.issuer_did
+                ),
+            ),
+            401,
+        )));
+    }
+
     let host = req
         .headers()
         .get("host")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost:8080");
     let base = format!("https://{host}");
-
-    let config_ids = if body.credential_configuration_ids.is_empty() {
-        vec!["eudi_pid_sd_jwt".to_string()]
-    } else {
-        body.credential_configuration_ids.clone()
-    };
 
     let session_id = uuid::Uuid::new_v4().to_string();
 
@@ -1582,15 +1408,19 @@ pub async fn credential_offer_endpoint(
 
     let offer = CredentialOffer {
         credential_issuer: base.clone(),
-        credential_configuration_ids: config_ids,
+        credential_configuration_ids: vec![body.credential_configuration_id.clone()],
         grants: serde_json::json!({
-            "urn:ietf:params:oauth:grant-type:pre-authorized_code": {
+            PRE_AUTHORIZED_CODE_GRANT: {
                 "pre-authorized_code": pre_auth_code,
             }
         }),
     };
 
-    offer_store.store(&session_id, offer.clone(), &pre_auth_code);
+    let grant = IssuanceGrant {
+        issuer_did: body.issuer_did.clone(),
+        configuration_id: body.credential_configuration_id.clone(),
+    };
+    offer_store.store(&session_id, offer.clone(), &pre_auth_code, grant);
 
     let offer_uri = format!(
         "openid-credential-offer://?credential_offer_uri={}",
@@ -1946,7 +1776,6 @@ mod tests {
                     .app_data($state)
                     .app_data($nonce)
                     .app_data(web::Data::new(CredentialOfferStore::new()))
-                    .app_data(web::Data::new(AuthorizationStore::new()))
                     .app_data(web::Data::new(AccessTokenStore::new()))
                     .service(issuer_metadata)
                     .service(oauth_as_metadata)
@@ -1967,7 +1796,6 @@ mod tests {
                     .app_data($sl)
                     .app_data($att)
                     .app_data(web::Data::new(CredentialOfferStore::new()))
-                    .app_data(web::Data::new(AuthorizationStore::new()))
                     .app_data(web::Data::new(AccessTokenStore::new()))
                     .service(issuer_metadata)
                     .service(oauth_as_metadata)
@@ -1982,11 +1810,33 @@ mod tests {
         };
     }
 
+    fn signed_offer_request(
+        issuer: &SoftwareSigningProvider,
+        configuration_id: &str,
+        issued_at: u64,
+    ) -> CredentialOfferRequest {
+        let issuer_public_key = hex::encode(issuer.public_key());
+        let issuer_did = crate::identity::did::did_from_pubkey_hex(&issuer_public_key);
+        let message = offer_message(&issuer_did, configuration_id, issued_at);
+        let signature = hex::encode(issuer.sign(message.as_bytes()).unwrap());
+        CredentialOfferRequest {
+            issuer_did,
+            issuer_public_key,
+            credential_configuration_id: configuration_id.to_string(),
+            issued_at,
+            signature,
+        }
+    }
+
     macro_rules! pre_authorized_code {
-        ($app:expr) => {{
+        ($app:expr) => {
+            pre_authorized_code!($app, "IdentityCredential_sd_jwt")
+        };
+        ($app:expr, $configuration_id:expr) => {{
+            let issuer = SoftwareSigningProvider::generate();
             let req = test::TestRequest::post()
                 .uri("/credential_offer")
-                .set_json(serde_json::json!({}))
+                .set_json(signed_offer_request(&issuer, $configuration_id, now_secs()))
                 .to_request();
             let body: serde_json::Value = test::call_and_read_body_json(&$app, req).await;
             body["credential_offer"]["grants"]
@@ -2042,8 +1892,10 @@ mod tests {
                 .len()
                 >= 2
         );
-        let grants = body["grant_types_supported"].as_array().unwrap();
-        assert!(grants.len() >= 2);
+        assert_eq!(
+            body["grant_types_supported"],
+            serde_json::json!([PRE_AUTHORIZED_CODE_GRANT])
+        );
         let pid_cfg = &body["credential_configurations_supported"]["eudi_pid_sd_jwt"];
         assert_eq!(pid_cfg["format"], "vc+sd-jwt");
     }
@@ -2060,7 +1912,11 @@ mod tests {
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert!(body["issuer"].as_str().unwrap().starts_with("https://"));
         assert!(body["token_endpoint"].as_str().is_some());
-        assert!(body["grant_types_supported"].as_array().unwrap().len() >= 2);
+        assert_eq!(
+            body["grant_types_supported"],
+            serde_json::json!([PRE_AUTHORIZED_CODE_GRANT])
+        );
+        assert!(body.get("authorization_endpoint").is_none());
     }
 
     fn make_token_form(code: &str) -> TokenRequest {
@@ -2069,9 +1925,6 @@ mod tests {
             pre_authorized_code: Some(code.to_string()),
             client_id: None,
             tx_code: None,
-            code: None,
-            code_verifier: None,
-            redirect_uri: None,
             wallet_instance_attestation: None,
             wallet_trust_evidence: None,
             authorization_details: None,
@@ -2137,10 +1990,7 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("goya_at_"));
-        assert!(
-            body.get("c_nonce").is_some(),
-            "c_nonce included for Draft 13 wallet backward compat"
-        );
+        assert!(body.get("c_nonce").is_none());
         assert_eq!(body["token_type"], "Bearer");
     }
 
@@ -2238,9 +2088,6 @@ mod tests {
                 pre_authorized_code: Some(code.clone()),
                 client_id: None,
                 tx_code: None,
-                code: None,
-                code_verifier: None,
-                redirect_uri: None,
                 wallet_instance_attestation: Some(wia),
                 wallet_trust_evidence: None,
                 authorization_details: None,
@@ -2263,9 +2110,6 @@ mod tests {
                 pre_authorized_code: Some(code.clone()),
                 client_id: None,
                 tx_code: None,
-                code: None,
-                code_verifier: None,
-                redirect_uri: None,
                 wallet_instance_attestation: Some(wia),
                 wallet_trust_evidence: None,
                 authorization_details: None,
@@ -2286,9 +2130,6 @@ mod tests {
                 pre_authorized_code: None,
                 client_id: None,
                 tx_code: None,
-                code: None,
-                code_verifier: None,
-                redirect_uri: None,
                 wallet_instance_attestation: None,
                 wallet_trust_evidence: None,
                 authorization_details: None,
@@ -2770,108 +2611,150 @@ mod tests {
         assert!(verify_wte(&wte, Some(&reg)).is_ok());
     }
 
-    // ── Authorization code + PKCE + Credential Offer tests ─────────
-
-    #[actix_web::test]
-    async fn e2e_token_authorization_code_requires_pkce() {
-        let state = make_state();
-        let app = oid4vci_app!(state);
-        let req = test::TestRequest::post()
-            .uri("/token")
-            .set_form(TokenRequest {
-                grant_type: "authorization_code".to_string(),
-                pre_authorized_code: None,
-                client_id: None,
-                tx_code: None,
-                code: Some("auth-code-1234567890".to_string()),
-                code_verifier: None,
-                redirect_uri: None,
-                wallet_instance_attestation: None,
-                wallet_trust_evidence: None,
-                authorization_details: None,
-            })
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 400);
+    macro_rules! offer_app {
+        ($offer_store:expr) => {
+            test::init_service(
+                App::new()
+                    .app_data(make_state())
+                    .app_data($offer_store)
+                    .service(credential_offer_endpoint)
+                    .service(credential_offer_get),
+            )
+            .await
+        };
     }
 
     #[actix_web::test]
-    async fn e2e_token_authorization_code_missing_code() {
-        let state = make_state();
-        let app = oid4vci_app!(state);
-        let req = test::TestRequest::post()
-            .uri("/token")
-            .set_form(TokenRequest {
-                grant_type: "authorization_code".to_string(),
-                pre_authorized_code: None,
-                client_id: None,
-                tx_code: None,
-                code: None,
-                code_verifier: None,
-                redirect_uri: None,
-                wallet_instance_attestation: None,
-                wallet_trust_evidence: None,
-                authorization_details: None,
-            })
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 400);
-    }
-
-    #[actix_web::test]
-    async fn pkce_s256_valid() {
-        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-        let hash = hash_with(HashAlgorithm::Sha256, verifier.as_bytes());
-        let challenge = base64url_encode(&hash);
-        assert!(verify_pkce(verifier, &challenge));
-    }
-
-    #[actix_web::test]
-    async fn pkce_s256_invalid() {
-        let hash = hash_with(HashAlgorithm::Sha256, b"correct-verifier");
-        let challenge = base64url_encode(&hash);
-        assert!(!verify_pkce("wrong-verifier", &challenge));
-    }
-
-    #[actix_web::test]
-    async fn e2e_credential_offer() {
-        let state = make_state();
+    async fn offer_signed_by_the_issuer_is_stored_with_its_grant() {
         let offer_store = web::Data::new(CredentialOfferStore::new());
-        let app = test::init_service(
-            App::new()
-                .app_data(state)
-                .app_data(offer_store.clone())
-                .service(credential_offer_endpoint)
-                .service(credential_offer_get),
-        )
-        .await;
+        let app = offer_app!(offer_store.clone());
+        let issuer = SoftwareSigningProvider::generate();
+        let offer_request = signed_offer_request(&issuer, "eudi_pid_sd_jwt", now_secs());
+        let expected_grant = IssuanceGrant {
+            issuer_did: offer_request.issuer_did.clone(),
+            configuration_id: "eudi_pid_sd_jwt".to_string(),
+        };
         let req = test::TestRequest::post()
             .uri("/credential_offer")
-            .set_json(serde_json::json!({
-                "credential_configuration_ids": ["IdentityCredential_sd_jwt"]
-            }))
+            .set_json(&offer_request)
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 201);
         let body: serde_json::Value = test::read_body_json(resp).await;
-        assert!(body["credential_offer"]["credential_issuer"]
-            .as_str()
-            .is_some());
+        assert_eq!(
+            body["credential_offer"]["credential_configuration_ids"],
+            serde_json::json!(["eudi_pid_sd_jwt"])
+        );
         let uri = body["credential_offer_uri"].as_str().unwrap();
         assert!(uri.starts_with("openid-credential-offer://"));
-        assert!(uri.contains("credential_offer_uri="));
         let session_id = body["session_id"].as_str().unwrap();
-        assert!(!session_id.is_empty());
-
         let get_req = test::TestRequest::get()
             .uri(&format!("/credential_offer/{session_id}"))
             .to_request();
-        let get_resp = test::call_service(&app, get_req).await;
-        assert_eq!(get_resp.status(), 200);
-        let get_body: serde_json::Value = test::read_body_json(get_resp).await;
+        let get_body: serde_json::Value = test::call_and_read_body_json(&app, get_req).await;
+        assert_eq!(get_body, body["credential_offer"]);
+
+        let code = body["credential_offer"]["grants"][PRE_AUTHORIZED_CODE_GRANT]
+            ["pre-authorized_code"]
+            .as_str()
+            .unwrap();
         assert_eq!(
-            get_body["credential_issuer"],
-            body["credential_offer"]["credential_issuer"]
+            offer_store.consume_pre_authorized_code(code),
+            Ok(expected_grant)
+        );
+    }
+
+    #[actix_web::test]
+    async fn offer_signed_by_another_key_is_refused() {
+        let app = offer_app!(web::Data::new(CredentialOfferStore::new()));
+        let issuer = SoftwareSigningProvider::generate();
+        let impostor = SoftwareSigningProvider::generate();
+        let mut offer_request = signed_offer_request(&issuer, "eudi_pid_sd_jwt", now_secs());
+        offer_request.signature =
+            signed_offer_request(&impostor, "eudi_pid_sd_jwt", now_secs()).signature;
+        let req = test::TestRequest::post()
+            .uri("/credential_offer")
+            .set_json(&offer_request)
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 401);
+    }
+
+    #[actix_web::test]
+    async fn offer_with_a_key_that_does_not_control_the_did_is_refused() {
+        let app = offer_app!(web::Data::new(CredentialOfferStore::new()));
+        let issuer = SoftwareSigningProvider::generate();
+        let impostor = SoftwareSigningProvider::generate();
+        let issued_at = now_secs();
+        let mut offer_request = signed_offer_request(&impostor, "eudi_pid_sd_jwt", issued_at);
+        offer_request.issuer_did =
+            crate::identity::did::did_from_pubkey_hex(&hex::encode(issuer.public_key()));
+        let message = offer_message(&offer_request.issuer_did, "eudi_pid_sd_jwt", issued_at);
+        offer_request.signature = hex::encode(impostor.sign(message.as_bytes()).unwrap());
+        let req = test::TestRequest::post()
+            .uri("/credential_offer")
+            .set_json(&offer_request)
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 401);
+    }
+
+    #[actix_web::test]
+    async fn offer_with_a_stale_issued_at_is_refused() {
+        let app = offer_app!(web::Data::new(CredentialOfferStore::new()));
+        let issuer = SoftwareSigningProvider::generate();
+        let stale = signed_offer_request(&issuer, "eudi_pid_sd_jwt", now_secs() - 301);
+        let req = test::TestRequest::post()
+            .uri("/credential_offer")
+            .set_json(&stale)
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn offer_for_an_unadvertised_configuration_is_refused() {
+        let app = offer_app!(web::Data::new(CredentialOfferStore::new()));
+        let issuer = SoftwareSigningProvider::generate();
+        let unknown = signed_offer_request(&issuer, "unknown_configuration", now_secs());
+        let req = test::TestRequest::post()
+            .uri("/credential_offer")
+            .set_json(&unknown)
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 400);
+    }
+
+    #[actix_web::test]
+    async fn token_carries_the_grant_of_its_offer() {
+        let token_store = web::Data::new(AccessTokenStore::new());
+        let app = test::init_service(
+            App::new()
+                .app_data(make_state())
+                .app_data(web::Data::new(CredentialOfferStore::new()))
+                .app_data(token_store.clone())
+                .service(credential_offer_endpoint)
+                .service(token_endpoint),
+        )
+        .await;
+        let issuer = SoftwareSigningProvider::generate();
+        let offer_request = signed_offer_request(&issuer, "eudi_pid_mdoc", now_secs());
+        let req = test::TestRequest::post()
+            .uri("/credential_offer")
+            .set_json(&offer_request)
+            .to_request();
+        let offer: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+        let code = offer["credential_offer"]["grants"][PRE_AUTHORIZED_CODE_GRANT]
+            ["pre-authorized_code"]
+            .as_str()
+            .unwrap();
+        let req = test::TestRequest::post()
+            .uri("/token")
+            .set_form(make_token_form(code))
+            .to_request();
+        let token: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+        assert_eq!(
+            token_store.grant_for(token["access_token"].as_str().unwrap()),
+            Some(IssuanceGrant {
+                issuer_did: offer_request.issuer_did,
+                configuration_id: "eudi_pid_mdoc".to_string(),
+            })
         );
     }
 
@@ -2901,7 +2784,6 @@ mod tests {
                 .app_data(nonce_store.clone())
                 .app_data(sl_store.clone())
                 .app_data(offer_store)
-                .app_data(web::Data::new(AuthorizationStore::new()))
                 .app_data(web::Data::new(AccessTokenStore::new()))
                 .service(issuer_metadata)
                 .service(token_endpoint)
@@ -2937,7 +2819,6 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let token_body: serde_json::Value = test::read_body_json(resp).await;
         let access_token = token_body["access_token"].as_str().unwrap();
-        assert!(token_body.get("c_nonce").is_some());
 
         // 3. Nonce
         let req = test::TestRequest::post().uri("/nonce").to_request();
@@ -3102,230 +2983,5 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
-    }
-
-    fn make_auth_store() -> web::Data<AuthorizationStore> {
-        web::Data::new(AuthorizationStore::new())
-    }
-
-    macro_rules! auth_app {
-        ($state:expr, $auth:expr) => {
-            test::init_service(
-                App::new()
-                    .app_data($state)
-                    .app_data(make_nonce_store())
-                    .app_data($auth)
-                    .app_data(web::Data::new(CredentialOfferStore::new()))
-                    .app_data(web::Data::new(AccessTokenStore::new()))
-                    .service(par_endpoint)
-                    .service(authorize_endpoint)
-                    .service(token_endpoint)
-                    .service(credential_endpoint),
-            )
-            .await
-        };
-    }
-
-    #[actix_web::test]
-    async fn e2e_par_creates_request_uri() {
-        let state = make_state();
-        let auth = make_auth_store();
-        let app = auth_app!(state, auth);
-
-        let req = test::TestRequest::post()
-            .uri("/as/par")
-            .set_form(ParRequest {
-                client_id: "wallet.example.com".into(),
-                response_type: "code".into(),
-                code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".into(),
-                code_challenge_method: Some("S256".into()),
-                redirect_uri: "https://wallet.example.com/cb".into(),
-                authorization_details: None,
-                scope: Some("eudi_pid_sd_jwt".into()),
-            })
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 201);
-        let body: serde_json::Value = test::read_body_json(resp).await;
-        let uri = body["request_uri"].as_str().unwrap();
-        assert!(uri.starts_with("urn:ietf:params:oauth:request_uri:"));
-        assert_eq!(body["expires_in"], 600);
-    }
-
-    #[actix_web::test]
-    async fn e2e_par_rejects_non_s256() {
-        let state = make_state();
-        let auth = make_auth_store();
-        let app = auth_app!(state, auth);
-
-        let req = test::TestRequest::post()
-            .uri("/as/par")
-            .set_form(ParRequest {
-                client_id: "wallet.example.com".into(),
-                response_type: "code".into(),
-                code_challenge: "test".into(),
-                code_challenge_method: Some("plain".into()),
-                redirect_uri: "https://wallet.example.com/cb".into(),
-                authorization_details: None,
-                scope: None,
-            })
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 400);
-    }
-
-    #[actix_web::test]
-    async fn e2e_authorization_code_flow_with_pkce() {
-        let state = make_state();
-        let auth = make_auth_store();
-        let app = auth_app!(state, auth.clone());
-
-        let code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-        let challenge =
-            base64url_encode(&hash_with(HashAlgorithm::Sha256, code_verifier.as_bytes()));
-
-        let req = test::TestRequest::post()
-            .uri("/as/par")
-            .set_form(ParRequest {
-                client_id: "wallet.example.com".into(),
-                response_type: "code".into(),
-                code_challenge: challenge.clone(),
-                code_challenge_method: Some("S256".into()),
-                redirect_uri: "https://wallet.example.com/cb".into(),
-                authorization_details: None,
-                scope: Some("eudi_pid_sd_jwt".into()),
-            })
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 201);
-        let par_body: serde_json::Value = test::read_body_json(resp).await;
-        let request_uri = par_body["request_uri"].as_str().unwrap();
-
-        let req = test::TestRequest::get()
-            .uri(&format!(
-                "/authorize?request_uri={}",
-                urlencoding::encode(request_uri)
-            ))
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 302);
-        let location = resp
-            .headers()
-            .get("Location")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
-        assert!(location.starts_with("https://wallet.example.com/cb?code="));
-        let auth_code = location
-            .split("code=")
-            .nth(1)
-            .unwrap()
-            .split('&')
-            .next()
-            .unwrap();
-
-        let req = test::TestRequest::post()
-            .uri("/token")
-            .set_form(TokenRequest {
-                grant_type: "authorization_code".into(),
-                pre_authorized_code: None,
-                client_id: Some("wallet.example.com".into()),
-                tx_code: None,
-                code: Some(auth_code.to_string()),
-                code_verifier: Some(code_verifier.to_string()),
-                redirect_uri: Some("https://wallet.example.com/cb".into()),
-                wallet_instance_attestation: None,
-                wallet_trust_evidence: None,
-                authorization_details: None,
-            })
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 200);
-        let token_body: serde_json::Value = test::read_body_json(resp).await;
-        assert!(token_body["access_token"]
-            .as_str()
-            .unwrap()
-            .starts_with("goya_at_"));
-    }
-
-    #[actix_web::test]
-    async fn e2e_authorization_code_rejects_wrong_verifier() {
-        let state = make_state();
-        let auth = make_auth_store();
-        let app = auth_app!(state, auth.clone());
-
-        let code_verifier = "correct-verifier-value-with-enough-entropy";
-        let challenge =
-            base64url_encode(&hash_with(HashAlgorithm::Sha256, code_verifier.as_bytes()));
-
-        let req = test::TestRequest::post()
-            .uri("/as/par")
-            .set_form(ParRequest {
-                client_id: "w.example.com".into(),
-                response_type: "code".into(),
-                code_challenge: challenge,
-                code_challenge_method: Some("S256".into()),
-                redirect_uri: "https://w.example.com/cb".into(),
-                authorization_details: None,
-                scope: None,
-            })
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        let par_body: serde_json::Value = test::read_body_json(resp).await;
-        let request_uri = par_body["request_uri"].as_str().unwrap();
-
-        let req = test::TestRequest::get()
-            .uri(&format!(
-                "/authorize?request_uri={}",
-                urlencoding::encode(request_uri)
-            ))
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        let auth_body: serde_json::Value = test::read_body_json(resp).await;
-        let auth_code = auth_body["code"].as_str().unwrap();
-
-        let req = test::TestRequest::post()
-            .uri("/token")
-            .set_form(TokenRequest {
-                grant_type: "authorization_code".into(),
-                pre_authorized_code: None,
-                client_id: Some("w.example.com".into()),
-                tx_code: None,
-                code: Some(auth_code.to_string()),
-                code_verifier: Some("wrong-verifier-not-matching".to_string()),
-                redirect_uri: None,
-                wallet_instance_attestation: None,
-                wallet_trust_evidence: None,
-                authorization_details: None,
-            })
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 400);
-    }
-
-    #[actix_web::test]
-    async fn e2e_authorization_code_rejects_missing_verifier() {
-        let state = make_state();
-        let auth = make_auth_store();
-        let app = auth_app!(state, auth);
-
-        let req = test::TestRequest::post()
-            .uri("/token")
-            .set_form(TokenRequest {
-                grant_type: "authorization_code".into(),
-                pre_authorized_code: None,
-                client_id: None,
-                tx_code: None,
-                code: Some("some-authorization-code-value".into()),
-                code_verifier: None,
-                redirect_uri: None,
-                wallet_instance_attestation: None,
-                wallet_trust_evidence: None,
-                authorization_details: None,
-            })
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 400);
     }
 }

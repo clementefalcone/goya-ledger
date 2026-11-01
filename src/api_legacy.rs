@@ -25,9 +25,7 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
         .service(oid4vci::nonce_endpoint)
         .service(oid4vci::credential_offer_endpoint)
         .service(oid4vci::credential_offer_get)
-        .service(oid4vci::status_list_endpoint)
-        .service(oid4vci::par_endpoint)
-        .service(oid4vci::authorize_endpoint);
+        .service(oid4vci::status_list_endpoint);
 
     // OID4VP at /api/v1 (already in scope above, but we also expose
     // the submit_response at root for direct_post compatibility)

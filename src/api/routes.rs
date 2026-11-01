@@ -308,8 +308,6 @@ impl ApiRoutes {
         cfg.service(oid4vci::issuer_metadata)
             .service(oid4vci::oauth_as_metadata)
             .service(oid4vci::jwt_vc_issuer_metadata)
-            .service(oid4vci::par_endpoint)
-            .service(oid4vci::authorize_endpoint)
             .service(oid4vci::token_endpoint)
             .service(oid4vci::credential_endpoint)
             .service(oid4vci::nonce_endpoint)

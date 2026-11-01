@@ -1253,7 +1253,6 @@ async fn async_main_inner() -> std::io::Result<()> {
     let credential_offer_store =
         web::Data::new(crate::api::handlers::oid4vci::CredentialOfferStore::new());
     let vp_request_store = web::Data::new(crate::api::handlers::oid4vp::VpRequestStore::new());
-    let auth_store = web::Data::new(crate::api::handlers::oid4vci::AuthorizationStore::new());
     let access_token_store = web::Data::new(crate::api::handlers::oid4vci::AccessTokenStore::new());
 
     #[cfg(feature = "evm")]
@@ -1292,7 +1291,6 @@ async fn async_main_inner() -> std::io::Result<()> {
             .app_data(status_list_store.clone())
             .app_data(credential_offer_store.clone())
             .app_data(vp_request_store.clone())
-            .app_data(auth_store.clone())
             .app_data(access_token_store.clone());
         #[cfg(feature = "evm")]
         let app = app.app_data(evm_state.clone());
