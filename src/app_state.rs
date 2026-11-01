@@ -23,7 +23,6 @@ use crate::msp::CrlStore;
 use crate::network::Node;
 use crate::ordering::OrderingBackend;
 use crate::pin::store::PinStore;
-use crate::privacy::PrivateClaimsStore;
 use crate::private_data::{CollectionRegistry, PrivateDataStore};
 use crate::smart_contracts::ContractManager;
 use crate::staking::StakingManager;
@@ -126,7 +125,6 @@ pub struct AppState {
     pub lexchain_store: crate::lexchain::store::LexChainStore,
     pub economics_state: Arc<Mutex<EconomicsState>>,
     pub deposit_ledger: Arc<DepositLedger>,
-    pub private_claims: Arc<PrivateClaimsStore>,
 }
 
 impl AppState {
@@ -203,7 +201,6 @@ impl AppState {
             lexchain_store: crate::lexchain::store::LexChainStore::new(),
             economics_state: Arc::new(Mutex::new(EconomicsState::default())),
             deposit_ledger: Arc::new(DepositLedger::new()),
-            private_claims: Arc::new(PrivateClaimsStore::new()),
         }
     }
 }

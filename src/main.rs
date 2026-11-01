@@ -47,7 +47,6 @@ mod pki_ceremony;
 mod pki_chain;
 mod pki_lifecycle;
 mod pki_policy;
-mod privacy;
 mod private_data;
 mod registry;
 mod regulatory;
@@ -992,7 +991,6 @@ async fn async_main_inner() -> std::io::Result<()> {
         deposit_ledger: std::sync::Arc::new(
             crate::tokenomics::storage_deposit::DepositLedger::new(),
         ),
-        private_claims: std::sync::Arc::new(crate::privacy::PrivateClaimsStore::new()),
     };
     log::info!("LexChain engine initialized");
 

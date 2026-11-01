@@ -9,7 +9,7 @@
 //! Each test exercises a complete user flow end-to-end via the HTTP API.
 
 use actix_web::{test, web, App};
-use rust_bc::api::handlers::{credentials, governance, notarize};
+use rust_bc::api::handlers::{governance, notarize};
 use rust_bc::app_state::AppState;
 use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider, SoftwareSigningProvider};
 use std::sync::Arc;
@@ -322,106 +322,6 @@ async fn uc_governance_proposal_lifecycle() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert!(body["data"]["total_voted_power"].as_u64().unwrap() > 0);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 4. CREDENTIALS — Issue, verify, revoke
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[actix_web::test]
-async fn uc_credential_lifecycle() {
-    let state = app_state();
-    let app = test::init_service(
-        App::new().app_data(state.clone()).service(
-            web::scope("/api/v1")
-                .service(credentials::issue_credential)
-                .service(credentials::get_credential)
-                .service(credentials::verify_credential)
-                .service(credentials::revoke_credential),
-        ),
-    )
-    .await;
-
-    // Pre-requisite: register issuer identity
-    let (issuer_did, issuer_pk, _) = ed25519_identity();
-    {
-        let store_map = state.store.read().unwrap();
-        let store = store_map.get("default").unwrap();
-        store
-            .write_identity(&rust_bc::storage::traits::IdentityRecord {
-                did: issuer_did.clone(),
-                public_key: issuer_pk.clone(),
-                created_at: 1700000000,
-                updated_at: 1700000000,
-                status: "active".to_string(),
-                migrated_from: None,
-                signature_algorithm: None,
-                civil_anchor: None,
-                recovery_commitment: None,
-                vault_entries: Vec::new(),
-            })
-            .unwrap();
-    }
-
-    // Step 1: Issue credential
-    let req = test::TestRequest::post()
-        .uri("/api/v1/credentials/issue")
-        .set_json(serde_json::json!({
-            "issuer_did": issuer_did,
-            "subject_did": "did:goya:estudiante_uchile_42",
-            "claims": {
-                "degree": "Ingenieria Civil Informatica",
-                "university": "Universidad de Chile",
-                "graduation_year": 2025,
-            },
-        }))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 201, "credential should be issued");
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    let cred_id = body["data"]["credential_id"].as_str().unwrap().to_string();
-
-    // Step 2: Get credential
-    let req = test::TestRequest::get()
-        .uri(&format!("/api/v1/credentials/{cred_id}"))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["data"]["issuer_did"], issuer_did);
-
-    // Step 3: Verify credential — should be valid
-    let req = test::TestRequest::post()
-        .uri(&format!("/api/v1/credentials/{cred_id}/verify"))
-        .set_json(serde_json::json!({}))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["data"]["valid"], true);
-
-    // Step 4: Revoke
-    let req = test::TestRequest::post()
-        .uri(&format!("/api/v1/credentials/{cred_id}/revoke"))
-        .set_json(serde_json::json!({"reason": "degree rescinded"}))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["data"]["revoked"], true);
-
-    // Step 5: Verify again — should be invalid
-    let req = test::TestRequest::post()
-        .uri(&format!("/api/v1/credentials/{cred_id}/verify"))
-        .set_json(serde_json::json!({}))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(
-        body["data"]["valid"], false,
-        "revoked credential must be invalid"
-    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

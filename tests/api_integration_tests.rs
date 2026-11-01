@@ -1,8 +1,8 @@
 use chrono::Utc;
 use rust_bc::api::errors::{ApiError, ApiResponse, ErrorDto};
 use rust_bc::api::models::{
-    BlockResponse, BlockchainHealthResponse, ConsensusStateResponse, CredentialResponse,
-    HealthResponse, IdentityResponse, ProofResponse, VersionResponse,
+    BlockResponse, BlockchainHealthResponse, ConsensusStateResponse, HealthResponse,
+    IdentityResponse, VersionResponse,
 };
 
 #[test]
@@ -57,27 +57,6 @@ fn test_block_response_serialization() {
     let deserialized: BlockResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.hash, "hash_abc123");
     assert_eq!(deserialized.transaction_count, 5);
-}
-
-#[test]
-fn test_credential_response_serialization() {
-    let resp = CredentialResponse {
-        id: "cred_123".to_string(),
-        issuer_did: "did:bc:issuer".to_string(),
-        subject_did: "did:bc:subject".to_string(),
-        claims: serde_json::json!({"name": "John Doe"}),
-        issued_at: Utc::now(),
-        expires_at: None,
-        proof: ProofResponse {
-            verification_method: "did:bc:issuer#key-0".to_string(),
-            signature_value: "signature_value".to_string(),
-            created: Utc::now(),
-        },
-    };
-
-    let json = serde_json::to_string(&resp).unwrap();
-    let deserialized: CredentialResponse = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.id, "cred_123");
 }
 
 #[test]

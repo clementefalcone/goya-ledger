@@ -287,12 +287,6 @@
     "/store/identities/{did}": {
       "get": { "tags": ["Identity"], "summary": "Read identity record", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Identity record" } } }
     },
-    "/credentials/issue": {
-      "post": { "tags": ["Credentials"], "summary": "Issue verifiable credential", "responses": { "200": { "description": "Credential issued" } } }
-    },
-    "/credentials/{id}/verify": {
-      "post": { "tags": ["Credentials"], "summary": "Verify credential", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Verification result" } } }
-    },
     "/store/credentials": {
       "post": { "tags": ["Credentials"], "summary": "Persist credential", "responses": { "201": { "description": "Credential stored" } } }
     },
