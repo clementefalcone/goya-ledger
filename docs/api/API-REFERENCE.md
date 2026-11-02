@@ -349,6 +349,36 @@ List credentials by subject DID.
 
 ---
 
+## OpenID4VCI (credential delivery)
+
+The node does not sign credentials. It brokers delivery from the issuer that signed the offer to the wallet, using the pre-authorized code grant and the deferred flow. Endpoints are served under `/api/v1` and at the root.
+
+### POST /credential_offer
+
+Body: `issuer_did`, `issuer_public_key`, `credential_configuration_id`, `issued_at`, `signature`. `signature` is the issuer's signature over `oid4vci:offer:{issuer_did}:{credential_configuration_id}:{issued_at}`; the key must control `issuer_did`. Unknown configuration or `issued_at` more than 300 s from now returns 400; a bad key or signature returns 401. Returns the offer (one configuration id, pre-authorized code valid 600 s), `credential_offer_uri` and `session_id`.
+
+### GET /credential_offer/{session_id}
+
+Offer by reference.
+
+### POST /token
+
+Form: `grant_type=urn:ietf:params:oauth:grant-type:pre-authorized_code`, `pre-authorized_code`. Optional DPoP header, `wallet_instance_attestation`, `wallet_trust_evidence`. The access token is bound to the offer's issuer and configuration. No `c_nonce` is returned.
+
+### POST /nonce
+
+Returns a single-use `c_nonce` (300 s).
+
+### POST /credential
+
+Bearer or DPoP token. The requested `credential_configuration_id` (or legacy `format` + `vct`/`doctype`) must be the offered one, else 400 `invalid_credential_request`. Requires a JWT proof (`proofs.jwt[0]` or `proof.jwt`) whose header carries the holder `jwk`, signed by that key over a `c_nonce` from `/nonce`; otherwise 400 `invalid_proof`. Returns 202 `{transaction_id, interval}`.
+
+### POST /deferred_credential
+
+Bearer or DPoP token of the same transaction. Body: `transaction_id`. Returns 400 `{"error":"issuance_pending","interval":5}` until the issuer delivers, then 200 `{"credentials":[{"credential":...}]}` once. Unknown or already retrieved transactions return 400 `invalid_transaction_id`.
+
+---
+
 ## Events (WebSocket)
 
 ### GET /events/blocks?from_height=N

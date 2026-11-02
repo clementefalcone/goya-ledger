@@ -1,4 +1,3 @@
-pub mod attestation;
 pub mod civil_anchor;
 pub mod credential_ops;
 pub mod did;
@@ -17,6 +16,5 @@ pub mod reader_login;
 pub mod recovery_commitment;
 pub mod sd_jwt;
 pub mod signing;
-pub mod status_list;
 pub mod vault_entries;
 pub mod zkp;

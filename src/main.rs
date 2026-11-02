@@ -916,14 +916,6 @@ async fn async_main_inner() -> std::io::Result<()> {
                 .with_economics(economics_state.clone()),
         )),
         signing_provider: Some(signing_provider.clone()),
-        credential_issuer_key: {
-            let key_dir = std::env::var("STORAGE_PATH").unwrap_or_else(|_| "/app/data".into());
-            let key_path = std::path::Path::new(&key_dir).join("credential_issuer_key_p256.bin");
-            Arc::new(
-                crate::identity::signing::EcdsaP256SigningProvider::load_or_generate(&key_path)
-                    .unwrap_or_else(|e| panic!("FATAL: credential issuer key unavailable: {e}")),
-            )
-        },
         tx_pool: Arc::new(std::sync::Mutex::new(
             transaction::mempool::TransactionPool::new(),
         )),
@@ -1248,12 +1240,12 @@ async fn async_main_inner() -> std::io::Result<()> {
         .unwrap_or_else(|| Arc::new(crate::audit::MemoryAuditStore::new()));
 
     let nonce_store = web::Data::new(crate::api::handlers::oid4vci::NonceStore::new());
-    let status_list_store = web::Data::new(crate::api::handlers::oid4vci::StatusListStore::new());
-    status_list_store.set_signing_provider(app_state.credential_issuer_key.clone());
     let credential_offer_store =
         web::Data::new(crate::api::handlers::oid4vci::CredentialOfferStore::new());
     let vp_request_store = web::Data::new(crate::api::handlers::oid4vp::VpRequestStore::new());
     let access_token_store = web::Data::new(crate::api::handlers::oid4vci::AccessTokenStore::new());
+    let pending_issuance_store =
+        web::Data::new(crate::api::handlers::oid4vci::PendingIssuanceStore::new());
 
     #[cfg(feature = "evm")]
     let evm_state = web::Data::new(crate::api::handlers::evm::EvmState::new());
@@ -1288,10 +1280,10 @@ async fn async_main_inner() -> std::io::Result<()> {
             .wrap(crate::api::middleware::InputValidationMiddleware::default())
             .app_data(web::Data::new(app_state.clone()))
             .app_data(nonce_store.clone())
-            .app_data(status_list_store.clone())
             .app_data(credential_offer_store.clone())
             .app_data(vp_request_store.clone())
-            .app_data(access_token_store.clone());
+            .app_data(access_token_store.clone())
+            .app_data(pending_issuance_store.clone());
         #[cfg(feature = "evm")]
         let app = app.app_data(evm_state.clone());
         app.app_data(json_config.clone())

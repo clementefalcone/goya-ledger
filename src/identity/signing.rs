@@ -281,45 +281,6 @@ impl EcdsaP256SigningProvider {
             signing_key: p256::ecdsa::SigningKey::random(&mut OsRng),
         }
     }
-
-    pub fn from_bytes(secret_key_bytes: &[u8]) -> Result<Self, SigningError> {
-        if secret_key_bytes.len() != 32 {
-            return Err(SigningError::KeyNotAvailable(format!(
-                "invalid P-256 secret key: expected 32 bytes, got {}",
-                secret_key_bytes.len()
-            )));
-        }
-        let sk = p256::ecdsa::SigningKey::from_bytes(secret_key_bytes.into())
-            .map_err(|e| SigningError::KeyNotAvailable(format!("invalid P-256 secret key: {e}")))?;
-        Ok(Self { signing_key: sk })
-    }
-
-    pub fn load_or_generate(path: &std::path::Path) -> Result<Self, SigningError> {
-        if path.exists() {
-            let secret_key_bytes = std::fs::read(path).map_err(|e| {
-                SigningError::KeyNotAvailable(format!("read {}: {e}", path.display()))
-            })?;
-            return Self::from_bytes(&secret_key_bytes);
-        }
-        let provider = Self::generate();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                SigningError::KeyNotAvailable(format!("create {}: {e}", parent.display()))
-            })?;
-        }
-        write_owner_only(path, &provider.signing_key.to_bytes())
-            .map_err(|e| SigningError::KeyNotAvailable(format!("write {}: {e}", path.display())))?;
-        Ok(provider)
-    }
-}
-
-fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)?.write_all(bytes)
 }
 
 impl SigningProvider for EcdsaP256SigningProvider {
@@ -762,41 +723,6 @@ mod tests {
         let provider: Box<dyn SigningProvider> = Box::new(EcdsaP256SigningProvider::generate());
         let sig = provider.sign(b"es256 data").unwrap();
         assert!(provider.verify(b"es256 data", &sig).unwrap());
-    }
-
-    #[test]
-    fn es256_from_bytes_roundtrip() {
-        let provider = EcdsaP256SigningProvider::generate();
-        let sk_bytes = provider.signing_key.to_bytes();
-        let restored = EcdsaP256SigningProvider::from_bytes(&sk_bytes).unwrap();
-        let sig = restored.sign(b"roundtrip").unwrap();
-        assert!(restored.verify(b"roundtrip", &sig).unwrap());
-        assert_eq!(provider.public_key(), restored.public_key());
-    }
-
-    #[test]
-    fn es256_load_or_generate_persists_one_key() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("issuer.key");
-        let created = EcdsaP256SigningProvider::load_or_generate(&path).unwrap();
-        let reloaded = EcdsaP256SigningProvider::load_or_generate(&path).unwrap();
-        assert_eq!(created.public_key(), reloaded.public_key());
-    }
-
-    #[test]
-    fn es256_load_or_generate_is_not_derived_from_a_public_constant() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let first = EcdsaP256SigningProvider::load_or_generate(&dir.path().join("a.key")).unwrap();
-        let second = EcdsaP256SigningProvider::load_or_generate(&dir.path().join("b.key")).unwrap();
-        assert_ne!(first.public_key(), second.public_key());
-    }
-
-    #[test]
-    fn es256_load_or_generate_rejects_a_corrupt_key_file() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("issuer.key");
-        std::fs::write(&path, b"short").unwrap();
-        assert!(EcdsaP256SigningProvider::load_or_generate(&path).is_err());
     }
 
     #[test]

@@ -19,13 +19,12 @@ pub fn config_routes(cfg: &mut web::ServiceConfig) {
     // OID4VCI endpoints at root (EUDI wallet standard paths)
     cfg.service(oid4vci::issuer_metadata)
         .service(oid4vci::oauth_as_metadata)
-        .service(oid4vci::jwt_vc_issuer_metadata)
         .service(oid4vci::token_endpoint)
         .service(oid4vci::credential_endpoint)
+        .service(oid4vci::deferred_credential_endpoint)
         .service(oid4vci::nonce_endpoint)
         .service(oid4vci::credential_offer_endpoint)
-        .service(oid4vci::credential_offer_get)
-        .service(oid4vci::status_list_endpoint);
+        .service(oid4vci::credential_offer_get);
 
     // OID4VP at /api/v1 (already in scope above, but we also expose
     // the submit_response at root for direct_post compatibility)

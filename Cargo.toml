@@ -64,7 +64,6 @@ zeroize = { version = "1.7", features = ["derive"] }
 rsa = "0.9"
 ciborium = "0.2"
 p256 = { version = "0.13", features = ["ecdsa"] }
-flate2 = "1.0"
 lopdf = "0.34"
 rustls-post-quantum = "0.2"
 

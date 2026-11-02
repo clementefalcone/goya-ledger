@@ -98,7 +98,6 @@ pub struct AppState {
     pub mining_service: Option<Arc<MiningService>>,
     /// Node signing provider (ML-DSA-65 by default).
     pub signing_provider: Option<Arc<dyn crate::identity::signing::SigningProvider>>,
-    pub credential_issuer_key: Arc<crate::identity::signing::EcdsaP256SigningProvider>,
     /// New transaction pool backed by storage::Transaction.
     pub tx_pool: Arc<Mutex<crate::transaction::mempool::TransactionPool>>,
     /// HMAC secret for vault recovery blind indexing (NIST SP 800-185).
@@ -182,9 +181,6 @@ impl AppState {
             )),
             mining_service: None,
             signing_provider: None,
-            credential_issuer_key: Arc::new(
-                crate::identity::signing::EcdsaP256SigningProvider::generate(),
-            ),
             tx_pool: Arc::new(Mutex::new(
                 crate::transaction::mempool::TransactionPool::new(),
             )),

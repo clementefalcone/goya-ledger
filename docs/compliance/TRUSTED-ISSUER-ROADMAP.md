@@ -54,10 +54,11 @@ Costs:
 - [x] SD-JWT VC format (vc+sd-jwt, ES256)
 - [x] mdoc format (mso_mdoc, ISO 18013-5)
 - [x] Nonce endpoint (OID4VCI 1.0 Final §8)
+- [x] Deferred credential endpoint; credentials are signed by the offering issuer, not the node
+- [ ] Issuer key registration and delivery endpoint
+- [ ] Issuer-hosted status lists
 - [x] Pre-authorized code grant only; each offer is signed by the issuer DID (authorization code, PAR and PKCE removed)
 - [x] OID4VP with DCQL (OID4VP 1.0 Final)
-- [x] Status list endpoint
-- [x] JWKS with matching kid
 - [x] Offer-by-reference (GET /credential_offer)
 - [x] Real wallet interop (HopaeEUDIWallet iOS)
 - [ ] Access certificate from EU Trusted List CA

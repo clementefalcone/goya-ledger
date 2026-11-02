@@ -299,6 +299,15 @@
     "/store/credentials/by-subject/{subject_did}": {
       "get": { "tags": ["Credentials"], "summary": "List credentials by subject", "parameters": [{ "name": "subject_did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Credential list" } } }
     },
+    "/credential_offer": {
+      "post": { "tags": ["Credentials"], "summary": "OID4VCI offer signed by the issuer DID over oid4vci:offer:{issuer_did}:{credential_configuration_id}:{issued_at}", "responses": { "201": { "description": "Offer with pre-authorized code for one configuration" }, "400": { "description": "Unknown configuration or issued_at more than 300 s from now" }, "401": { "description": "Key does not control issuer_did or signature does not verify" } } }
+    },
+    "/credential": {
+      "post": { "tags": ["Credentials"], "summary": "OID4VCI credential request; the node does not sign, it opens a deferred transaction for the offering issuer", "responses": { "202": { "description": "transaction_id and interval" }, "400": { "description": "invalid_credential_request or invalid_proof" }, "401": { "description": "Unknown or expired access token" } } }
+    },
+    "/deferred_credential": {
+      "post": { "tags": ["Credentials"], "summary": "OID4VCI deferred credential retrieval by transaction_id", "responses": { "200": { "description": "Credential delivered by the issuer, returned once" }, "400": { "description": "issuance_pending or invalid_transaction_id" }, "401": { "description": "Unknown or expired access token" } } }
+    },
     "/events/blocks": {
       "get": { "tags": ["Events"], "summary": "Block event stream (WebSocket or long-poll)", "parameters": [{ "name": "from_height", "in": "query", "schema": { "type": "integer" } }], "responses": { "200": { "description": "Block events" } } }
     },

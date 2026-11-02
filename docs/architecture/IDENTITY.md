@@ -14,8 +14,6 @@ src/identity/
 ├── hsm.rs            PKCS#11 HSM provider (feature-gated)
 ├── sd_jwt.rs         SD-JWT VC (RFC 9901 + key binding)
 ├── mdoc.rs           ISO 18013-5 mDL/PID credentials
-├── status_list.rs    IETF Token Status List (revocation)
-├── attestation.rs    EUDI ARF v3.0 attestation types
 ├── ra.rs             Registration Authority (multi-jurisdiction)
 ├── pqc_policy.rs     PQC enforcement + tag forgery prevention
 ├── zkp.rs            Commitment proofs (not ZKP — documented)
@@ -93,14 +91,6 @@ Behind `hsm` feature flag. `HsmSigningProvider` wraps PKCS#11:
 - COSE_Sign1 issuer authentication
 - Device authentication via `DeviceAuth` + `SessionTranscript`
 - Selective disclosure by namespace/element
-
-### Revocation
-
-IETF Token Status List (draft-ietf-oauth-status-list):
-- 2-bit per entry: Valid (0x00), Invalid (0x01), Suspended (0x02)
-- Random index allocation (prevents correlation)
-- JWT-signed status list with ZLIB compression
-- SHA-256 anchor hash for DLT anchoring
 
 ## Authentication
 
@@ -183,14 +173,6 @@ Multi-jurisdiction identity proofing in `ra.rs`:
 
 External verification via `IdentityVerificationProvider` trait. Smart-ID integration for Estonian e-ID.
 
-## EUDI Compliance
-
-`attestation.rs` implements ARF v3.0:
-- Attestation types: PID, EAA, QEAA, PuB-EAA
-- Issuer roles: PidProvider, TSP, QTSP, PublicBody
-- PID prerequisite enforcement (CIR 2024/2977)
-- Fail-closed 6-step authorization check
-
 ## Storage
 
 `IdentityRecord` in `storage/traits.rs`:
@@ -229,12 +211,12 @@ Light client: `LocalIdentityStore` persists identities as JSON in `~/.goya/ident
 | GET | /store/credentials/{id} | Fetch credential |
 | GET | /credentials/{id}/vc | W3C VC export |
 
-OpenID4VCI and OpenID4VP endpoints in `oid4vci.rs` and `oid4vp.rs`.
+OpenID4VCI and OpenID4VP endpoints in `oid4vci.rs` and `oid4vp.rs`. The node never signs credentials: an OID4VCI offer must be signed by the issuer DID, the access token is bound to that issuer and configuration, and `/credential` answers with a deferred `transaction_id` that `/deferred_credential` resolves once the issuer delivers the credential. There is no node issuer key, JWKS or status list.
 
 ## Stats
 
 - 14 source files, ~7000 lines
 - 285 unit tests in identity module
 - 5 cryptographic algorithms with FIPS KAT
-- 3 credential formats (SD-JWT VC, mdoc, status list)
+- 2 credential formats (SD-JWT VC, mdoc)
 - 3 jurisdictions (Chile, UAE, EU)
