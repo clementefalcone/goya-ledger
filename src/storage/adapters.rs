@@ -21,7 +21,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::errors::{StorageError, StorageResult};
-use super::traits::{Block, BlockStore, Credential, IdentityRecord, Transaction};
+use super::traits::{
+    Block, BlockStore, Credential, IdentityRecord, IssuerCredentialKey, Transaction,
+};
 use super::world_state::{VersionedValue, WorldState};
 use crate::chaincode::{ChaincodeError, ChaincodePackageStore};
 use crate::endorsement::org::Organization;
@@ -90,6 +92,7 @@ const CF_NOTARIZATIONS: &str = "notarizations";
 const CF_OWNERSHIP_TRANSFERS: &str = "ownership_transfers";
 const CF_LEXCONTRACTS: &str = "lexcontracts";
 const CF_CIVIL_ANCHORS: &str = "civil_anchors";
+const CF_ISSUER_CREDENTIAL_KEYS: &str = "issuer_credential_keys";
 
 const META_LATEST_HEIGHT: &[u8] = b"latest_height";
 
@@ -134,6 +137,7 @@ const ALL_CFS: &[&str] = &[
     CF_OWNERSHIP_TRANSFERS,
     CF_LEXCONTRACTS,
     CF_CIVIL_ANCHORS,
+    CF_ISSUER_CREDENTIAL_KEYS,
 ];
 
 /// RocksDB-backed block store using Column Families for data isolation
@@ -233,6 +237,12 @@ impl RocksDbBlockStore {
         self.db
             .cf_handle(CF_CIVIL_ANCHORS)
             .ok_or_else(|| StorageError::ColumnFamilyNotFound(CF_CIVIL_ANCHORS.to_string()))
+    }
+
+    fn cf_issuer_credential_keys(&self) -> StorageResult<Arc<rocksdb::BoundColumnFamily<'_>>> {
+        self.db.cf_handle(CF_ISSUER_CREDENTIAL_KEYS).ok_or_else(|| {
+            StorageError::ColumnFamilyNotFound(CF_ISSUER_CREDENTIAL_KEYS.to_string())
+        })
     }
 
     fn cf_credentials(&self) -> StorageResult<Arc<rocksdb::BoundColumnFamily<'_>>> {
@@ -603,6 +613,32 @@ impl BlockStore for RocksDbBlockStore {
             Some(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|e| StorageError::DeserializationError(e.to_string())),
             None => Err(StorageError::CredentialNotFound(cred_id.to_string())),
+        }
+    }
+
+    fn write_issuer_credential_key(&self, registration: &IssuerCredentialKey) -> StorageResult<()> {
+        let value = serde_json::to_vec(registration)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        self.db
+            .put_cf(
+                &self.cf_issuer_credential_keys()?,
+                registration.did.as_bytes(),
+                value,
+            )
+            .map_err(|e| StorageError::RocksDbError(e.to_string()))
+    }
+
+    fn read_issuer_credential_key(&self, did: &str) -> StorageResult<IssuerCredentialKey> {
+        match self
+            .db
+            .get_cf(&self.cf_issuer_credential_keys()?, did.as_bytes())
+            .map_err(|e| StorageError::RocksDbError(e.to_string()))?
+        {
+            Some(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| StorageError::DeserializationError(e.to_string())),
+            None => Err(StorageError::KeyNotFound(format!(
+                "issuer_credential_key:{did}"
+            ))),
         }
     }
 
@@ -2656,6 +2692,37 @@ mod tests {
         let store2 = RocksDbBlockStore::new(dir.path()).unwrap();
         assert!(store2.block_exists(1).unwrap());
         assert_eq!(store2.get_latest_height().unwrap(), 1);
+    }
+
+    #[test]
+    fn issuer_credential_key_survives_reopening() {
+        let dir = TempDir::new().unwrap();
+        let registration = IssuerCredentialKey {
+            did: "did:goya:issuer".to_string(),
+            jwk: crate::storage::traits::P256PublicJwk {
+                kty: "EC".to_string(),
+                crv: "P-256".to_string(),
+                x: "x".to_string(),
+                y: "y".to_string(),
+            },
+            registered_at: 100,
+            public_key: "ab".to_string(),
+            signature: "cd".to_string(),
+        };
+        RocksDbBlockStore::new(dir.path())
+            .unwrap()
+            .write_issuer_credential_key(&registration)
+            .unwrap();
+        let reopened = RocksDbBlockStore::new(dir.path()).unwrap();
+        assert_eq!(
+            reopened
+                .read_issuer_credential_key("did:goya:issuer")
+                .unwrap(),
+            registration
+        );
+        assert!(reopened
+            .read_issuer_credential_key("did:goya:other")
+            .is_err());
     }
 
     // ── Block operations ─────────────────────────────────────────────────────

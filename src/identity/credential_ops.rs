@@ -26,7 +26,7 @@ fn is_hex_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-fn require_issuer_signature(
+pub(crate) fn require_issuer_signature(
     store: &dyn BlockStore,
     issuer_did: &str,
     issuer_public_key: &str,

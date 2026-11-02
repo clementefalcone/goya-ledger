@@ -31,6 +31,7 @@ pub mod inference;
 pub mod intelligence;
 pub mod interop;
 pub mod invitations;
+pub mod issuers;
 pub mod legal_oracle;
 pub mod lexchain;
 pub mod msp;

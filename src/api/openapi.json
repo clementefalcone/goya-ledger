@@ -308,6 +308,10 @@
     "/deferred_credential": {
       "post": { "tags": ["Credentials"], "summary": "OID4VCI deferred credential retrieval by transaction_id", "responses": { "200": { "description": "Credential delivered by the issuer, returned once" }, "400": { "description": "issuance_pending or invalid_transaction_id" }, "401": { "description": "Unknown or expired access token" } } }
     },
+    "/issuers/{did}/credential-key": {
+      "post": { "tags": ["Credentials"], "summary": "Register the issuer ES256 key (public P-256 JWK) signed by the DID key over oid4vci:issuer-key:{did}:{x}:{y}:{registered_at}", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "201": { "description": "Key registered and replicated on chain" }, "400": { "description": "jwk is not a public P-256 key" }, "401": { "description": "Key does not control the DID or signature does not verify" }, "409": { "description": "Same key already registered, or registered_at not later than the current key" } } },
+      "get": { "tags": ["Credentials"], "summary": "Registered issuer ES256 key with its DID signature", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Registration" }, "404": { "description": "No key registered" } } }
+    },
     "/events/blocks": {
       "get": { "tags": ["Events"], "summary": "Block event stream (WebSocket or long-poll)", "parameters": [{ "name": "from_height", "in": "query", "schema": { "type": "integer" } }], "responses": { "200": { "description": "Block events" } } }
     },

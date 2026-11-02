@@ -6,9 +6,9 @@ use crate::api::handlers::{
     acl, airdrop, alias, audit, billing, blocks, bridge, chain, chaincode, channels, compliance,
     compliance_auto, contact, contracts, credentials, crl, discovery, events, forensic, gateway,
     governance, governance_entities, identity, identity_session, identity_vault, inference,
-    intelligence, interop, invitations, legal_oracle, lexchain, msp, network, notarize, ocsp,
-    oid4vci, oid4vp, oracle, organizations, pentest, pin, policy, private_data, proposals, ra,
-    registry, regulatory, savings, snapshots, staking, stats, stress, stripe, tokenization,
+    intelligence, interop, invitations, issuers, legal_oracle, lexchain, msp, network, notarize,
+    ocsp, oid4vci, oid4vp, oracle, organizations, pentest, pin, policy, private_data, proposals,
+    ra, registry, regulatory, savings, snapshots, staking, stats, stress, stripe, tokenization,
     tokenomics, transactions, tsa, tsl, utilities, vault, wallets, zkp,
 };
 
@@ -313,6 +313,8 @@ impl ApiRoutes {
             .service(oid4vci::nonce_endpoint)
             .service(oid4vci::credential_offer_endpoint)
             .service(oid4vci::credential_offer_get);
+        cfg.service(issuers::register_credential_key)
+            .service(issuers::get_credential_key);
         // OpenID4VP (EUDI Wallet credential presentation)
         cfg.service(oid4vp::register_rp)
             .service(oid4vp::list_rps)

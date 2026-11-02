@@ -377,6 +377,14 @@ Bearer or DPoP token. The requested `credential_configuration_id` (or legacy `fo
 
 Bearer or DPoP token of the same transaction. Body: `transaction_id`. Returns 400 `{"error":"issuance_pending","interval":5}` until the issuer delivers, then 200 `{"credentials":[{"credential":...}]}` once. Unknown or already retrieved transactions return 400 `invalid_transaction_id`.
 
+### POST /issuers/{did}/credential-key
+
+Registers the ES256 key with which `{did}` signs SD-JWT VCs. Body: `jwk` (public P-256 JWK with exactly `kty` `EC`, `crv` `P-256`, `x`, `y`; any other member such as `d` returns 400), `registered_at`, `public_key`, `signature`. `signature` is by `public_key`, which must control `{did}`, over `oid4vci:issuer-key:{did}:{x}:{y}:{registered_at}`; otherwise 401. The registration is replicated on chain. The same `jwk` again returns 409; a different `jwk` replaces the current one only with a later `registered_at`, else 409. Returns 201 with the registration.
+
+### GET /issuers/{did}/credential-key
+
+The registered key with the DID signature that binds it, or 404.
+
 ---
 
 ## Events (WebSocket)

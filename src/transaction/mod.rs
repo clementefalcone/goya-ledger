@@ -7,7 +7,7 @@ pub mod proposal;
 pub mod rwset;
 
 use crate::identity::{
-    civil_anchor, credential_ops, operations, recovery_commitment, vault_entries,
+    civil_anchor, credential_ops, issuer_keys, operations, recovery_commitment, vault_entries,
 };
 use crate::storage::errors::StorageResult;
 use crate::storage::traits::{BlockStore, Transaction, TxPayload};
@@ -128,6 +128,9 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
                 signature,
             },
         ),
+        Some(TxPayload::RegisterIssuerCredentialKey { registration }) => {
+            issuer_keys::apply_register_credential_key(store, registration)
+        }
         _ => Ok(()),
     }
 }

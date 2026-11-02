@@ -158,6 +158,9 @@ pub enum TxPayload {
         issuer_public_key: String,
         signature: String,
     },
+    RegisterIssuerCredentialKey {
+        registration: Box<IssuerCredentialKey>,
+    },
     SignedTransfer {
         nonce: u64,
     },
@@ -264,6 +267,24 @@ pub struct Credential {
 
 fn default_credential_status() -> String {
     "active".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct P256PublicJwk {
+    pub kty: String,
+    pub crv: String,
+    pub x: String,
+    pub y: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssuerCredentialKey {
+    pub did: String,
+    pub jwk: P256PublicJwk,
+    pub registered_at: u64,
+    pub public_key: String,
+    pub signature: String,
 }
 
 impl Credential {
@@ -683,6 +704,10 @@ pub trait BlockStore: Send + Sync {
 
     /// List all credentials
     fn list_credentials(&self) -> StorageResult<Vec<Credential>>;
+
+    fn write_issuer_credential_key(&self, registration: &IssuerCredentialKey) -> StorageResult<()>;
+
+    fn read_issuer_credential_key(&self, did: &str) -> StorageResult<IssuerCredentialKey>;
 
     /// Batch write operations (atomic)
     fn write_batch(&self, blocks: &[Block], txs: &[Transaction]) -> StorageResult<()>;
@@ -1208,6 +1233,12 @@ impl<T: BlockStore> BlockStore for Arc<T> {
     }
     fn list_credentials(&self) -> StorageResult<Vec<Credential>> {
         (**self).list_credentials()
+    }
+    fn write_issuer_credential_key(&self, registration: &IssuerCredentialKey) -> StorageResult<()> {
+        (**self).write_issuer_credential_key(registration)
+    }
+    fn read_issuer_credential_key(&self, did: &str) -> StorageResult<IssuerCredentialKey> {
+        (**self).read_issuer_credential_key(did)
     }
     fn write_batch(&self, blocks: &[Block], txs: &[Transaction]) -> StorageResult<()> {
         (**self).write_batch(blocks, txs)

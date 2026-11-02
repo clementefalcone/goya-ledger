@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use super::errors::{StorageError, StorageResult};
 use super::traits::{
     Acta, AliasEntry, Assembly, Block, BlockStore, ClaimStatus, Credential, IdentityRecord,
-    InferenceChallenge, InferenceClaim, Invitation, NotarizationEntry, OwnershipTransfer, Scope,
-    Session, Transaction,
+    InferenceChallenge, InferenceClaim, Invitation, IssuerCredentialKey, NotarizationEntry,
+    OwnershipTransfer, Scope, Session, Transaction,
 };
 use crate::registry::compliance::{ComplianceResult, ComplianceRule};
 use crate::registry::tokenization::AssetToken;
@@ -20,6 +20,7 @@ pub struct MemoryStore {
     identities: Mutex<HashMap<String, IdentityRecord>>,
     civil_anchors: Mutex<HashMap<String, String>>,
     credentials: Mutex<HashMap<String, Credential>>,
+    issuer_credential_keys: Mutex<HashMap<String, IssuerCredentialKey>>,
     latest_height: Mutex<u64>,
     /// Governance proposals: id → Proposal
     proposals: Mutex<HashMap<u64, crate::governance::proposals::Proposal>>,
@@ -71,6 +72,7 @@ impl MemoryStore {
             identities: Mutex::new(HashMap::new()),
             civil_anchors: Mutex::new(HashMap::new()),
             credentials: Mutex::new(HashMap::new()),
+            issuer_credential_keys: Mutex::new(HashMap::new()),
             latest_height: Mutex::new(0),
             proposals: Mutex::new(HashMap::new()),
             votes: Mutex::new(HashMap::new()),
@@ -205,6 +207,23 @@ impl BlockStore for MemoryStore {
             .get(cred_id)
             .cloned()
             .ok_or_else(|| StorageError::CredentialNotFound(cred_id.to_string()))
+    }
+
+    fn write_issuer_credential_key(&self, registration: &IssuerCredentialKey) -> StorageResult<()> {
+        self.issuer_credential_keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(registration.did.clone(), registration.clone());
+        Ok(())
+    }
+
+    fn read_issuer_credential_key(&self, did: &str) -> StorageResult<IssuerCredentialKey> {
+        self.issuer_credential_keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(did)
+            .cloned()
+            .ok_or_else(|| StorageError::KeyNotFound(format!("issuer_credential_key:{did}")))
     }
 
     fn list_credentials(&self) -> StorageResult<Vec<Credential>> {
