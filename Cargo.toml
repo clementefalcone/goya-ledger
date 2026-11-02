@@ -102,7 +102,7 @@ harness = false
 
 [[bin]]
 name = "cerulean"
-path = "src/bin/cerulean.rs"
+path = "src/bin/cerulean/main.rs"
 
 [[bin]]
 name = "goya-sign"
