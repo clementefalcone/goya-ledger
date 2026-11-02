@@ -22,7 +22,8 @@ use std::sync::Arc;
 
 use super::errors::{StorageError, StorageResult};
 use super::traits::{
-    Block, BlockStore, Credential, IdentityRecord, IssuerCredentialKey, Transaction,
+    Block, BlockStore, Credential, IdentityRecord, IssuerCredentialKey, IssuerStatusList,
+    Transaction,
 };
 use super::world_state::{VersionedValue, WorldState};
 use crate::chaincode::{ChaincodeError, ChaincodePackageStore};
@@ -93,6 +94,7 @@ const CF_OWNERSHIP_TRANSFERS: &str = "ownership_transfers";
 const CF_LEXCONTRACTS: &str = "lexcontracts";
 const CF_CIVIL_ANCHORS: &str = "civil_anchors";
 const CF_ISSUER_CREDENTIAL_KEYS: &str = "issuer_credential_keys";
+const CF_ISSUER_STATUS_LISTS: &str = "issuer_status_lists";
 
 const META_LATEST_HEIGHT: &[u8] = b"latest_height";
 
@@ -138,6 +140,7 @@ const ALL_CFS: &[&str] = &[
     CF_LEXCONTRACTS,
     CF_CIVIL_ANCHORS,
     CF_ISSUER_CREDENTIAL_KEYS,
+    CF_ISSUER_STATUS_LISTS,
 ];
 
 /// RocksDB-backed block store using Column Families for data isolation
@@ -243,6 +246,12 @@ impl RocksDbBlockStore {
         self.db.cf_handle(CF_ISSUER_CREDENTIAL_KEYS).ok_or_else(|| {
             StorageError::ColumnFamilyNotFound(CF_ISSUER_CREDENTIAL_KEYS.to_string())
         })
+    }
+
+    fn cf_issuer_status_lists(&self) -> StorageResult<Arc<rocksdb::BoundColumnFamily<'_>>> {
+        self.db
+            .cf_handle(CF_ISSUER_STATUS_LISTS)
+            .ok_or_else(|| StorageError::ColumnFamilyNotFound(CF_ISSUER_STATUS_LISTS.to_string()))
     }
 
     fn cf_credentials(&self) -> StorageResult<Arc<rocksdb::BoundColumnFamily<'_>>> {
@@ -638,6 +647,35 @@ impl BlockStore for RocksDbBlockStore {
                 .map_err(|e| StorageError::DeserializationError(e.to_string())),
             None => Err(StorageError::KeyNotFound(format!(
                 "issuer_credential_key:{did}"
+            ))),
+        }
+    }
+
+    fn write_issuer_status_list(&self, status_list: &IssuerStatusList) -> StorageResult<()> {
+        let value = serde_json::to_vec(status_list)
+            .map_err(|e| StorageError::SerializationError(e.to_string()))?;
+        self.db
+            .put_cf(
+                &self.cf_issuer_status_lists()?,
+                format!("{}/{}", status_list.did, status_list.list_id).as_bytes(),
+                value,
+            )
+            .map_err(|e| StorageError::RocksDbError(e.to_string()))
+    }
+
+    fn read_issuer_status_list(&self, did: &str, list_id: &str) -> StorageResult<IssuerStatusList> {
+        match self
+            .db
+            .get_cf(
+                &self.cf_issuer_status_lists()?,
+                format!("{did}/{list_id}").as_bytes(),
+            )
+            .map_err(|e| StorageError::RocksDbError(e.to_string()))?
+        {
+            Some(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| StorageError::DeserializationError(e.to_string())),
+            None => Err(StorageError::KeyNotFound(format!(
+                "issuer_status_list:{did}/{list_id}"
             ))),
         }
     }
@@ -2722,6 +2760,30 @@ mod tests {
         );
         assert!(reopened
             .read_issuer_credential_key("did:goya:other")
+            .is_err());
+    }
+
+    #[test]
+    fn issuer_status_list_survives_reopening_keyed_by_did_and_list_id() {
+        let dir = TempDir::new().unwrap();
+        let status_list = IssuerStatusList {
+            did: "did:goya:issuer".to_string(),
+            list_id: "revocations".to_string(),
+            jwt: "header.payload.signature".to_string(),
+        };
+        RocksDbBlockStore::new(dir.path())
+            .unwrap()
+            .write_issuer_status_list(&status_list)
+            .unwrap();
+        let reopened = RocksDbBlockStore::new(dir.path()).unwrap();
+        assert_eq!(
+            reopened
+                .read_issuer_status_list("did:goya:issuer", "revocations")
+                .unwrap(),
+            status_list
+        );
+        assert!(reopened
+            .read_issuer_status_list("did:goya:issuer", "suspensions")
             .is_err());
     }
 

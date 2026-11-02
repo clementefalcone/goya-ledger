@@ -317,6 +317,8 @@ impl ApiRoutes {
             .service(issuers::get_credential_key)
             .service(issuers::list_pending_issuances)
             .service(issuers::deliver_issuance)
+            .service(issuers::publish_status_list)
+            .service(issuers::get_status_list)
             .route(
                 "/issuers/{did}/.well-known/jwt-vc-issuer",
                 web::get().to(issuers::jwt_vc_issuer_metadata),

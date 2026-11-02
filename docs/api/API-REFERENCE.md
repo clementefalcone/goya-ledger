@@ -397,6 +397,14 @@ Query: `public_key`, `issued_at`, `signature` over `oid4vci:pending:{did}:{issue
 
 Body: `credential`, an SD-JWT VC (`<jwt>~<disclosure>~...`). The SD-JWT is the issuer's authorization. Unknown transaction or one of another issuer, or no registered key, returns 404; already delivered returns 409. The issuer JWT must be ES256 and verify with the registered key, else 401. Its `iss` must have the path `/api/v1/issuers/{did}` over https (the host is not compared, so proxies with another Host still match), `vct` must be the offered configuration's and `cnf.jwk` the holder key from the credential request (`kty`, `crv`, `x`, `y`), else 400. On success the wallet receives it from `/deferred_credential`.
 
+### PUT /issuers/{did}/status-lists/{list_id}
+
+Publishes a Token Status List (IETF draft, `statuslist+jwt`) that the issuer built and signed; the node never builds or signs one. Body: `status_list_jwt`, the compact JWT, at most 64 KiB. `list_id` is 1-64 characters of `A-Z a-z 0-9 _ -`. No registered credential key returns 404. The header must have `typ` `statuslist+jwt` and `alg` `ES256`, else 400, and the signature must verify with the registered key, else 401. The payload `iss` path must be `/api/v1/issuers/{did}` and `sub` path `/api/v1/issuers/{did}/status-lists/{list_id}` over https (host not compared), `iat` must be present, `status_list.bits` one of 1, 2, 4, 8 and `status_list.lst` non-empty base64url, else 400. The list is replicated on chain and every peer re-verifies it against the replicated key. The same JWT again returns 409; a new JWT replaces the stored one only with a later `iat`, else 409. Returns 200.
+
+### GET /issuers/{did}/status-lists/{list_id}
+
+The stored JWT as `application/statuslist+jwt`, or 404.
+
 ---
 
 ## Events (WebSocket)

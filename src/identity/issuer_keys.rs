@@ -10,6 +10,31 @@ pub fn credential_key_message(did: &str, jwk: &P256PublicJwk, registered_at: u64
     )
 }
 
+pub fn issuer_path(did: &str) -> String {
+    format!("/api/v1/issuers/{did}")
+}
+
+pub fn https_url_path(url: &str) -> Option<&str> {
+    let authority_and_path = url.strip_prefix("https://")?;
+    let path_start = authority_and_path.find('/').filter(|&start| start > 0)?;
+    Some(&authority_and_path[path_start..])
+}
+
+pub fn sec1_public_key_hex(jwk: &P256PublicJwk) -> Option<String> {
+    let decode = |coordinate: &str| {
+        base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            coordinate,
+        )
+        .ok()
+    };
+    Some(format!(
+        "04{}{}",
+        hex::encode(decode(&jwk.x)?),
+        hex::encode(decode(&jwk.y)?)
+    ))
+}
+
 fn is_p256_coordinate(coordinate: &str) -> bool {
     base64::Engine::decode(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD,

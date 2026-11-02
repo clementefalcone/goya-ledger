@@ -2,17 +2,18 @@ use crate::api::errors::{ApiError, ApiResponse, ApiResult};
 use crate::api::handlers::channels::get_channel_store;
 use crate::api::handlers::identity::{commit_ledger_op, identity_op_error, now_secs};
 use crate::api::handlers::oid4vci::{
-    configuration_vct, credential_issuer, extract_pubkey_from_jwk, PendingIssuance,
-    PendingIssuanceStore, SIGNED_REQUEST_FRESHNESS_SECS,
+    configuration_vct, credential_issuer, PendingIssuance, PendingIssuanceStore,
+    SIGNED_REQUEST_FRESHNESS_SECS,
 };
 use crate::app_state::AppState;
 use crate::identity::credential_ops::require_issuer_signature;
-use crate::identity::issuer_keys;
+use crate::identity::issuer_keys::{self, https_url_path, issuer_path, sec1_public_key_hex};
 use crate::identity::operations::Change;
 use crate::identity::sd_jwt::verify_sd_jwt_vc;
 use crate::identity::signing::SigningAlgorithm;
-use crate::storage::traits::{IssuerCredentialKey, P256PublicJwk, TxPayload};
-use actix_web::{get, post, web, HttpRequest, HttpResponse};
+use crate::identity::status_lists;
+use crate::storage::traits::{IssuerCredentialKey, IssuerStatusList, P256PublicJwk, TxPayload};
+use actix_web::{get, post, put, web, HttpRequest, HttpResponse};
 
 const ISSUER_CHANNEL: &str = "default";
 
@@ -102,6 +103,65 @@ pub async fn jwt_vc_issuer_metadata(
     })))
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct PublishStatusListRequest {
+    pub status_list_jwt: String,
+}
+
+#[put("/issuers/{did}/status-lists/{list_id}")]
+pub async fn publish_status_list(
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+    body: web::Json<PublishStatusListRequest>,
+) -> ApiResult<HttpResponse> {
+    let (did, list_id) = path.into_inner();
+    let status_list = IssuerStatusList {
+        did,
+        list_id,
+        jwt: body.into_inner().status_list_jwt,
+    };
+    let store = get_channel_store(&state, ISSUER_CHANNEL)?;
+    let change = status_lists::check_publish_status_list(store.as_ref(), &status_list)
+        .map_err(identity_op_error)?;
+    if change == Change::AlreadyApplied {
+        return Err(ApiError::Conflict {
+            reason: format!(
+                "status list {} of {} is already this JWT",
+                status_list.list_id, status_list.did
+            ),
+        });
+    }
+    commit_ledger_op(
+        &state,
+        store.as_ref(),
+        ISSUER_CHANNEL,
+        &status_list.did,
+        TxPayload::PublishIssuerStatusList {
+            status_list: Box::new(status_list.clone()),
+        },
+    )?;
+    Ok(HttpResponse::Ok().json(ApiResponse::success(
+        serde_json::json!({ "did": status_list.did, "list_id": status_list.list_id }),
+        uuid::Uuid::new_v4().to_string(),
+    )))
+}
+
+#[get("/issuers/{did}/status-lists/{list_id}")]
+pub async fn get_status_list(
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+) -> ApiResult<HttpResponse> {
+    let (did, list_id) = path.into_inner();
+    let status_list = get_channel_store(&state, ISSUER_CHANNEL)?
+        .read_issuer_status_list(&did, &list_id)
+        .map_err(|_| ApiError::NotFound {
+            resource: format!("status list {list_id} of issuer {did}"),
+        })?;
+    Ok(HttpResponse::Ok()
+        .content_type("application/statuslist+jwt")
+        .body(status_list.jwt))
+}
+
 pub fn pending_issuances_message(did: &str, issued_at: u64) -> String {
     format!("oid4vci:pending:{did}:{issued_at}")
 }
@@ -169,9 +229,7 @@ pub struct DeliverCredentialRequest {
 }
 
 fn names_issuer(iss: &str, did: &str) -> bool {
-    iss.strip_prefix("https://")
-        .and_then(|authority_and_path| authority_and_path.split_once('/'))
-        .is_some_and(|(host, path)| !host.is_empty() && path == format!("api/v1/issuers/{did}"))
+    https_url_path(iss) == Some(issuer_path(did).as_str())
 }
 
 fn is_same_public_jwk(left: &serde_json::Value, right: &serde_json::Value) -> bool {
@@ -193,8 +251,8 @@ fn verify_delivered_credential(
     issuance: &PendingIssuance,
 ) -> Result<(), ApiError> {
     let did = &registration.did;
-    let credential_key_hex = extract_pubkey_from_jwk(&serde_json::json!(registration.jwk), "ES256")
-        .ok_or_else(|| ApiError::InternalError {
+    let credential_key_hex =
+        sec1_public_key_hex(&registration.jwk).ok_or_else(|| ApiError::InternalError {
             reason: format!("registered credential key of {did} is not a P-256 JWK"),
         })?;
     let verified = verify_sd_jwt_vc(credential, &credential_key_hex)
@@ -353,6 +411,8 @@ mod tests {
                             .service(get_credential_key)
                             .service(list_pending_issuances)
                             .service(deliver_issuance)
+                            .service(publish_status_list)
+                            .service(get_status_list)
                             .route(
                                 "/issuers/{did}/.well-known/jwt-vc-issuer",
                                 web::get().to(jwt_vc_issuer_metadata),
@@ -673,5 +733,213 @@ mod tests {
             .unwrap()
             .credential
             .is_none());
+    }
+
+    const STATUS_LIST_ID: &str = "revocations";
+
+    fn status_list_jwt(
+        signer: &EcdsaP256SigningProvider,
+        header: serde_json::Value,
+        payload: serde_json::Value,
+    ) -> String {
+        let encode = |segment: &serde_json::Value| base64url(&serde_json::to_vec(segment).unwrap());
+        let signing_input = format!("{}.{}", encode(&header), encode(&payload));
+        let signature = signer.sign(signing_input.as_bytes()).unwrap();
+        format!("{signing_input}.{}", base64url(&signature))
+    }
+
+    fn status_list_header() -> serde_json::Value {
+        serde_json::json!({ "typ": "statuslist+jwt", "alg": "ES256" })
+    }
+
+    fn status_list_payload(did: &str, list_id: &str, iat: u64) -> serde_json::Value {
+        serde_json::json!({
+            "iss": issuer_url(did),
+            "sub": format!("{}/status-lists/{list_id}", issuer_url(did)),
+            "iat": iat,
+            "status_list": { "bits": 1, "lst": "eNrbuRgAAhcBXQ" },
+        })
+    }
+
+    fn status_list_uri(did: &str, list_id: &str) -> String {
+        format!("/api/v1/issuers/{did}/status-lists/{list_id}")
+    }
+
+    macro_rules! publish_status {
+        ($app:expr, $uri:expr, $jwt:expr) => {{
+            let req = test::TestRequest::put()
+                .uri($uri)
+                .set_json(serde_json::json!({ "status_list_jwt": $jwt }))
+                .to_request();
+            test::call_service($app, req).await.status().as_u16()
+        }};
+    }
+
+    macro_rules! served_status_list {
+        ($app:expr, $uri:expr) => {{
+            let req = test::TestRequest::get().uri($uri).to_request();
+            let response = test::call_service($app, req).await;
+            let status = response.status().as_u16();
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .map(|value| value.to_str().unwrap().to_string());
+            let body = test::read_body(response).await;
+            (
+                status,
+                content_type,
+                String::from_utf8(body.to_vec()).unwrap(),
+            )
+        }};
+    }
+
+    fn queued_transactions(state: &AppState) -> Vec<crate::storage::traits::Transaction> {
+        state.tx_pool.lock().unwrap().all().to_vec()
+    }
+
+    #[actix_web::test]
+    async fn status_list_signed_by_the_registered_key_is_published_replicated_and_served() {
+        let state = web::Data::new(AppState::test_default());
+        let app = issuers_app!(state);
+        let issuer = issuer();
+        let credential_key = EcdsaP256SigningProvider::generate();
+        register_key!(&app, &issuer, &credential_key);
+        let uri = status_list_uri(&issuer.did, STATUS_LIST_ID);
+        let jwt = status_list_jwt(
+            &credential_key,
+            status_list_header(),
+            status_list_payload(&issuer.did, STATUS_LIST_ID, 100),
+        );
+
+        assert_eq!(served_status_list!(&app, &uri).0, 404);
+        assert_eq!(publish_status!(&app, &uri, &jwt), 200);
+        assert_eq!(publish_status!(&app, &uri, &jwt), 409);
+        assert_eq!(
+            served_status_list!(&app, &uri),
+            (
+                200,
+                Some("application/statuslist+jwt".to_string()),
+                jwt.clone()
+            )
+        );
+
+        let replica = MemoryStore::new();
+        for tx in queued_transactions(&state) {
+            crate::transaction::apply_tx_payload(&replica, &tx).unwrap();
+        }
+        assert_eq!(
+            replica
+                .read_issuer_status_list(&issuer.did, STATUS_LIST_ID)
+                .unwrap()
+                .jwt,
+            jwt
+        );
+
+        let replica_without_key = MemoryStore::new();
+        let published = queued_transactions(&state)
+            .into_iter()
+            .find(|tx| matches!(tx.payload, Some(TxPayload::PublishIssuerStatusList { .. })))
+            .unwrap();
+        assert!(crate::transaction::apply_tx_payload(&replica_without_key, &published).is_err());
+    }
+
+    #[actix_web::test]
+    async fn status_list_is_refused_unless_signed_and_named_for_its_list() {
+        let state = web::Data::new(AppState::test_default());
+        let app = issuers_app!(state);
+        let (issuer, other) = (issuer(), issuer());
+        let credential_key = EcdsaP256SigningProvider::generate();
+        let uri = status_list_uri(&issuer.did, STATUS_LIST_ID);
+        let payload = status_list_payload(&issuer.did, STATUS_LIST_ID, 100);
+        let genuine = status_list_jwt(&credential_key, status_list_header(), payload.clone());
+
+        assert_eq!(publish_status!(&app, &uri, &genuine), 404);
+        register_key!(&app, &issuer, &credential_key);
+
+        let (signing_input, _) = genuine.rsplit_once('.').unwrap();
+        let unsigned = format!("{signing_input}.{}", base64url(&[0u8; 64]));
+        let mut plain_jwt_header = status_list_header();
+        plain_jwt_header["typ"] = "JWT".into();
+        let mut bits_three = payload.clone();
+        bits_three["status_list"]["bits"] = 3.into();
+        let mut empty_list = payload.clone();
+        empty_list["status_list"]["lst"] = "".into();
+        let mut no_iat = payload.clone();
+        no_iat.as_object_mut().unwrap().remove("iat");
+        let refusals = [
+            (
+                status_list_jwt(
+                    &EcdsaP256SigningProvider::generate(),
+                    status_list_header(),
+                    payload.clone(),
+                ),
+                401,
+            ),
+            (unsigned, 401),
+            (
+                status_list_jwt(&credential_key, plain_jwt_header, payload.clone()),
+                400,
+            ),
+            (
+                status_list_jwt(
+                    &credential_key,
+                    status_list_header(),
+                    serde_json::json!({ "iss": issuer_url(&other.did), "sub": payload["sub"], "iat": 100, "status_list": payload["status_list"] }),
+                ),
+                400,
+            ),
+            (
+                status_list_jwt(
+                    &credential_key,
+                    status_list_header(),
+                    status_list_payload(&issuer.did, "suspensions", 100),
+                ),
+                400,
+            ),
+            (
+                status_list_jwt(&credential_key, status_list_header(), bits_three),
+                400,
+            ),
+            (
+                status_list_jwt(&credential_key, status_list_header(), empty_list),
+                400,
+            ),
+            (
+                status_list_jwt(&credential_key, status_list_header(), no_iat),
+                400,
+            ),
+            ("not-a-jwt".to_string(), 400),
+            ("a".repeat(64 * 1024 + 1), 400),
+        ];
+        for (jwt, status) in &refusals {
+            assert_eq!(publish_status!(&app, &uri, jwt), *status, "{jwt:.80}");
+        }
+        assert_eq!(
+            publish_status!(&app, &status_list_uri(&issuer.did, "bad.id"), &genuine),
+            400
+        );
+        assert_eq!(served_status_list!(&app, &uri).0, 404);
+    }
+
+    #[actix_web::test]
+    async fn newer_status_list_replaces_and_an_older_one_is_refused() {
+        let state = web::Data::new(AppState::test_default());
+        let app = issuers_app!(state);
+        let issuer = issuer();
+        let credential_key = EcdsaP256SigningProvider::generate();
+        register_key!(&app, &issuer, &credential_key);
+        let uri = status_list_uri(&issuer.did, STATUS_LIST_ID);
+        let signed_at = |iat: u64, lst: &str| {
+            let mut payload = status_list_payload(&issuer.did, STATUS_LIST_ID, iat);
+            payload["status_list"]["lst"] = lst.into();
+            status_list_jwt(&credential_key, status_list_header(), payload)
+        };
+
+        assert_eq!(publish_status!(&app, &uri, &signed_at(100, "AQ")), 200);
+        assert_eq!(publish_status!(&app, &uri, &signed_at(50, "Ag")), 409);
+        assert_eq!(publish_status!(&app, &uri, &signed_at(100, "Ag")), 409);
+        let newer = signed_at(200, "Ag");
+        assert_eq!(publish_status!(&app, &uri, &newer), 200);
+        assert_eq!(served_status_list!(&app, &uri).2, newer);
     }
 }

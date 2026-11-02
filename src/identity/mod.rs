@@ -17,5 +17,6 @@ pub mod reader_login;
 pub mod recovery_commitment;
 pub mod sd_jwt;
 pub mod signing;
+pub mod status_lists;
 pub mod vault_entries;
 pub mod zkp;
