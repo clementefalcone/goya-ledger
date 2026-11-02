@@ -351,7 +351,7 @@ List credentials by subject DID.
 
 ## OpenID4VCI (credential delivery)
 
-The node does not sign credentials. It brokers delivery from the issuer that signed the offer to the wallet, using the pre-authorized code grant and the deferred flow. Endpoints are served under `/api/v1` and at the root. Only SD-JWT VC configurations (`vc+sd-jwt`, ES256) are advertised, since issuer delivery verifies only that format; offers for any other configuration return 400.
+The node does not sign credentials. It brokers delivery from the issuer that signed the offer to the wallet, using the pre-authorized code grant and the deferred flow. Endpoints are served under `/api/v1` and at the root. Only SD-JWT VC configurations (`vc+sd-jwt`, ES256) are advertised, since issuer delivery verifies only that format; offers for any other configuration return 400. Issuer walkthrough and CLI: [ISSUER-GUIDE.md](ISSUER-GUIDE.md).
 
 ### POST /credential_offer
 
