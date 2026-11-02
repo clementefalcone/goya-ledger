@@ -650,8 +650,10 @@ fn verify_proof_jwt(
     }
 
     let aud = payload.get("aud").and_then(|v| v.as_str()).unwrap_or("");
-    if !aud.is_empty() && !expected_aud.is_empty() && aud != expected_aud {
-        return Err(format!("proof aud mismatch: expected {expected_aud}"));
+    if aud != expected_aud {
+        return Err(format!(
+            "proof aud {aud:?} is not the credential issuer {expected_aud}"
+        ));
     }
 
     let iat = payload
@@ -745,12 +747,7 @@ pub async fn oauth_as_metadata(req: HttpRequest) -> ApiResult<HttpResponse> {
 /// OpenID4VCI Issuer Metadata (OID4VCI 1.0 Final).
 #[get("/.well-known/openid-credential-issuer")]
 pub async fn issuer_metadata(req: HttpRequest) -> ApiResult<HttpResponse> {
-    let host = req
-        .headers()
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost:8080");
-    let base = format!("https://{host}");
+    let base = credential_issuer(&req);
     let api = format!("{base}/api/v1");
 
     let metadata = serde_json::json!({
@@ -1121,12 +1118,7 @@ pub async fn credential_endpoint(
             &format!("c_nonce rejected: {e}"),
         ));
     }
-    let host = req
-        .headers()
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost:8080");
-    let holder_jwk = match verify_proof_jwt(proof_jwt, &proof_nonce, &format!("https://{host}")) {
+    let holder_jwk = match verify_proof_jwt(proof_jwt, &proof_nonce, &credential_issuer(&req)) {
         Ok(holder_jwk) => holder_jwk,
         Err(e) => return Ok(oid4vci_error("invalid_proof", &e)),
     };
@@ -2067,6 +2059,42 @@ mod tests {
         let holder = SoftwareSigningProvider::generate();
         let proof = make_signed_proof_jwt(&holder, "nonce", "https://other.com", now_secs());
         assert!(verify_proof_jwt(&proof, "nonce", "https://issuer.com").is_err());
+    }
+
+    #[actix_web::test]
+    async fn proof_jwt_without_aud_is_refused() {
+        let holder = SoftwareSigningProvider::generate();
+        let proof = make_signed_proof_jwt(&holder, "nonce", "", now_secs());
+        assert!(verify_proof_jwt(&proof, "nonce", "https://issuer.com").is_err());
+    }
+
+    #[actix_web::test]
+    async fn credential_proof_must_name_the_advertised_credential_issuer() {
+        let app = oid4vci_app!(make_state());
+        let metadata_request = test::TestRequest::get()
+            .uri("/.well-known/openid-credential-issuer")
+            .insert_header(("host", "issuer.example"))
+            .to_request();
+        let metadata: serde_json::Value =
+            test::call_and_read_body_json(&app, metadata_request).await;
+        let credential_issuer = metadata["credential_issuer"].as_str().unwrap().to_string();
+        let token = access_token!(app);
+        let holder = SoftwareSigningProvider::generate();
+        let credential_status = |aud: &str, nonce: &str| {
+            test::TestRequest::post()
+                .uri("/credential")
+                .insert_header(("host", "issuer.example"))
+                .insert_header(("authorization", format!("Bearer {token}")))
+                .set_json(serde_json::json!({
+                    "credential_configuration_id": "IdentityCredential_sd_jwt",
+                    "proofs": { "jwt": [make_signed_proof_jwt(&holder, nonce, aud, now_secs())] },
+                }))
+                .to_request()
+        };
+        let without_aud = credential_status("", &c_nonce!(app));
+        assert_eq!(test::call_service(&app, without_aud).await.status(), 400);
+        let named = credential_status(&credential_issuer, &c_nonce!(app));
+        assert_eq!(test::call_service(&app, named).await.status(), 202);
     }
 
     #[actix_web::test]

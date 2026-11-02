@@ -371,7 +371,7 @@ Returns a single-use `c_nonce` (300 s).
 
 ### POST /credential
 
-Bearer or DPoP token. The requested `credential_configuration_id` (or legacy `format` + `vct`) must be the offered one, else 400 `invalid_credential_request`. Requires a JWT proof (`proofs.jwt[0]` or `proof.jwt`) whose header carries the holder `jwk`, signed by that key over a `c_nonce` from `/nonce`; otherwise 400 `invalid_proof`. Returns 202 `{transaction_id, interval}`.
+Bearer or DPoP token. The requested `credential_configuration_id` (or legacy `format` + `vct`) must be the offered one, else 400 `invalid_credential_request`. Requires a JWT proof (`proofs.jwt[0]` or `proof.jwt`) whose header carries the holder `jwk`, signed by that key over a `c_nonce` from `/nonce`, with `aud` equal to the metadata `credential_issuer` (`https://{host}`); otherwise 400 `invalid_proof`. Returns 202 `{transaction_id, interval}`.
 
 ### POST /deferred_credential
 
