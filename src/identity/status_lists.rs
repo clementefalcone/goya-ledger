@@ -19,6 +19,12 @@ pub fn is_status_list_id(list_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
+pub fn is_own_status_list_uri(uri: &str, did: &str) -> bool {
+    https_url_path(uri)
+        .and_then(|path| path.strip_prefix(&format!("{}/status-lists/", issuer_path(did))))
+        .is_some_and(is_status_list_id)
+}
+
 fn invalid(reason: String) -> IdentityOpError {
     IdentityOpError::Invalid(reason)
 }
@@ -198,5 +204,24 @@ mod tests {
         assert!(!is_status_list_id(&"a".repeat(65)));
         assert!(!is_status_list_id("a/b"));
         assert!(!is_status_list_id("a.b"));
+    }
+
+    #[test]
+    fn own_status_list_uri_names_a_list_of_the_same_issuer() {
+        let own = "https://node.example/api/v1/issuers/did:goya:a/status-lists/main";
+        assert!(is_own_status_list_uri(own, "did:goya:a"));
+        assert!(!is_own_status_list_uri(own, "did:goya:b"));
+        assert!(!is_own_status_list_uri(
+            "http://node.example/api/v1/issuers/did:goya:a/status-lists/main",
+            "did:goya:a"
+        ));
+        assert!(!is_own_status_list_uri(
+            "https://node.example/api/v1/issuers/did:goya:a/status-lists/",
+            "did:goya:a"
+        ));
+        assert!(!is_own_status_list_uri(
+            "https://node.example/api/v1/issuers/did:goya:a/status-lists/main/../x",
+            "did:goya:a"
+        ));
     }
 }

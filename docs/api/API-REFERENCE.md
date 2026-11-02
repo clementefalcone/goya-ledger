@@ -395,7 +395,7 @@ Query: `public_key`, `issued_at`, `signature` over `oid4vci:pending:{did}:{issue
 
 ### POST /issuers/{did}/issuances/{transaction_id}
 
-Body: `credential`, an SD-JWT VC (`<jwt>~<disclosure>~...`). The SD-JWT is the issuer's authorization. Unknown transaction or one of another issuer, or no registered key, returns 404; already delivered returns 409. The issuer JWT must be ES256 and verify with the registered key, else 401. Its `iss` must have the path `/api/v1/issuers/{did}` over https (the host is not compared, so proxies with another Host still match), `vct` must be the offered configuration's and `cnf.jwk` the holder key from the credential request (`kty`, `crv`, `x`, `y`), else 400. On success the wallet receives it from `/deferred_credential`.
+Body: `credential`, an SD-JWT VC (`<jwt>~<disclosure>~...`). The SD-JWT is the issuer's authorization. Unknown transaction or one of another issuer, or no registered key, returns 404; already delivered returns 409. The issuer JWT must be ES256 and verify with the registered key, else 401. Its `iss` must have the path `/api/v1/issuers/{did}` over https (the host is not compared, so proxies with another Host still match), `vct` must be the offered configuration's and `cnf.jwk` the holder key from the credential request (`kty`, `crv`, `x`, `y`), else 400. A `status` claim is optional; when present, `status.status_list.uri` must have the path `/api/v1/issuers/{did}/status-lists/{list_id}` of the same issuer over https, else 400. On success the wallet receives it from `/deferred_credential`.
 
 ### PUT /issuers/{did}/status-lists/{list_id}
 

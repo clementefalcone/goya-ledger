@@ -289,6 +289,18 @@ fn verify_delivered_credential(
             "cnf.jwk is not the holder key proven in the credential request".to_string(),
         ));
     }
+    let Some(status) = &verified.status else {
+        return Ok(());
+    };
+    let status_list_uri = status["status_list"]["uri"].as_str().unwrap_or_default();
+    if !status_lists::is_own_status_list_uri(status_list_uri, did) {
+        return Err(invalid_credential(
+            "status",
+            format!(
+                "status.status_list.uri {status_list_uri:?} is not https://{{host}}/api/v1/issuers/{did}/status-lists/{{list_id}}"
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -518,13 +530,8 @@ mod tests {
         })
     }
 
-    fn sd_jwt_vc(
-        credential_key: &EcdsaP256SigningProvider,
-        iss: &str,
-        vct: &str,
-        bound_jwk: &serde_json::Value,
-    ) -> String {
-        let claims = VcClaims {
+    fn vc_claims(iss: &str, vct: &str, bound_jwk: &serde_json::Value) -> VcClaims {
+        VcClaims {
             iss: iss.to_string(),
             sub: "holder".to_string(),
             iat: now_secs(),
@@ -533,8 +540,18 @@ mod tests {
             claims: vec![("given_name".to_string(), serde_json::json!("Ada"))],
             cnf: Some(serde_json::json!({ "jwk": bound_jwk })),
             status: None,
-        };
-        issue_sd_jwt_vc(&claims, credential_key).unwrap().compact
+        }
+    }
+
+    fn sd_jwt_vc(
+        credential_key: &EcdsaP256SigningProvider,
+        iss: &str,
+        vct: &str,
+        bound_jwk: &serde_json::Value,
+    ) -> String {
+        issue_sd_jwt_vc(&vc_claims(iss, vct, bound_jwk), credential_key)
+            .unwrap()
+            .compact
     }
 
     struct OpenIssuance {
@@ -941,5 +958,49 @@ mod tests {
         let newer = signed_at(200, "Ag");
         assert_eq!(publish_status!(&app, &uri, &newer), 200);
         assert_eq!(served_status_list!(&app, &uri).2, newer);
+    }
+
+    #[actix_web::test]
+    async fn delivery_accepts_only_a_status_list_of_the_same_issuer() {
+        let state = web::Data::new(AppState::test_default());
+        let pending = web::Data::new(PendingIssuanceStore::new());
+        let tokens = web::Data::new(AccessTokenStore::new());
+        let app = issuers_app!(state, pending, tokens);
+        let (issuer, other) = (issuer(), issuer());
+        let credential_key = EcdsaP256SigningProvider::generate();
+        register_key!(&app, &issuer, &credential_key);
+        let issuance = open_issuance(&tokens, &pending, &issuer.did);
+        let with_status = |status: serde_json::Value| {
+            let claims = VcClaims {
+                status: Some(status),
+                ..vc_claims(&issuer_url(&issuer.did), PID_VCT, &issuance.holder_jwk)
+            };
+            issue_sd_jwt_vc(&claims, &credential_key).unwrap().compact
+        };
+        let pointing_at = |did: &str| {
+            with_status(serde_json::json!({
+                "status_list": { "idx": 7, "uri": format!("{}/status-lists/{STATUS_LIST_ID}", issuer_url(did)) }
+            }))
+        };
+
+        let refusals = [
+            pointing_at(&other.did),
+            with_status(serde_json::json!({ "status_list": { "idx": 7 } })),
+        ];
+        for credential in &refusals {
+            assert_eq!(
+                deliver_status!(&app, issuer.did, issuance.transaction_id, credential),
+                400
+            );
+        }
+        assert_eq!(
+            deliver_status!(
+                &app,
+                issuer.did,
+                issuance.transaction_id,
+                &pointing_at(&issuer.did)
+            ),
+            200
+        );
     }
 }
