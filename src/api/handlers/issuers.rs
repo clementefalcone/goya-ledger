@@ -123,6 +123,7 @@ pub async fn publish_status_list(
     let store = get_channel_store(&state, ISSUER_CHANNEL)?;
     let change = status_lists::check_publish_status_list(store.as_ref(), &status_list)
         .map_err(identity_op_error)?;
+    status_lists::require_unexpired(&status_list.jwt, now_secs()).map_err(identity_op_error)?;
     if change == Change::AlreadyApplied {
         return Err(ApiError::Conflict {
             reason: format!(
@@ -958,6 +959,32 @@ mod tests {
         let newer = signed_at(200, "Ag");
         assert_eq!(publish_status!(&app, &uri, &newer), 200);
         assert_eq!(served_status_list!(&app, &uri).2, newer);
+    }
+
+    #[actix_web::test]
+    async fn status_list_already_expired_is_refused() {
+        let state = web::Data::new(AppState::test_default());
+        let app = issuers_app!(state);
+        let issuer = issuer();
+        let credential_key = EcdsaP256SigningProvider::generate();
+        register_key!(&app, &issuer, &credential_key);
+        let uri = status_list_uri(&issuer.did, STATUS_LIST_ID);
+        let expiring_at = |exp: serde_json::Value| {
+            let mut payload = status_list_payload(&issuer.did, STATUS_LIST_ID, now_secs());
+            payload["exp"] = exp;
+            status_list_jwt(&credential_key, status_list_header(), payload)
+        };
+
+        for exp in [now_secs() - 1, now_secs() - 3600] {
+            assert_eq!(publish_status!(&app, &uri, &expiring_at(exp.into())), 400);
+        }
+        assert_eq!(
+            publish_status!(&app, &uri, &expiring_at("soon".into())),
+            400
+        );
+        assert_eq!(served_status_list!(&app, &uri).0, 404);
+        let unexpired = expiring_at((now_secs() + 3600).into());
+        assert_eq!(publish_status!(&app, &uri, &unexpired), 200);
     }
 
     #[actix_web::test]

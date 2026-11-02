@@ -182,6 +182,19 @@ pub fn check_publish_status_list(
     Ok(Change::Write)
 }
 
+pub fn require_unexpired(jwt: &str, now: u64) -> Result<(), IdentityOpError> {
+    let payload = split_compact_jwt(jwt)?.payload;
+    let Some(exp) = payload.get("exp") else {
+        return Ok(());
+    };
+    if !exp.as_u64().is_some_and(|exp| exp > now) {
+        return Err(invalid(format!(
+            "status list JWT exp {exp} is not a unix time after now ({now})"
+        )));
+    }
+    Ok(())
+}
+
 pub fn apply_publish_status_list(
     store: &dyn BlockStore,
     status_list: &IssuerStatusList,
