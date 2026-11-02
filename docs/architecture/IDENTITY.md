@@ -211,7 +211,7 @@ Light client: `LocalIdentityStore` persists identities as JSON in `~/.goya/ident
 | GET | /store/credentials/{id} | Fetch credential |
 | GET | /credentials/{id}/vc | W3C VC export |
 
-OpenID4VCI and OpenID4VP endpoints in `oid4vci.rs` and `oid4vp.rs`. The node never signs credentials: an OID4VCI offer must be signed by the issuer DID, the access token is bound to that issuer and configuration, and `/credential` answers with a deferred `transaction_id` that `/deferred_credential` resolves once the issuer delivers the credential. There is no node issuer key, JWKS or status list.
+OpenID4VCI and OpenID4VP endpoints in `oid4vci.rs` and `oid4vp.rs`. The node never signs credentials: an OID4VCI offer must be signed by the issuer DID, the access token is bound to that issuer and configuration, and `/credential` answers with a deferred `transaction_id` that `/deferred_credential` resolves once the issuer delivers the credential. The issuer registers its own ES256 key, signed by its DID key and replicated on chain (`issuer_keys.rs`), lists its pending issuances with a DID signature and delivers SD-JWT VCs that the node checks against that key, the `iss` `https://{host}/api/v1/issuers/{did}`, the offered `vct` and the holder `cnf.jwk`. There is no node issuer key or status list.
 
 ## Stats
 

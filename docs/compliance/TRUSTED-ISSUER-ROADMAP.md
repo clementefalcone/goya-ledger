@@ -55,7 +55,7 @@ Costs:
 - [x] mdoc format (mso_mdoc, ISO 18013-5)
 - [x] Nonce endpoint (OID4VCI 1.0 Final §8)
 - [x] Deferred credential endpoint; credentials are signed by the offering issuer, not the node
-- [ ] Issuer key registration and delivery endpoint
+- [x] Issuer ES256 key registration (signed by the issuer DID, replicated on chain) and delivery endpoint
 - [ ] Issuer-hosted status lists
 - [x] Pre-authorized code grant only; each offer is signed by the issuer DID (authorization code, PAR and PKCE removed)
 - [x] OID4VP with DCQL (OID4VP 1.0 Final)

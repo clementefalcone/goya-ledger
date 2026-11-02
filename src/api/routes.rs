@@ -314,7 +314,13 @@ impl ApiRoutes {
             .service(oid4vci::credential_offer_endpoint)
             .service(oid4vci::credential_offer_get);
         cfg.service(issuers::register_credential_key)
-            .service(issuers::get_credential_key);
+            .service(issuers::get_credential_key)
+            .service(issuers::list_pending_issuances)
+            .service(issuers::deliver_issuance)
+            .route(
+                "/issuers/{did}/.well-known/jwt-vc-issuer",
+                web::get().to(issuers::jwt_vc_issuer_metadata),
+            );
         // OpenID4VP (EUDI Wallet credential presentation)
         cfg.service(oid4vp::register_rp)
             .service(oid4vp::list_rps)

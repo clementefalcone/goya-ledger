@@ -385,6 +385,18 @@ Registers the ES256 key with which `{did}` signs SD-JWT VCs. Body: `jwk` (public
 
 The registered key with the DID signature that binds it, or 404.
 
+### GET /.well-known/jwt-vc-issuer/api/v1/issuers/{did}
+
+JWT VC Issuer Metadata `{issuer, jwks:{keys:[jwk]}}` for the SD-JWT `iss` `https://{host}/api/v1/issuers/{did}`. Also served at `/api/v1/issuers/{did}/.well-known/jwt-vc-issuer`. 404 until a key is registered.
+
+### GET /issuers/{did}/issuances
+
+Query: `public_key`, `issued_at`, `signature` over `oid4vci:pending:{did}:{issued_at}` by a key that controls `{did}`. `issued_at` more than 300 s from now or a bad key or signature returns 401. Returns the issuer's undelivered issuances: `transaction_id`, `configuration_id`, `vct`, `holder_jwk`, `created_at`.
+
+### POST /issuers/{did}/issuances/{transaction_id}
+
+Body: `credential`, an SD-JWT VC (`<jwt>~<disclosure>~...`). The SD-JWT is the issuer's authorization. Unknown transaction or one of another issuer, or no registered key, returns 404; already delivered returns 409. The issuer JWT must be ES256 and verify with the registered key, else 401. Its `iss` must have the path `/api/v1/issuers/{did}` over https (the host is not compared, so proxies with another Host still match), `vct` must be the offered configuration's and `cnf.jwk` the holder key from the credential request (`kty`, `crv`, `x`, `y`), else 400. On success the wallet receives it from `/deferred_credential`.
+
 ---
 
 ## Events (WebSocket)

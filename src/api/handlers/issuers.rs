@@ -1,11 +1,18 @@
 use crate::api::errors::{ApiError, ApiResponse, ApiResult};
 use crate::api::handlers::channels::get_channel_store;
-use crate::api::handlers::identity::{commit_ledger_op, identity_op_error};
+use crate::api::handlers::identity::{commit_ledger_op, identity_op_error, now_secs};
+use crate::api::handlers::oid4vci::{
+    configuration_vct, credential_issuer, extract_pubkey_from_jwk, PendingIssuance,
+    PendingIssuanceStore, SIGNED_REQUEST_FRESHNESS_SECS,
+};
 use crate::app_state::AppState;
+use crate::identity::credential_ops::require_issuer_signature;
 use crate::identity::issuer_keys;
 use crate::identity::operations::Change;
+use crate::identity::sd_jwt::verify_sd_jwt_vc;
+use crate::identity::signing::SigningAlgorithm;
 use crate::storage::traits::{IssuerCredentialKey, P256PublicJwk, TxPayload};
-use actix_web::{get, post, web, HttpResponse};
+use actix_web::{get, post, web, HttpRequest, HttpResponse};
 
 const ISSUER_CHANNEL: &str = "default";
 
@@ -62,10 +69,7 @@ pub async fn register_credential_key(
     )))
 }
 
-pub(crate) fn read_credential_key(
-    state: &AppState,
-    did: &str,
-) -> Result<IssuerCredentialKey, ApiError> {
+fn read_credential_key(state: &AppState, did: &str) -> Result<IssuerCredentialKey, ApiError> {
     get_channel_store(state, ISSUER_CHANNEL)?
         .read_issuer_credential_key(did)
         .map_err(|_| ApiError::NotFound {
@@ -85,10 +89,191 @@ pub async fn get_credential_key(
     )))
 }
 
+pub async fn jwt_vc_issuer_metadata(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    req: HttpRequest,
+) -> ApiResult<HttpResponse> {
+    let did = path.into_inner();
+    let registration = read_credential_key(&state, &did)?;
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "issuer": format!("{}/api/v1/issuers/{did}", credential_issuer(&req)),
+        "jwks": { "keys": [registration.jwk] },
+    })))
+}
+
+pub fn pending_issuances_message(did: &str, issued_at: u64) -> String {
+    format!("oid4vci:pending:{did}:{issued_at}")
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct PendingIssuancesQuery {
+    pub public_key: String,
+    pub issued_at: u64,
+    pub signature: String,
+}
+
+#[derive(serde::Serialize)]
+struct PendingIssuanceView {
+    transaction_id: String,
+    configuration_id: String,
+    vct: Option<String>,
+    holder_jwk: serde_json::Value,
+    created_at: u64,
+}
+
+#[get("/issuers/{did}/issuances")]
+pub async fn list_pending_issuances(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<PendingIssuancesQuery>,
+    pending_store: web::Data<PendingIssuanceStore>,
+) -> ApiResult<HttpResponse> {
+    let did = path.into_inner();
+    if now_secs().abs_diff(query.issued_at) > SIGNED_REQUEST_FRESHNESS_SECS {
+        return Err(ApiError::UnauthorizedWithMessage {
+            message: format!(
+                "issued_at {} is more than {SIGNED_REQUEST_FRESHNESS_SECS} s from now",
+                query.issued_at
+            ),
+        });
+    }
+    require_issuer_signature(
+        get_channel_store(&state, ISSUER_CHANNEL)?.as_ref(),
+        &did,
+        &query.public_key,
+        &pending_issuances_message(&did, query.issued_at),
+        &query.signature,
+    )
+    .map_err(identity_op_error)?;
+    let pending: Vec<PendingIssuanceView> = pending_store
+        .undelivered_by_issuer(&did)
+        .into_iter()
+        .map(|(transaction_id, issuance)| PendingIssuanceView {
+            transaction_id,
+            vct: configuration_vct(&issuance.grant.configuration_id),
+            configuration_id: issuance.grant.configuration_id,
+            holder_jwk: issuance.holder_jwk,
+            created_at: issuance.created_at,
+        })
+        .collect();
+    Ok(HttpResponse::Ok().json(ApiResponse::success(
+        pending,
+        uuid::Uuid::new_v4().to_string(),
+    )))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct DeliverCredentialRequest {
+    pub credential: String,
+}
+
+fn names_issuer(iss: &str, did: &str) -> bool {
+    iss.strip_prefix("https://")
+        .and_then(|authority_and_path| authority_and_path.split_once('/'))
+        .is_some_and(|(host, path)| !host.is_empty() && path == format!("api/v1/issuers/{did}"))
+}
+
+fn is_same_public_jwk(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    ["kty", "crv", "x", "y"]
+        .iter()
+        .all(|member| left.get(member) == right.get(member))
+}
+
+fn invalid_credential(field: &str, reason: String) -> ApiError {
+    ApiError::ValidationError {
+        field: field.to_string(),
+        reason,
+    }
+}
+
+fn verify_delivered_credential(
+    credential: &str,
+    registration: &IssuerCredentialKey,
+    issuance: &PendingIssuance,
+) -> Result<(), ApiError> {
+    let did = &registration.did;
+    let credential_key_hex = extract_pubkey_from_jwk(&serde_json::json!(registration.jwk), "ES256")
+        .ok_or_else(|| ApiError::InternalError {
+            reason: format!("registered credential key of {did} is not a P-256 JWK"),
+        })?;
+    let verified = verify_sd_jwt_vc(credential, &credential_key_hex)
+        .ok()
+        .filter(|verified| verified.algorithm == SigningAlgorithm::EcdsaP256)
+        .ok_or_else(|| ApiError::UnauthorizedWithMessage {
+            message: format!(
+                "credential is not an SD-JWT VC signed with ES256 by the registered credential key of {did}"
+            ),
+        })?;
+    if !names_issuer(&verified.iss, did) {
+        return Err(invalid_credential(
+            "iss",
+            format!(
+                "iss {} is not https://{{host}}/api/v1/issuers/{did}",
+                verified.iss
+            ),
+        ));
+    }
+    let expected_vct = configuration_vct(&issuance.grant.configuration_id);
+    if expected_vct.as_deref() != Some(verified.vct.as_str()) {
+        return Err(invalid_credential(
+            "vct",
+            format!(
+                "vct {} is not {expected_vct:?} of configuration {}",
+                verified.vct, issuance.grant.configuration_id
+            ),
+        ));
+    }
+    let bound_jwk = verified.cnf.as_ref().and_then(|cnf| cnf.get("jwk"));
+    if !bound_jwk.is_some_and(|jwk| is_same_public_jwk(jwk, &issuance.holder_jwk)) {
+        return Err(invalid_credential(
+            "cnf",
+            "cnf.jwk is not the holder key proven in the credential request".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[post("/issuers/{did}/issuances/{transaction_id}")]
+pub async fn deliver_issuance(
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+    body: web::Json<DeliverCredentialRequest>,
+    pending_store: web::Data<PendingIssuanceStore>,
+) -> ApiResult<HttpResponse> {
+    let (did, transaction_id) = path.into_inner();
+    let issuance = pending_store
+        .find(&transaction_id)
+        .filter(|issuance| issuance.grant.issuer_did == did)
+        .ok_or_else(|| ApiError::NotFound {
+            resource: format!("pending issuance {transaction_id} of issuer {did}"),
+        })?;
+    if issuance.credential.is_some() {
+        return Err(ApiError::Conflict {
+            reason: format!("issuance {transaction_id} was already delivered"),
+        });
+    }
+    let registration = read_credential_key(&state, &did)?;
+    verify_delivered_credential(&body.credential, &registration, &issuance)?;
+    pending_store
+        .deliver(&transaction_id, body.into_inner().credential)
+        .map_err(|reason| ApiError::Conflict {
+            reason: format!("issuance {transaction_id} not delivered: {reason}"),
+        })?;
+    Ok(HttpResponse::Ok().json(ApiResponse::success(
+        serde_json::json!({ "transaction_id": transaction_id }),
+        uuid::Uuid::new_v4().to_string(),
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::handlers::oid4vci::{
+        deferred_credential_endpoint, AccessTokenStore, IssuanceGrant,
+    };
     use crate::identity::issuer_keys::credential_key_message;
+    use crate::identity::sd_jwt::{issue_sd_jwt_vc, VcClaims};
     use crate::identity::signing::{
         EcdsaP256SigningProvider, SigningProvider, SoftwareSigningProvider,
     };
@@ -145,12 +330,34 @@ mod tests {
 
     macro_rules! issuers_app {
         ($state:expr) => {
+            issuers_app!(
+                $state,
+                web::Data::new(PendingIssuanceStore::new()),
+                web::Data::new(AccessTokenStore::new())
+            )
+        };
+        ($state:expr, $pending:expr, $tokens:expr) => {
             test::init_service(
-                App::new().app_data($state.clone()).service(
-                    web::scope("/api/v1")
-                        .service(register_credential_key)
-                        .service(get_credential_key),
-                ),
+                App::new()
+                    .app_data($state.clone())
+                    .app_data($pending.clone())
+                    .app_data($tokens.clone())
+                    .service(deferred_credential_endpoint)
+                    .route(
+                        "/.well-known/jwt-vc-issuer/api/v1/issuers/{did}",
+                        web::get().to(jwt_vc_issuer_metadata),
+                    )
+                    .service(
+                        web::scope("/api/v1")
+                            .service(register_credential_key)
+                            .service(get_credential_key)
+                            .service(list_pending_issuances)
+                            .service(deliver_issuance)
+                            .route(
+                                "/issuers/{did}/.well-known/jwt-vc-issuer",
+                                web::get().to(jwt_vc_issuer_metadata),
+                            ),
+                    ),
             )
             .await
         };
@@ -234,5 +441,237 @@ mod tests {
         let mut body = key_registration_body(&issuer, &issuer.did, &jwk, 100);
         body["jwk"]["d"] = base64url(&[7u8; 32]).into();
         assert_eq!(post_status!(&app, &uri, &body), 400);
+    }
+
+    const PID_CONFIGURATION: &str = "eudi_pid_sd_jwt";
+    const PID_VCT: &str = "urn:eudi:pid:1";
+
+    fn issuer_url(did: &str) -> String {
+        format!("https://localhost:8080/api/v1/issuers/{did}")
+    }
+
+    fn holder_jwk() -> serde_json::Value {
+        serde_json::json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": base64url(&SoftwareSigningProvider::generate().public_key()),
+        })
+    }
+
+    fn sd_jwt_vc(
+        credential_key: &EcdsaP256SigningProvider,
+        iss: &str,
+        vct: &str,
+        bound_jwk: &serde_json::Value,
+    ) -> String {
+        let claims = VcClaims {
+            iss: iss.to_string(),
+            sub: "holder".to_string(),
+            iat: now_secs(),
+            exp: now_secs() + 3600,
+            vct: vct.to_string(),
+            claims: vec![("given_name".to_string(), serde_json::json!("Ada"))],
+            cnf: Some(serde_json::json!({ "jwk": bound_jwk })),
+            status: None,
+        };
+        issue_sd_jwt_vc(&claims, credential_key).unwrap().compact
+    }
+
+    struct OpenIssuance {
+        access_token: String,
+        transaction_id: String,
+        holder_jwk: serde_json::Value,
+    }
+
+    fn open_issuance(
+        tokens: &AccessTokenStore,
+        pending: &PendingIssuanceStore,
+        did: &str,
+    ) -> OpenIssuance {
+        let grant = IssuanceGrant {
+            issuer_did: did.to_string(),
+            configuration_id: PID_CONFIGURATION.to_string(),
+        };
+        let access_token = tokens.issue(grant.clone(), 3600);
+        let holder_jwk = holder_jwk();
+        let transaction_id = pending.record(&access_token, grant, holder_jwk.clone());
+        OpenIssuance {
+            access_token,
+            transaction_id,
+            holder_jwk,
+        }
+    }
+
+    macro_rules! register_key {
+        ($app:expr, $issuer:expr, $credential_key:expr) => {{
+            let jwk = public_jwk($credential_key);
+            let uri = format!("/api/v1/issuers/{}/credential-key", $issuer.did);
+            let body = key_registration_body($issuer, &$issuer.did, &jwk, now_secs());
+            assert_eq!(post_status!($app, &uri, &body), 201);
+            jwk
+        }};
+    }
+
+    macro_rules! deliver_status {
+        ($app:expr, $did:expr, $transaction_id:expr, $credential:expr) => {
+            post_status!(
+                $app,
+                &format!("/api/v1/issuers/{}/issuances/{}", $did, $transaction_id),
+                &serde_json::json!({ "credential": $credential })
+            )
+        };
+    }
+
+    #[actix_web::test]
+    async fn jwt_vc_issuer_metadata_serves_the_registered_key_only() {
+        let state = web::Data::new(AppState::test_default());
+        let app = issuers_app!(state);
+        let issuer = issuer();
+        let uris = [
+            format!("/.well-known/jwt-vc-issuer/api/v1/issuers/{}", issuer.did),
+            format!("/api/v1/issuers/{}/.well-known/jwt-vc-issuer", issuer.did),
+        ];
+        let get = |uri: &str| {
+            test::TestRequest::get()
+                .uri(uri)
+                .insert_header(("host", "localhost:8080"))
+                .to_request()
+        };
+        for uri in &uris {
+            assert_eq!(test::call_service(&app, get(uri)).await.status(), 404);
+        }
+        let jwk = register_key!(&app, &issuer, &EcdsaP256SigningProvider::generate());
+        for uri in &uris {
+            let metadata: serde_json::Value = test::call_and_read_body_json(&app, get(uri)).await;
+            assert_eq!(
+                metadata,
+                serde_json::json!({ "issuer": issuer_url(&issuer.did), "jwks": { "keys": [jwk] } })
+            );
+        }
+    }
+
+    #[actix_web::test]
+    async fn pending_issuances_are_listed_only_to_their_issuer_with_a_fresh_signature() {
+        let state = web::Data::new(AppState::test_default());
+        let pending = web::Data::new(PendingIssuanceStore::new());
+        let tokens = web::Data::new(AccessTokenStore::new());
+        let app = issuers_app!(state, pending, tokens);
+        let (issuer, other) = (issuer(), issuer());
+        let own = open_issuance(&tokens, &pending, &issuer.did);
+        open_issuance(&tokens, &pending, &other.did);
+
+        let list_status = |signer: &Issuer, issued_at: u64| {
+            let message = pending_issuances_message(&issuer.did, issued_at);
+            let signature = hex::encode(signer.key.sign(message.as_bytes()).unwrap());
+            test::TestRequest::get()
+                .uri(&format!(
+                    "/api/v1/issuers/{}/issuances?public_key={}&issued_at={issued_at}&signature={signature}",
+                    issuer.did, signer.public_key
+                ))
+                .to_request()
+        };
+        let stale = list_status(&issuer, now_secs() - 301);
+        assert_eq!(test::call_service(&app, stale).await.status(), 401);
+        let by_other = list_status(&other, now_secs());
+        assert_eq!(test::call_service(&app, by_other).await.status(), 401);
+
+        let listed: serde_json::Value =
+            test::call_and_read_body_json(&app, list_status(&issuer, now_secs())).await;
+        let items = listed["data"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["transaction_id"], own.transaction_id);
+        assert_eq!(items[0]["configuration_id"], PID_CONFIGURATION);
+        assert_eq!(items[0]["vct"], PID_VCT);
+        assert_eq!(items[0]["holder_jwk"], own.holder_jwk);
+    }
+
+    #[actix_web::test]
+    async fn delivered_credential_reaches_the_wallet_through_deferred_credential() {
+        let state = web::Data::new(AppState::test_default());
+        let pending = web::Data::new(PendingIssuanceStore::new());
+        let tokens = web::Data::new(AccessTokenStore::new());
+        let app = issuers_app!(state, pending, tokens);
+        let issuer = issuer();
+        let credential_key = EcdsaP256SigningProvider::generate();
+        register_key!(&app, &issuer, &credential_key);
+        let issuance = open_issuance(&tokens, &pending, &issuer.did);
+        let credential = sd_jwt_vc(
+            &credential_key,
+            &issuer_url(&issuer.did),
+            PID_VCT,
+            &issuance.holder_jwk,
+        );
+
+        assert_eq!(
+            deliver_status!(&app, issuer.did, issuance.transaction_id, &credential),
+            200
+        );
+        assert_eq!(
+            deliver_status!(&app, issuer.did, issuance.transaction_id, &credential),
+            409
+        );
+        let req = test::TestRequest::post()
+            .uri("/deferred_credential")
+            .insert_header(("authorization", format!("Bearer {}", issuance.access_token)))
+            .set_json(serde_json::json!({ "transaction_id": issuance.transaction_id }))
+            .to_request();
+        let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
+        assert_eq!(
+            body,
+            serde_json::json!({ "credentials": [{ "credential": credential }] })
+        );
+    }
+
+    #[actix_web::test]
+    async fn delivery_refuses_a_credential_that_does_not_match_the_issuance() {
+        let state = web::Data::new(AppState::test_default());
+        let pending = web::Data::new(PendingIssuanceStore::new());
+        let tokens = web::Data::new(AccessTokenStore::new());
+        let app = issuers_app!(state, pending, tokens);
+        let (issuer, other) = (issuer(), issuer());
+        let credential_key = EcdsaP256SigningProvider::generate();
+        register_key!(&app, &issuer, &credential_key);
+        register_key!(&app, &other, &EcdsaP256SigningProvider::generate());
+        let issuance = open_issuance(&tokens, &pending, &issuer.did);
+        let iss = issuer_url(&issuer.did);
+        let holder = &issuance.holder_jwk;
+        let refusals = [
+            (
+                sd_jwt_vc(&EcdsaP256SigningProvider::generate(), &iss, PID_VCT, holder),
+                401,
+            ),
+            (
+                sd_jwt_vc(&credential_key, &issuer_url(&other.did), PID_VCT, holder),
+                400,
+            ),
+            (
+                sd_jwt_vc(&credential_key, &iss, "IdentityCredential", holder),
+                400,
+            ),
+            (
+                sd_jwt_vc(&credential_key, &iss, PID_VCT, &holder_jwk()),
+                400,
+            ),
+        ];
+        for (credential, status) in &refusals {
+            assert_eq!(
+                deliver_status!(&app, issuer.did, issuance.transaction_id, credential),
+                *status
+            );
+        }
+        let genuine = sd_jwt_vc(&credential_key, &iss, PID_VCT, holder);
+        assert_eq!(
+            deliver_status!(&app, other.did, issuance.transaction_id, &genuine),
+            404
+        );
+        assert_eq!(
+            deliver_status!(&app, issuer.did, "goya_tx_unknown", &genuine),
+            404
+        );
+        assert!(pending
+            .find(&issuance.transaction_id)
+            .unwrap()
+            .credential
+            .is_none());
     }
 }

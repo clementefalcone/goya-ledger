@@ -113,7 +113,7 @@ fn now_secs() -> u64 {
 }
 
 /// Extract raw public key hex from a JWK. Supports OKP/Ed25519 and RSA.
-fn extract_pubkey_from_jwk(jwk: &serde_json::Value, alg: &str) -> Option<String> {
+pub(crate) fn extract_pubkey_from_jwk(jwk: &serde_json::Value, alg: &str) -> Option<String> {
     match alg {
         "EdDSA" => {
             let x = jwk.get("x")?.as_str()?;
@@ -520,6 +520,7 @@ impl Default for AccessTokenStore {
     }
 }
 
+#[derive(Clone)]
 pub struct PendingIssuance {
     pub access_token: String,
     pub grant: IssuanceGrant,
@@ -560,6 +561,26 @@ impl PendingIssuanceStore {
             },
         );
         transaction_id
+    }
+
+    pub fn find(&self, transaction_id: &str) -> Option<PendingIssuance> {
+        self.issuances_by_transaction
+            .lock()
+            .unwrap()
+            .get(transaction_id)
+            .cloned()
+    }
+
+    pub fn undelivered_by_issuer(&self, issuer_did: &str) -> Vec<(String, PendingIssuance)> {
+        self.issuances_by_transaction
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, issuance)| {
+                issuance.grant.issuer_did == issuer_did && issuance.credential.is_none()
+            })
+            .map(|(transaction_id, issuance)| (transaction_id.clone(), issuance.clone()))
+            .collect()
     }
 
     pub fn deliver(&self, transaction_id: &str, credential: String) -> Result<(), &'static str> {
@@ -749,6 +770,23 @@ pub async fn issuer_metadata(req: HttpRequest) -> ApiResult<HttpResponse> {
     });
 
     Ok(HttpResponse::Ok().json(metadata))
+}
+
+pub(crate) fn credential_issuer(req: &HttpRequest) -> String {
+    let host = req
+        .headers()
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost:8080");
+    format!("https://{host}")
+}
+
+pub(crate) fn configuration_vct(configuration_id: &str) -> Option<String> {
+    credential_configurations()
+        .get(configuration_id)?
+        .get("vct")?
+        .as_str()
+        .map(String::from)
 }
 
 fn credential_configurations() -> serde_json::Value {
@@ -1187,7 +1225,7 @@ pub struct CredentialOfferRequest {
     pub signature: String,
 }
 
-const OFFER_FRESHNESS_SECS: u64 = 300;
+pub(crate) const SIGNED_REQUEST_FRESHNESS_SECS: u64 = 300;
 
 pub fn offer_message(issuer_did: &str, configuration_id: &str, issued_at: u64) -> String {
     format!("oid4vci:offer:{issuer_did}:{configuration_id}:{issued_at}")
@@ -1215,12 +1253,12 @@ pub async fn credential_offer_endpoint(
             400,
         )));
     }
-    if now_secs().abs_diff(body.issued_at) > OFFER_FRESHNESS_SECS {
+    if now_secs().abs_diff(body.issued_at) > SIGNED_REQUEST_FRESHNESS_SECS {
         return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
             err_dto(
                 "invalid_request",
                 &format!(
-                    "issued_at {} is more than {OFFER_FRESHNESS_SECS} s from now",
+                    "issued_at {} is more than {SIGNED_REQUEST_FRESHNESS_SECS} s from now",
                     body.issued_at
                 ),
             ),

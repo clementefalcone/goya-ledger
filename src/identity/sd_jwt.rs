@@ -66,6 +66,7 @@ pub struct VerifiedSdJwt {
     pub algorithm: SigningAlgorithm,
     /// True when a valid Key Binding JWT was present and verified.
     pub kb_verified: bool,
+    pub cnf: Option<serde_json::Value>,
 }
 
 fn base64url_encode(data: &[u8]) -> String {
@@ -575,6 +576,7 @@ fn verify_sd_jwt_vc_full(
         disclosed_claims,
         algorithm,
         kb_verified,
+        cnf: payload.get("cnf").cloned(),
     })
 }
 
