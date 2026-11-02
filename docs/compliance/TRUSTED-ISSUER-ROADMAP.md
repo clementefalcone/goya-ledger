@@ -52,7 +52,7 @@ Costs:
 
 - [x] OID4VCI v1 (62/62 conformance assertions)
 - [x] SD-JWT VC format (vc+sd-jwt, ES256)
-- [x] mdoc format (mso_mdoc, ISO 18013-5)
+- [ ] mdoc format (mso_mdoc, ISO 18013-5): not advertised until issuer delivery verifies it
 - [x] Nonce endpoint (OID4VCI 1.0 Final §8)
 - [x] Deferred credential endpoint; credentials are signed by the offering issuer, not the node
 - [x] Issuer ES256 key registration (signed by the issuer DID, replicated on chain) and delivery endpoint

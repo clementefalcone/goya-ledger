@@ -799,7 +799,7 @@ fn credential_configurations() -> serde_json::Value {
                 "type": ["VerifiableCredential", "IdentityCredential"]
             },
             "cryptographic_binding_methods_supported": ["jwk"],
-            "credential_signing_alg_values_supported": ["ES256", "EdDSA", "ML-DSA-65"],
+            "credential_signing_alg_values_supported": ["ES256"],
             "proof_types_supported": {
                 "jwt": {
                     "proof_signing_alg_values_supported": ["ES256", "ES384", "ES512"]
@@ -847,51 +847,6 @@ fn credential_configurations() -> serde_json::Value {
                 "background_color": "#2C3E50",
                 "text_color": "#FFFFFF"
             }],
-        },
-        "eudi_pid_mdoc": {
-            "format": "mso_mdoc",
-            "doctype": "eu.europa.ec.eudi.pid.1",
-            "credential_definition": {
-                "@context": ["https://www.w3.org/ns/credentials/v2"],
-                "type": ["VerifiableCredential"],
-                "doctype": "eu.europa.ec.eudi.pid.1"
-            },
-            "cryptographic_binding_methods_supported": ["cose_key"],
-            "credential_signing_alg_values_supported": ["ES256", "EdDSA"],
-            "proof_types_supported": {
-                "jwt": {
-                    "proof_signing_alg_values_supported": ["ES256"]
-                }
-            },
-        },
-        "goya_identity_jwt_vc_json_ld": {
-            "format": "jwt_vc_json-ld",
-            "credential_definition": {
-                "@context": [
-                    "https://www.w3.org/ns/credentials/v2"
-                ],
-                "type": ["VerifiableCredential", "IdentityCredential"]
-            },
-            "cryptographic_binding_methods_supported": ["did:jwk", "jwk"],
-            "credential_signing_alg_values_supported": ["ES256", "EdDSA"],
-            "proof_types_supported": {
-                "jwt": {
-                    "proof_signing_alg_values_supported": ["ES256"]
-                }
-            },
-            "display": [{
-                "name": "Identity Credential",
-                "locale": "en",
-                "description": "W3C Verifiable Credential (JSON-LD)",
-                "background_color": "#1A9E8F",
-                "text_color": "#FFFFFF"
-            }],
-            "claims": [
-                { "path": ["credentialSubject", "given_name"], "mandatory": false, "display": [{"name": "Given Name", "locale": "en"}] },
-                { "path": ["credentialSubject", "family_name"], "mandatory": false, "display": [{"name": "Family Name", "locale": "en"}] },
-                { "path": ["credentialSubject", "birth_date"], "mandatory": false, "display": [{"name": "Birth Date", "locale": "en"}] },
-                { "path": ["credentialSubject", "nationality"], "mandatory": false, "display": [{"name": "Nationality", "locale": "en"}] }
-            ]
         }
     })
 }
@@ -1041,13 +996,11 @@ pub struct CredentialRequest {
     /// OID4VCI 1.0: credential_configuration_id (resolves format+vct from metadata).
     #[serde(default)]
     pub credential_configuration_id: Option<String>,
-    /// Legacy: explicit format (vc+sd-jwt / mso_mdoc).
+    /// Legacy: explicit format (vc+sd-jwt).
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
     pub vct: Option<String>,
-    #[serde(default)]
-    pub doctype: Option<String>,
     /// OID4VCI 1.0: `proofs` (plural) — map of proof_type → [jwt, ...].
     #[serde(default)]
     pub proofs: Option<ProofsObject>,
@@ -1068,7 +1021,6 @@ impl CredentialRequest {
             .find(|(_, configuration)| {
                 configuration["format"].as_str() == Some(format)
                     && configuration["vct"].as_str() == self.vct.as_deref()
-                    && configuration["doctype"].as_str() == self.doctype.as_deref()
             })
             .map(|(configuration_id, _)| configuration_id.clone())
     }
@@ -1488,8 +1440,15 @@ mod tests {
             body["grant_types_supported"],
             serde_json::json!([PRE_AUTHORIZED_CODE_GRANT])
         );
-        let pid_cfg = &body["credential_configurations_supported"]["eudi_pid_sd_jwt"];
-        assert_eq!(pid_cfg["format"], "vc+sd-jwt");
+        let configurations = body["credential_configurations_supported"]
+            .as_object()
+            .unwrap();
+        assert!(configurations.values().all(|configuration| {
+            configuration["format"] == "vc+sd-jwt"
+                && configuration["vct"].is_string()
+                && configuration["credential_signing_alg_values_supported"]
+                    == serde_json::json!(["ES256"])
+        }));
     }
 
     #[actix_web::test]
@@ -1817,7 +1776,7 @@ mod tests {
             .insert_header(("host", "localhost:8080"))
             .insert_header(("authorization", format!("Bearer {token}")))
             .set_json(serde_json::json!({
-                "credential_configuration_id": "eudi_pid_mdoc",
+                "credential_configuration_id": "IdentityCredential_sd_jwt",
                 "proofs": { "jwt": [make_signed_proof_jwt(&holder, &nonce, "https://localhost:8080", now_secs())] },
             }))
             .to_request();
@@ -1949,7 +1908,7 @@ mod tests {
             "goya_at_holder",
             IssuanceGrant {
                 issuer_did: "did:goya:issuer".to_string(),
-                configuration_id: "eudi_pid_mdoc".to_string(),
+                configuration_id: "eudi_pid_sd_jwt".to_string(),
             },
             serde_json::json!({}),
         );
@@ -2411,6 +2370,19 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn offer_for_a_configuration_without_issuer_delivery_is_refused() {
+        let app = offer_app!(web::Data::new(CredentialOfferStore::new()));
+        let issuer = SoftwareSigningProvider::generate();
+        for configuration_id in ["eudi_pid_mdoc", "goya_identity_jwt_vc_json_ld"] {
+            let req = test::TestRequest::post()
+                .uri("/credential_offer")
+                .set_json(signed_offer_request(&issuer, configuration_id, now_secs()))
+                .to_request();
+            assert_eq!(test::call_service(&app, req).await.status(), 400);
+        }
+    }
+
+    #[actix_web::test]
     async fn token_carries_the_grant_of_its_offer() {
         let token_store = web::Data::new(AccessTokenStore::new());
         let app = test::init_service(
@@ -2423,7 +2395,7 @@ mod tests {
         )
         .await;
         let issuer = SoftwareSigningProvider::generate();
-        let offer_request = signed_offer_request(&issuer, "eudi_pid_mdoc", now_secs());
+        let offer_request = signed_offer_request(&issuer, "eudi_pid_sd_jwt", now_secs());
         let req = test::TestRequest::post()
             .uri("/credential_offer")
             .set_json(&offer_request)
@@ -2442,7 +2414,7 @@ mod tests {
             token_store.grant_for(token["access_token"].as_str().unwrap()),
             Some(IssuanceGrant {
                 issuer_did: offer_request.issuer_did,
-                configuration_id: "eudi_pid_mdoc".to_string(),
+                configuration_id: "eudi_pid_sd_jwt".to_string(),
             })
         );
     }

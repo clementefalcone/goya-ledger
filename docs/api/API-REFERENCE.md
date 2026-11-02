@@ -351,7 +351,7 @@ List credentials by subject DID.
 
 ## OpenID4VCI (credential delivery)
 
-The node does not sign credentials. It brokers delivery from the issuer that signed the offer to the wallet, using the pre-authorized code grant and the deferred flow. Endpoints are served under `/api/v1` and at the root.
+The node does not sign credentials. It brokers delivery from the issuer that signed the offer to the wallet, using the pre-authorized code grant and the deferred flow. Endpoints are served under `/api/v1` and at the root. Only SD-JWT VC configurations (`vc+sd-jwt`, ES256) are advertised, since issuer delivery verifies only that format; offers for any other configuration return 400.
 
 ### POST /credential_offer
 
@@ -371,7 +371,7 @@ Returns a single-use `c_nonce` (300 s).
 
 ### POST /credential
 
-Bearer or DPoP token. The requested `credential_configuration_id` (or legacy `format` + `vct`/`doctype`) must be the offered one, else 400 `invalid_credential_request`. Requires a JWT proof (`proofs.jwt[0]` or `proof.jwt`) whose header carries the holder `jwk`, signed by that key over a `c_nonce` from `/nonce`; otherwise 400 `invalid_proof`. Returns 202 `{transaction_id, interval}`.
+Bearer or DPoP token. The requested `credential_configuration_id` (or legacy `format` + `vct`) must be the offered one, else 400 `invalid_credential_request`. Requires a JWT proof (`proofs.jwt[0]` or `proof.jwt`) whose header carries the holder `jwk`, signed by that key over a `c_nonce` from `/nonce`; otherwise 400 `invalid_proof`. Returns 202 `{transaction_id, interval}`.
 
 ### POST /deferred_credential
 

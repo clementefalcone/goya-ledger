@@ -55,19 +55,13 @@ assert_not_empty "$NONCE_ENDPOINT" "nonce_endpoint present (OID4VCI 1.0 Final)"
 assert_not_empty "$TOKEN_ENDPOINT" "token_endpoint present"
 
 CONFIGS=$(echo "$META" | jq '.credential_configurations_supported | keys | length')
-assert_eq "$([ "$CONFIGS" -ge 2 ] && echo 'true' || echo 'false')" "true" "At least 2 credential configs (PID SD-JWT + mdoc)"
+assert_eq "$([ "$CONFIGS" -ge 2 ] && echo 'true' || echo 'false')" "true" "At least 2 credential configs (SD-JWT VC only)"
 
 PID_FORMAT=$(echo "$META" | jq -r '.credential_configurations_supported.eudi_pid_sd_jwt.format // empty')
 assert_eq "$PID_FORMAT" "vc+sd-jwt" "eudi_pid_sd_jwt format is vc+sd-jwt"
 
 PID_VCT=$(echo "$META" | jq -r '.credential_configurations_supported.eudi_pid_sd_jwt.vct // empty')
 assert_eq "$PID_VCT" "urn:eudi:pid:1" "eudi_pid_sd_jwt vct is urn:eudi:pid:1"
-
-MDOC_FORMAT=$(echo "$META" | jq -r '.credential_configurations_supported.eudi_pid_mdoc.format // empty')
-assert_eq "$MDOC_FORMAT" "mso_mdoc" "eudi_pid_mdoc format is mso_mdoc"
-
-MDOC_DOCTYPE=$(echo "$META" | jq -r '.credential_configurations_supported.eudi_pid_mdoc.doctype // empty')
-assert_eq "$MDOC_DOCTYPE" "eu.europa.ec.eudi.pid.1" "eudi_pid_mdoc doctype correct"
 
 GRANTS=$(echo "$META" | jq -r '.grant_types_supported // [] | join(",")')
 assert_contains "$GRANTS" "pre-authorized_code" "Supports pre-authorized_code grant"
@@ -243,29 +237,6 @@ if [ "$CRED_STATUS" = "ok" ] && [ -n "$SD_JWT" ]; then
 else
   ERROR_DESC=$(echo "$CRED_RESP" | jq -r '.error_description // .error.message // "unknown"')
   fail "Credential issuance failed: $ERROR_DESC"
-fi
-
-step "Phase 11 — Credential Issuance (mdoc)"
-
-MDOC_RESP=$(curl -sk -X POST "$NODE/credential" \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -d "{
-    \"credential_configuration_id\": \"eudi_pid_mdoc\",
-    \"claims\": {
-      \"given_name\": \"Juan\",
-      \"family_name\": \"Pérez\"
-    }
-  }")
-MDOC_FORMAT_RESP=$(echo "$MDOC_RESP" | jq -r '.format // empty')
-
-if [ "$MDOC_FORMAT_RESP" = "mso_mdoc" ]; then
-  ok "mdoc credential issued (format=mso_mdoc)"; PASS=$((PASS+1))
-  MDOC_DOCTYPE_RESP=$(echo "$MDOC_RESP" | jq -r '.credential.doc_type // empty')
-  assert_not_empty "$MDOC_DOCTYPE_RESP" "mdoc has doc_type"
-else
-  ERROR_DESC=$(echo "$MDOC_RESP" | jq -r '.error_description // .error.message // "unknown"')
-  fail "mdoc issuance failed: $ERROR_DESC"
 fi
 
 step "Phase 12 — Credential rejects unauthorized"
