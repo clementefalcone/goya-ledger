@@ -799,7 +799,7 @@ fn credential_configurations() -> serde_json::Value {
             "credential_signing_alg_values_supported": ["ES256"],
             "proof_types_supported": {
                 "jwt": {
-                    "proof_signing_alg_values_supported": ["ES256", "ES384", "ES512"]
+                    "proof_signing_alg_values_supported": ["ES256", "EdDSA", "RS256"]
                 }
             },
             "display": [{
