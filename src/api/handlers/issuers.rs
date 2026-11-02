@@ -343,8 +343,8 @@ mod tests {
     use crate::api::handlers::oid4vci::{
         deferred_credential_endpoint, AccessTokenStore, IssuanceGrant,
     };
-    use crate::identity::issuer_keys::credential_key_message;
-    use crate::identity::sd_jwt::{issue_sd_jwt_vc, VcClaims};
+    use crate::identity::issuer_keys::{credential_key_message, p256_public_jwk};
+    use crate::identity::sd_jwt::{issue_sd_jwt_vc, sign_compact_jwt, VcClaims};
     use crate::identity::signing::{
         EcdsaP256SigningProvider, SigningProvider, SoftwareSigningProvider,
     };
@@ -357,13 +357,7 @@ mod tests {
     }
 
     fn public_jwk(credential_key: &EcdsaP256SigningProvider) -> serde_json::Value {
-        let sec1 = credential_key.public_key();
-        serde_json::json!({
-            "kty": "EC",
-            "crv": "P-256",
-            "x": base64url(&sec1[1..33]),
-            "y": base64url(&sec1[33..65]),
-        })
+        serde_json::to_value(p256_public_jwk(credential_key)).unwrap()
     }
 
     struct Issuer {
@@ -760,10 +754,7 @@ mod tests {
         header: serde_json::Value,
         payload: serde_json::Value,
     ) -> String {
-        let encode = |segment: &serde_json::Value| base64url(&serde_json::to_vec(segment).unwrap());
-        let signing_input = format!("{}.{}", encode(&header), encode(&payload));
-        let signature = signer.sign(signing_input.as_bytes()).unwrap();
-        format!("{signing_input}.{}", base64url(&signature))
+        sign_compact_jwt(signer, &header, &payload).unwrap()
     }
 
     fn status_list_header() -> serde_json::Value {

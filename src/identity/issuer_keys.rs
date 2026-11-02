@@ -1,5 +1,6 @@
 use crate::identity::credential_ops::require_issuer_signature;
 use crate::identity::operations::{Change, IdentityOpError};
+use crate::identity::signing::{EcdsaP256SigningProvider, SigningProvider};
 use crate::storage::errors::StorageResult;
 use crate::storage::traits::{BlockStore, IssuerCredentialKey, P256PublicJwk};
 
@@ -33,6 +34,22 @@ pub fn sec1_public_key_hex(jwk: &P256PublicJwk) -> Option<String> {
         hex::encode(decode(&jwk.x)?),
         hex::encode(decode(&jwk.y)?)
     ))
+}
+
+pub fn p256_public_jwk(credential_key: &EcdsaP256SigningProvider) -> P256PublicJwk {
+    let sec1 = credential_key.public_key();
+    let encode = |coordinate: &[u8]| {
+        base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            coordinate,
+        )
+    };
+    P256PublicJwk {
+        kty: "EC".to_string(),
+        crv: "P-256".to_string(),
+        x: encode(&sec1[1..33]),
+        y: encode(&sec1[33..65]),
+    }
 }
 
 fn is_p256_coordinate(coordinate: &str) -> bool {
@@ -99,22 +116,11 @@ pub fn apply_register_credential_key(
 mod tests {
     use super::*;
     use crate::identity::did::did_from_pubkey_hex;
-    use crate::identity::signing::{
-        EcdsaP256SigningProvider, MlDsaSigningProvider, SigningProvider,
-    };
+    use crate::identity::signing::MlDsaSigningProvider;
     use crate::storage::MemoryStore;
 
     fn p256_jwk() -> P256PublicJwk {
-        let sec1 = EcdsaP256SigningProvider::generate().public_key();
-        let encode = |bytes: &[u8]| {
-            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
-        };
-        P256PublicJwk {
-            kty: "EC".to_string(),
-            crv: "P-256".to_string(),
-            x: encode(&sec1[1..33]),
-            y: encode(&sec1[33..65]),
-        }
+        p256_public_jwk(&EcdsaP256SigningProvider::generate())
     }
 
     fn registration(

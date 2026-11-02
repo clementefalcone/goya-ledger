@@ -281,6 +281,16 @@ impl EcdsaP256SigningProvider {
             signing_key: p256::ecdsa::SigningKey::random(&mut OsRng),
         }
     }
+
+    pub fn from_secret_bytes(secret: &[u8]) -> Result<Self, SigningError> {
+        p256::ecdsa::SigningKey::from_slice(secret)
+            .map(|signing_key| Self { signing_key })
+            .map_err(|e| SigningError::KeyNotAvailable(format!("invalid P-256 secret key: {e}")))
+    }
+
+    pub fn secret_bytes(&self) -> zeroize::Zeroizing<Vec<u8>> {
+        zeroize::Zeroizing::new(self.signing_key.to_bytes().to_vec())
+    }
 }
 
 impl SigningProvider for EcdsaP256SigningProvider {

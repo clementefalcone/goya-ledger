@@ -3,6 +3,7 @@ pub mod credential_ops;
 pub mod did;
 pub mod dual_signing;
 pub mod hsm;
+pub mod issuer_credentials;
 pub mod issuer_keys;
 pub mod key_recovery;
 pub mod keys;
