@@ -96,9 +96,9 @@ pub fn check_register(
             record.status
         )));
     }
-    if record.civil_anchor.is_some() {
+    if !record.civil_anchors.is_empty() {
         return Err(IdentityOpError::Invalid(format!(
-            "identity {} cannot register with a civil anchor; a trusted issuer binds it afterwards",
+            "identity {} cannot register with a civil anchor; an issuer binds it afterwards",
             record.did
         )));
     }
@@ -340,7 +340,7 @@ mod tests {
                 status: "active".to_string(),
                 migrated_from: None,
                 signature_algorithm: None,
-                civil_anchor: None,
+                civil_anchors: Vec::new(),
                 recovery_commitment: None,
                 vault_entries: Vec::new(),
             }
@@ -456,7 +456,10 @@ mod tests {
         let store = MemoryStore::new();
         let owner = Owner::ed25519();
         let record = IdentityRecord {
-            civil_anchor: Some("ab".repeat(32)),
+            civil_anchors: vec![crate::storage::traits::CivilAnchor {
+                issuer_did: "did:goya:issuer".to_string(),
+                anchor: "ab".repeat(32),
+            }],
             ..owner.record()
         };
         let signature = owner.sign(&register_message(&owner.did, None));

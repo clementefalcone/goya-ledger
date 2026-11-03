@@ -63,7 +63,7 @@ Production (`RUST_BC_ENV=production`): requires `TLS_CERT_PATH`/`TLS_KEY_PATH`, 
 
 Light client: `NODE_MODE` (`full`/`light`), `SEED_NODE_URL`, `GOYA_DATA_DIR` (default `~/.goya/`).
 
-Other: `CORS_ALLOWED_ORIGINS`, `LOG_FORMAT` (`json` for structured), `HTTP_REQUEST_TIMEOUT_SECS`, `MEMPOOL_MAX_SIZE`, `RATE_LIMIT_RPS/RPM/RPH`, `VAULT_RECOVERY_SECRET`, `CIVIL_ANCHOR_ISSUERS`.
+Other: `CORS_ALLOWED_ORIGINS`, `LOG_FORMAT` (`json` for structured), `HTTP_REQUEST_TIMEOUT_SECS`, `MEMPOOL_MAX_SIZE`, `RATE_LIMIT_RPS/RPM/RPH`, `VAULT_RECOVERY_SECRET`.
 
 ## Bridge
 

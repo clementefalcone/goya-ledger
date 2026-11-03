@@ -138,7 +138,7 @@ pub enum TxPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replaces: Option<String>,
         bound_at: u64,
-        issuer_public_key: String,
+        issuer_did: String,
         issuer_signature: String,
         owner_signature: String,
     },
@@ -213,6 +213,12 @@ pub struct Transaction {
     pub payload: Option<TxPayload>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CivilAnchor {
+    pub issuer_did: String,
+    pub anchor: String,
+}
+
 /// Identity record structure
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IdentityRecord {
@@ -226,8 +232,8 @@ pub struct IdentityRecord {
     pub migrated_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature_algorithm: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub civil_anchor: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub civil_anchors: Vec<CivilAnchor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_commitment: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1532,7 +1538,10 @@ mod tests {
             status: "active".into(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: Some("cafebabe".into()),
+            civil_anchors: vec![CivilAnchor {
+                issuer_did: "did:goya:issuer".into(),
+                anchor: "cafebabe".into(),
+            }],
             recovery_commitment: None,
             vault_entries: Vec::new(),
         };

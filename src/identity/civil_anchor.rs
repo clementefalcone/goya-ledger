@@ -1,39 +1,33 @@
 use crate::identity::operations::{is_signed_by, Change, IdentityOpError};
 use crate::storage::errors::{StorageError, StorageResult};
-use crate::storage::traits::{BlockStore, IdentityRecord};
-use std::sync::OnceLock;
+use crate::storage::traits::{BlockStore, CivilAnchor, IdentityRecord};
 
 const ANCHOR_HEX_LEN: usize = 64;
 
 pub struct BindCivilAnchorRequest<'a> {
     pub did: &'a str,
+    pub issuer_did: &'a str,
     pub anchor: &'a str,
     pub replaces: Option<&'a str>,
-    pub issuer_public_key: &'a str,
     pub issuer_signature: &'a str,
     pub owner_signature: &'a str,
 }
 
-pub fn bind_civil_anchor_message(did: &str, anchor: &str, replaces: Option<&str>) -> String {
+pub fn bind_civil_anchor_message(
+    issuer_did: &str,
+    did: &str,
+    anchor: &str,
+    replaces: Option<&str>,
+) -> String {
+    let message = format!("identity:civil-anchor:{issuer_did}:{did}:{anchor}");
     match replaces {
-        Some(previous_did) => {
-            format!("identity:civil-anchor:{did}:{anchor}:replaces:{previous_did}")
-        }
-        None => format!("identity:civil-anchor:{did}:{anchor}"),
+        Some(previous_did) => format!("{message}:replaces:{previous_did}"),
+        None => message,
     }
 }
 
-pub fn trusted_issuers() -> &'static [String] {
-    static ISSUERS: OnceLock<Vec<String>> = OnceLock::new();
-    ISSUERS.get_or_init(|| {
-        std::env::var("CIVIL_ANCHOR_ISSUERS")
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .map(str::to_lowercase)
-            .collect()
-    })
+pub fn anchor_key(issuer_did: &str, anchor: &str) -> String {
+    format!("{issuer_did}:{anchor}")
 }
 
 fn is_anchor_shaped(text: &str) -> bool {
@@ -43,56 +37,48 @@ fn is_anchor_shaped(text: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn current_holder(store: &dyn BlockStore, anchor: &str) -> Result<Option<String>, IdentityOpError> {
-    match store.resolve_by_civil_anchor(anchor) {
+fn current_holder(
+    store: &dyn BlockStore,
+    request: &BindCivilAnchorRequest,
+) -> Result<Option<String>, IdentityOpError> {
+    let key = anchor_key(request.issuer_did, request.anchor);
+    match store.resolve_by_civil_anchor(&key) {
         Ok(did) => Ok(Some(did)),
         Err(StorageError::KeyNotFound(_)) => Ok(None),
         Err(error) => Err(IdentityOpError::Conflict(format!(
-            "civil anchor index could not be read for {anchor}: {error}"
+            "civil anchor index could not be read for {key}: {error}"
         ))),
     }
 }
 
-fn require_issuer(
-    issuers: &[String],
-    request: &BindCivilAnchorRequest,
-    message: &str,
-) -> Result<(), IdentityOpError> {
-    if !issuers.iter().any(|key| key == request.issuer_public_key) {
-        return Err(IdentityOpError::BadSignature(format!(
-            "{} is not a trusted civil anchor issuer",
-            request.issuer_public_key
-        )));
-    }
-    if !is_signed_by(request.issuer_public_key, message, request.issuer_signature) {
-        return Err(IdentityOpError::BadSignature(format!(
-            "issuer signature over {message:?} does not verify"
-        )));
-    }
-    Ok(())
-}
-
-fn read_consenting_owner(
+fn read_active_signer(
     store: &dyn BlockStore,
-    request: &BindCivilAnchorRequest,
+    did: &str,
     message: &str,
+    signature: &str,
 ) -> Result<IdentityRecord, IdentityOpError> {
-    let record = store.read_identity(request.did).map_err(|_| {
-        IdentityOpError::NotFound(format!("identity {} is not registered", request.did))
-    })?;
+    let record = store
+        .read_identity(did)
+        .map_err(|_| IdentityOpError::NotFound(format!("identity {did} is not registered")))?;
     if record.status != "active" {
         return Err(IdentityOpError::Conflict(format!(
-            "identity {} is {}; only active identities take a civil anchor",
-            request.did, record.status
+            "identity {did} is {}; only active identities sign civil anchors",
+            record.status
         )));
     }
-    if !is_signed_by(&record.public_key, message, request.owner_signature) {
+    if !is_signed_by(&record.public_key, message, signature) {
         return Err(IdentityOpError::BadSignature(format!(
-            "owner signature over {message:?} does not verify against the key of {}",
-            request.did
+            "signature over {message:?} does not verify against the key of {did}"
         )));
     }
     Ok(record)
+}
+
+fn anchor_from<'a>(record: &'a IdentityRecord, issuer_did: &str) -> Option<&'a CivilAnchor> {
+    record
+        .civil_anchors
+        .iter()
+        .find(|held| held.issuer_did == issuer_did)
 }
 
 fn check_holder(
@@ -103,7 +89,8 @@ fn check_holder(
         (Some(did), _) if did == request.did => Ok(Change::AlreadyApplied),
         (Some(did), Some(replaced)) if did == replaced => Ok(Change::Write),
         (Some(did), _) => Err(IdentityOpError::Conflict(format!(
-            "civil anchor already belongs to {did}; a rebind must name it in replaces"
+            "civil anchor of {} already belongs to {did}; a rebind must name it in replaces",
+            request.issuer_did
         ))),
         (None, None) => Ok(Change::Write),
         (None, Some(replaced)) => Err(IdentityOpError::Conflict(format!(
@@ -114,7 +101,6 @@ fn check_holder(
 
 pub fn check_bind_civil_anchor(
     store: &dyn BlockStore,
-    issuers: &[String],
     request: &BindCivilAnchorRequest,
 ) -> Result<Change, IdentityOpError> {
     if !is_anchor_shaped(request.anchor) {
@@ -123,41 +109,64 @@ pub fn check_bind_civil_anchor(
             request.anchor
         )));
     }
-    let message = bind_civil_anchor_message(request.did, request.anchor, request.replaces);
-    require_issuer(issuers, request, &message)?;
-    let record = read_consenting_owner(store, request, &message)?;
-    if let Some(existing) = record.civil_anchor.as_deref() {
-        if existing != request.anchor {
+    let message = bind_civil_anchor_message(
+        request.issuer_did,
+        request.did,
+        request.anchor,
+        request.replaces,
+    );
+    read_active_signer(
+        store,
+        request.issuer_did,
+        &message,
+        request.issuer_signature,
+    )?;
+    let record = read_active_signer(store, request.did, &message, request.owner_signature)?;
+    if let Some(held) = anchor_from(&record, request.issuer_did) {
+        if held.anchor != request.anchor {
             return Err(IdentityOpError::Conflict(format!(
-                "identity {} is already anchored to another document",
-                request.did
+                "identity {} already holds another document anchored by {}",
+                request.did, request.issuer_did
             )));
         }
     }
-    check_holder(request, current_holder(store, request.anchor)?.as_deref())
+    check_holder(request, current_holder(store, request)?.as_deref())
 }
 
 pub fn apply_bind_civil_anchor(
     store: &dyn BlockStore,
-    issuers: &[String],
     request: &BindCivilAnchorRequest,
     bound_at: u64,
 ) -> StorageResult<()> {
-    if check_bind_civil_anchor(store, issuers, request)? == Change::AlreadyApplied {
+    if check_bind_civil_anchor(store, request)? == Change::AlreadyApplied {
         return Ok(());
     }
     if let Some(previous_did) = request.replaces {
         let previous = store.read_identity(previous_did)?;
         store.write_identity(&IdentityRecord {
-            civil_anchor: None,
+            civil_anchors: previous
+                .civil_anchors
+                .iter()
+                .filter(|held| held.issuer_did != request.issuer_did)
+                .cloned()
+                .collect(),
             updated_at: bound_at,
             ..previous
         })?;
     }
-    store.write_civil_anchor(request.anchor, request.did)?;
+    store.write_civil_anchor(&anchor_key(request.issuer_did, request.anchor), request.did)?;
     let record = store.read_identity(request.did)?;
+    let civil_anchors = record
+        .civil_anchors
+        .iter()
+        .cloned()
+        .chain(std::iter::once(CivilAnchor {
+            issuer_did: request.issuer_did.to_string(),
+            anchor: request.anchor.to_string(),
+        }))
+        .collect();
     store.write_identity(&IdentityRecord {
-        civil_anchor: Some(request.anchor.to_string()),
+        civil_anchors,
         updated_at: bound_at,
         ..record
     })
@@ -179,86 +188,115 @@ mod tests {
 
     struct Network {
         store: MemoryStore,
-        issuer: MlDsaSigningProvider,
-        issuers: Vec<String>,
+        issuer: Person,
     }
 
     fn sign(key: &MlDsaSigningProvider, message: &str) -> String {
         hex::encode(key.sign(message.as_bytes()).unwrap())
     }
 
-    fn public_key_of(key: &MlDsaSigningProvider) -> String {
-        hex::encode(key.public_key())
-    }
-
-    fn network() -> Network {
-        let issuer = MlDsaSigningProvider::generate();
-        let issuers = vec![public_key_of(&issuer)];
-        Network {
-            store: MemoryStore::new(),
-            issuer,
-            issuers,
-        }
-    }
-
-    fn register(network: &Network) -> Person {
+    fn unregistered() -> Person {
         let key = MlDsaSigningProvider::generate();
-        let did = did_from_pubkey_hex(&public_key_of(&key));
-        network
-            .store
+        let did = did_from_pubkey_hex(&hex::encode(key.public_key()));
+        Person { key, did }
+    }
+
+    fn register_in(store: &MemoryStore) -> Person {
+        let person = unregistered();
+        store
             .write_identity(&IdentityRecord {
-                did: did.clone(),
-                public_key: public_key_of(&key),
+                did: person.did.clone(),
+                public_key: hex::encode(person.key.public_key()),
                 created_at: 1,
                 updated_at: 1,
                 status: "active".to_string(),
                 migrated_from: None,
                 signature_algorithm: Some("MlDsa65".to_string()),
-                civil_anchor: None,
+                civil_anchors: Vec::new(),
                 recovery_commitment: None,
                 vault_entries: Vec::new(),
             })
             .unwrap();
-        Person { key, did }
+        person
     }
 
-    fn bind_signed_by(
-        network: &Network,
-        person: &Person,
-        replaces: Option<&str>,
-        issuer: &MlDsaSigningProvider,
-        owner: &MlDsaSigningProvider,
-    ) -> StorageResult<()> {
-        let message = bind_civil_anchor_message(&person.did, ANCHOR, replaces);
-        apply_bind_civil_anchor(
-            &network.store,
-            &network.issuers,
-            &BindCivilAnchorRequest {
-                did: &person.did,
-                anchor: ANCHOR,
-                replaces,
-                issuer_public_key: &public_key_of(issuer),
-                issuer_signature: &sign(issuer, &message),
-                owner_signature: &sign(owner, &message),
-            },
-            70,
-        )
+    fn network() -> Network {
+        let store = MemoryStore::new();
+        let issuer = register_in(&store);
+        Network { store, issuer }
+    }
+
+    fn register(network: &Network) -> Person {
+        register_in(&network.store)
+    }
+
+    struct Bind<'a> {
+        person: &'a Person,
+        anchor: &'a str,
+        replaces: Option<&'a str>,
+        issuer: &'a Person,
+        owner: &'a MlDsaSigningProvider,
+    }
+
+    fn with_request<T>(bind: &Bind, run: impl FnOnce(&BindCivilAnchorRequest) -> T) -> T {
+        let message = bind_civil_anchor_message(
+            &bind.issuer.did,
+            &bind.person.did,
+            bind.anchor,
+            bind.replaces,
+        );
+        run(&BindCivilAnchorRequest {
+            did: &bind.person.did,
+            issuer_did: &bind.issuer.did,
+            anchor: bind.anchor,
+            replaces: bind.replaces,
+            issuer_signature: &sign(&bind.issuer.key, &message),
+            owner_signature: &sign(bind.owner, &message),
+        })
+    }
+
+    fn check(network: &Network, bind: &Bind) -> Result<Change, IdentityOpError> {
+        with_request(bind, |request| {
+            check_bind_civil_anchor(&network.store, request)
+        })
+    }
+
+    fn apply(network: &Network, bind: &Bind) -> StorageResult<()> {
+        with_request(bind, |request| {
+            apply_bind_civil_anchor(&network.store, request, 70)
+        })
     }
 
     fn bind(network: &Network, person: &Person, replaces: Option<&str>) -> StorageResult<()> {
-        bind_signed_by(network, person, replaces, &network.issuer, &person.key)
+        apply(
+            network,
+            &Bind {
+                person,
+                anchor: ANCHOR,
+                replaces,
+                issuer: &network.issuer,
+                owner: &person.key,
+            },
+        )
     }
 
-    fn anchor_of(network: &Network, person: &Person) -> Option<String> {
+    fn anchors_of(network: &Network, person: &Person) -> Vec<CivilAnchor> {
         network
             .store
             .read_identity(&person.did)
             .unwrap()
-            .civil_anchor
+            .civil_anchors
+    }
+
+    fn holder_under(network: &Network, issuer: &Person) -> Option<String> {
+        network
+            .store
+            .resolve_by_civil_anchor(&anchor_key(&issuer.did, ANCHOR))
+            .ok()
     }
 
     fn holder(network: &Network) -> Option<String> {
-        network.store.resolve_by_civil_anchor(ANCHOR).ok()
+        holder_under(network, &network.issuer)
     }
 
     #[test]
@@ -266,7 +304,13 @@ mod tests {
         let network = network();
         let person = register(&network);
         bind(&network, &person, None).unwrap();
-        assert_eq!(anchor_of(&network, &person).as_deref(), Some(ANCHOR));
+        assert_eq!(
+            anchors_of(&network, &person),
+            vec![CivilAnchor {
+                issuer_did: network.issuer.did.clone(),
+                anchor: ANCHOR.to_string(),
+            }]
+        );
         assert_eq!(holder(&network), Some(person.did.clone()));
     }
 
@@ -276,18 +320,73 @@ mod tests {
         let person = register(&network);
         bind(&network, &person, None).unwrap();
         bind(&network, &person, None).unwrap();
+        assert_eq!(anchors_of(&network, &person).len(), 1);
         assert_eq!(holder(&network), Some(person.did));
     }
 
     #[test]
-    fn a_second_did_cannot_take_a_bound_document() {
+    fn a_second_did_cannot_take_a_document_from_the_same_issuer() {
         let network = network();
         let first = register(&network);
         let second = register(&network);
         bind(&network, &first, None).unwrap();
         assert!(bind(&network, &second, None).is_err());
         assert_eq!(holder(&network), Some(first.did));
-        assert_eq!(anchor_of(&network, &second), None);
+        assert!(anchors_of(&network, &second).is_empty());
+    }
+
+    #[test]
+    fn another_issuer_cannot_take_over_an_anchor_it_did_not_issue() {
+        let network = network();
+        let owner = register(&network);
+        let squatter = register(&network);
+        let rogue_issuer = register(&network);
+        bind(&network, &owner, None).unwrap();
+        apply(
+            &network,
+            &Bind {
+                person: &squatter,
+                anchor: ANCHOR,
+                replaces: None,
+                issuer: &rogue_issuer,
+                owner: &squatter.key,
+            },
+        )
+        .unwrap();
+        assert_eq!(holder(&network), Some(owner.did.clone()));
+        assert_eq!(holder_under(&network, &rogue_issuer), Some(squatter.did));
+    }
+
+    #[test]
+    fn a_did_holds_one_document_per_issuer() {
+        let network = network();
+        let person = register(&network);
+        let notary = register(&network);
+        bind(&network, &person, None).unwrap();
+        apply(
+            &network,
+            &Bind {
+                person: &person,
+                anchor: ANCHOR,
+                replaces: None,
+                issuer: &notary,
+                owner: &person.key,
+            },
+        )
+        .unwrap();
+        assert_eq!(anchors_of(&network, &person).len(), 2);
+        let other_anchor = "a".repeat(ANCHOR_HEX_LEN);
+        let result = check(
+            &network,
+            &Bind {
+                person: &person,
+                anchor: &other_anchor,
+                replaces: None,
+                issuer: &network.issuer,
+                owner: &person.key,
+            },
+        );
+        assert!(matches!(result, Err(IdentityOpError::Conflict(_))));
     }
 
     #[test]
@@ -298,8 +397,8 @@ mod tests {
         bind(&network, &lost, None).unwrap();
         bind(&network, &fresh, Some(&lost.did)).unwrap();
         assert_eq!(holder(&network), Some(fresh.did.clone()));
-        assert_eq!(anchor_of(&network, &fresh).as_deref(), Some(ANCHOR));
-        assert_eq!(anchor_of(&network, &lost), None);
+        assert_eq!(anchors_of(&network, &fresh).len(), 1);
+        assert!(anchors_of(&network, &lost).is_empty());
         let lost_record = network.store.read_identity(&lost.did).unwrap();
         assert_eq!(lost_record.status, "active");
     }
@@ -317,12 +416,21 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_issuer_cannot_bind() {
+    fn unregistered_issuer_cannot_bind() {
         let network = network();
         let person = register(&network);
-        let impostor = MlDsaSigningProvider::generate();
-        assert!(bind_signed_by(&network, &person, None, &impostor, &person.key).is_err());
-        assert_eq!(holder(&network), None);
+        let impostor = unregistered();
+        let result = check(
+            &network,
+            &Bind {
+                person: &person,
+                anchor: ANCHOR,
+                replaces: None,
+                issuer: &impostor,
+                owner: &person.key,
+            },
+        );
+        assert!(matches!(result, Err(IdentityOpError::NotFound(_))));
     }
 
     #[test]
@@ -330,30 +438,39 @@ mod tests {
         let network = network();
         let person = register(&network);
         let stranger = MlDsaSigningProvider::generate();
-        assert!(bind_signed_by(&network, &person, None, &network.issuer, &stranger).is_err());
-        assert_eq!(anchor_of(&network, &person), None);
+        let result = check(
+            &network,
+            &Bind {
+                person: &person,
+                anchor: ANCHOR,
+                replaces: None,
+                issuer: &network.issuer,
+                owner: &stranger,
+            },
+        );
+        assert!(matches!(result, Err(IdentityOpError::BadSignature(_))));
     }
 
     #[test]
-    fn a_did_keeps_a_single_document() {
+    fn owner_consent_names_the_issuer() {
         let network = network();
         let person = register(&network);
-        bind(&network, &person, None).unwrap();
-        let other_anchor = "a".repeat(ANCHOR_HEX_LEN);
-        let message = bind_civil_anchor_message(&person.did, &other_anchor, None);
+        let other_issuer = register(&network);
+        let consented_to_other =
+            bind_civil_anchor_message(&other_issuer.did, &person.did, ANCHOR, None);
+        let message = bind_civil_anchor_message(&network.issuer.did, &person.did, ANCHOR, None);
         let result = check_bind_civil_anchor(
             &network.store,
-            &network.issuers,
             &BindCivilAnchorRequest {
                 did: &person.did,
-                anchor: &other_anchor,
+                issuer_did: &network.issuer.did,
+                anchor: ANCHOR,
                 replaces: None,
-                issuer_public_key: &public_key_of(&network.issuer),
-                issuer_signature: &sign(&network.issuer, &message),
-                owner_signature: &sign(&person.key, &message),
+                issuer_signature: &sign(&network.issuer.key, &message),
+                owner_signature: &sign(&person.key, &consented_to_other),
             },
         );
-        assert!(matches!(result, Err(IdentityOpError::Conflict(_))));
+        assert!(matches!(result, Err(IdentityOpError::BadSignature(_))));
     }
 
     #[test]
@@ -362,17 +479,14 @@ mod tests {
         let person = register(&network);
         let too_long = "a".repeat(128);
         for malformed in ["", "12345678-9", &ANCHOR.to_uppercase(), &too_long] {
-            let message = bind_civil_anchor_message(&person.did, malformed, None);
-            let result = check_bind_civil_anchor(
-                &network.store,
-                &network.issuers,
-                &BindCivilAnchorRequest {
-                    did: &person.did,
+            let result = check(
+                &network,
+                &Bind {
+                    person: &person,
                     anchor: malformed,
                     replaces: None,
-                    issuer_public_key: &public_key_of(&network.issuer),
-                    issuer_signature: &sign(&network.issuer, &message),
-                    owner_signature: &sign(&person.key, &message),
+                    issuer: &network.issuer,
+                    owner: &person.key,
                 },
             );
             assert!(

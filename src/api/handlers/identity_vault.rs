@@ -4,9 +4,7 @@ use crate::api::handlers::identity::{
     commit_ledger_op, identity_op_error, now_secs, OwnerActionRequest,
 };
 use crate::app_state::AppState;
-use crate::identity::civil_anchor::{
-    check_bind_civil_anchor, trusted_issuers, BindCivilAnchorRequest,
-};
+use crate::identity::civil_anchor::{check_bind_civil_anchor, BindCivilAnchorRequest};
 use crate::identity::operations::Change;
 use crate::identity::recovery_commitment::{check_commit_recovery, CommitRecoveryRequest};
 use crate::identity::vault_entries::{
@@ -180,7 +178,7 @@ pub struct BindCivilAnchorBody {
     pub anchor: String,
     #[serde(default)]
     pub replaces: Option<String>,
-    pub issuer_public_key: String,
+    pub issuer_did: String,
     pub issuer_signature: String,
     pub signature: String,
 }
@@ -199,14 +197,13 @@ pub async fn bind_civil_anchor(
 
     let request = BindCivilAnchorRequest {
         did: &did,
+        issuer_did: &body.issuer_did,
         anchor: &body.anchor,
         replaces: body.replaces.as_deref(),
-        issuer_public_key: &body.issuer_public_key,
         issuer_signature: &body.issuer_signature,
         owner_signature: &body.signature,
     };
-    if check_bind_civil_anchor(store.as_ref(), trusted_issuers(), &request)
-        .map_err(identity_op_error)?
+    if check_bind_civil_anchor(store.as_ref(), &request).map_err(identity_op_error)?
         == Change::AlreadyApplied
     {
         return Ok(HttpResponse::Ok().json(ApiResponse::success(
@@ -226,7 +223,7 @@ pub async fn bind_civil_anchor(
             anchor: body.anchor.clone(),
             replaces: body.replaces.clone(),
             bound_at,
-            issuer_public_key: body.issuer_public_key.clone(),
+            issuer_did: body.issuer_did.clone(),
             issuer_signature: body.issuer_signature.clone(),
             owner_signature: body.signature.clone(),
         },
@@ -271,7 +268,7 @@ mod tests {
                 status: "active".to_string(),
                 migrated_from: None,
                 signature_algorithm: Some("MlDsa65".to_string()),
-                civil_anchor: None,
+                civil_anchors: Vec::new(),
                 recovery_commitment: None,
                 vault_entries: Vec::new(),
             })
@@ -418,51 +415,73 @@ mod tests {
         assert_eq!(post(&owner, &uri, body).await, 401);
     }
 
-    fn trusted_issuer() -> &'static MlDsaSigningProvider {
-        static ISSUER: std::sync::OnceLock<MlDsaSigningProvider> = std::sync::OnceLock::new();
-        ISSUER.get_or_init(|| {
-            let issuer = MlDsaSigningProvider::generate();
-            std::env::set_var("CIVIL_ANCHOR_ISSUERS", hex::encode(issuer.public_key()));
-            issuer
-        })
+    fn register_issuer(owner: &Owner) -> (MlDsaSigningProvider, String) {
+        let key = MlDsaSigningProvider::generate();
+        let public_key = hex::encode(key.public_key());
+        let did = crate::identity::did::did_from_pubkey_hex(&public_key);
+        get_channel_store(&owner.state, "default")
+            .unwrap()
+            .write_identity(&IdentityRecord {
+                did: did.clone(),
+                public_key,
+                created_at: 1,
+                updated_at: 1,
+                status: "active".to_string(),
+                migrated_from: None,
+                signature_algorithm: Some("MlDsa65".to_string()),
+                civil_anchors: Vec::new(),
+                recovery_commitment: None,
+                vault_entries: Vec::new(),
+            })
+            .unwrap();
+        (key, did)
     }
 
-    fn bind_body(owner: &Owner, anchor: &str, issuer: &MlDsaSigningProvider) -> serde_json::Value {
-        let message =
-            crate::identity::civil_anchor::bind_civil_anchor_message(&owner.did, anchor, None);
+    fn bind_body(
+        owner: &Owner,
+        anchor: &str,
+        issuer: &(MlDsaSigningProvider, String),
+    ) -> serde_json::Value {
+        let (issuer_key, issuer_did) = issuer;
+        let message = crate::identity::civil_anchor::bind_civil_anchor_message(
+            issuer_did, &owner.did, anchor, None,
+        );
         serde_json::json!({
             "anchor": anchor,
-            "issuer_public_key": hex::encode(issuer.public_key()),
-            "issuer_signature": sign(issuer, &message),
+            "issuer_did": issuer_did,
+            "issuer_signature": sign(issuer_key, &message),
             "signature": sign(&owner.key, &message),
         })
     }
 
     #[actix_web::test]
-    async fn trusted_issuer_binds_a_document_once_over_http() {
+    async fn issuer_binds_a_document_once_over_http() {
         let owner = registered_owner();
+        let issuer = register_issuer(&owner);
         let anchor = "ab".repeat(32);
         let uri = format!("/api/v1/identity/{}/civil-anchor", owner.did);
-        let body = bind_body(&owner, &anchor, trusted_issuer());
+        let body = bind_body(&owner, &anchor, &issuer);
         assert_eq!(post(&owner, &uri, body.clone()).await, 201);
         assert_eq!(post(&owner, &uri, body).await, 200);
         let resolved = get_channel_store(&owner.state, "default")
             .unwrap()
-            .resolve_by_civil_anchor(&anchor)
+            .resolve_by_civil_anchor(&crate::identity::civil_anchor::anchor_key(
+                &issuer.1, &anchor,
+            ))
             .unwrap();
         assert_eq!(resolved, owner.did);
     }
 
     #[actix_web::test]
-    async fn untrusted_issuer_cannot_bind_over_http() {
-        trusted_issuer();
+    async fn unregistered_issuer_cannot_bind_over_http() {
         let owner = registered_owner();
         let anchor = "cd".repeat(32);
         let uri = format!("/api/v1/identity/{}/civil-anchor", owner.did);
-        let impostor = MlDsaSigningProvider::generate();
+        let key = MlDsaSigningProvider::generate();
+        let did = crate::identity::did::did_from_pubkey_hex(&hex::encode(key.public_key()));
         assert_eq!(
-            post(&owner, &uri, bind_body(&owner, &anchor, &impostor)).await,
-            401
+            post(&owner, &uri, bind_body(&owner, &anchor, &(key, did))).await,
+            404
         );
     }
 }

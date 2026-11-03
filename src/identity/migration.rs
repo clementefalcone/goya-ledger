@@ -56,8 +56,9 @@ pub fn migrate_legacy_dids(store: &dyn BlockStore) -> StorageResult<MigrationRes
             continue;
         }
 
-        if let Some(anchor) = &record.civil_anchor {
-            let _ = store.write_civil_anchor(anchor, &new_did);
+        for held in &record.civil_anchors {
+            let key = crate::identity::civil_anchor::anchor_key(&held.issuer_did, &held.anchor);
+            let _ = store.write_civil_anchor(&key, &new_did);
         }
 
         log::info!("migrated {} → {}", record.did, new_did);
@@ -82,7 +83,7 @@ mod tests {
             status: "active".to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         }
@@ -116,7 +117,7 @@ mod tests {
             status: "active".to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         };
@@ -138,7 +139,7 @@ mod tests {
             status: "active".to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         };
@@ -154,13 +155,21 @@ mod tests {
         let store = MemoryStore::new();
         let anchor = "4f1c2a9b8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a3928170605f4e3".to_string();
         let mut rec = legacy_record("aabbccdd11223344ffffffffffffffff");
-        rec.civil_anchor = Some(anchor.clone());
+        rec.civil_anchors = vec![crate::storage::traits::CivilAnchor {
+            issuer_did: "did:goya:issuer".to_string(),
+            anchor: anchor.clone(),
+        }];
         store.write_identity(&rec).unwrap();
 
         migrate_legacy_dids(&store).unwrap();
 
         let new_did = did_from_pubkey_hex("aabbccdd11223344ffffffffffffffff");
-        let resolved = store.resolve_by_civil_anchor(&anchor).unwrap();
+        let resolved = store
+            .resolve_by_civil_anchor(&crate::identity::civil_anchor::anchor_key(
+                "did:goya:issuer",
+                &anchor,
+            ))
+            .unwrap();
         assert_eq!(resolved, new_did);
     }
 
@@ -180,7 +189,7 @@ mod tests {
             status: "active".to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         };

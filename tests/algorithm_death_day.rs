@@ -68,7 +68,7 @@ fn register_did(store: &dyn BlockStore, id: &Identity) {
             status: "active".to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         })
@@ -1371,7 +1371,7 @@ fn phase7_migration_during_partition_then_rejoin() {
                 status: "active".to_string(),
                 migrated_from: None,
                 signature_algorithm: None,
-                civil_anchor: None,
+                civil_anchors: Vec::new(),
                 recovery_commitment: None,
                 vault_entries: Vec::new(),
             })

@@ -476,7 +476,7 @@ pub fn stress_identity(ops: u64) -> ModuleStressResult {
             status: "active".into(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         };
@@ -532,7 +532,7 @@ pub fn stress_credential(ops: u64) -> ModuleStressResult {
             status: "active".into(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         })
@@ -770,7 +770,7 @@ mod tests {
                             status: "active".into(),
                             migrated_from: None,
                             signature_algorithm: None,
-                            civil_anchor: None,
+                            civil_anchors: Vec::new(),
                             recovery_commitment: None,
                             vault_entries: Vec::new(),
                         };
@@ -830,7 +830,7 @@ mod tests {
                 status: "active".into(),
                 migrated_from: None,
                 signature_algorithm: None,
-                civil_anchor: None,
+                civil_anchors: Vec::new(),
                 recovery_commitment: None,
                 vault_entries: Vec::new(),
             })
@@ -1089,7 +1089,7 @@ mod tests {
                             status: "active".into(),
                             migrated_from: None,
                             signature_algorithm: None,
-                            civil_anchor: None,
+                            civil_anchors: Vec::new(),
                             recovery_commitment: None,
                             vault_entries: Vec::new(),
                         };
@@ -1506,7 +1506,7 @@ mod tests {
                             status: "active".into(),
                             migrated_from: None,
                             signature_algorithm: None,
-                            civil_anchor: None,
+                            civil_anchors: Vec::new(),
                             recovery_commitment: None,
                             vault_entries: Vec::new(),
                         };
@@ -1552,7 +1552,7 @@ mod tests {
                 status: "active".into(),
                 migrated_from: None,
                 signature_algorithm: None,
-                civil_anchor: None,
+                civil_anchors: Vec::new(),
                 recovery_commitment: None,
                 vault_entries: Vec::new(),
             })
@@ -1681,7 +1681,7 @@ mod tests {
                             status: "active".into(),
                             migrated_from: None,
                             signature_algorithm: None,
-                            civil_anchor: None,
+                            civil_anchors: Vec::new(),
                             recovery_commitment: None,
                             vault_entries: Vec::new(),
                         };

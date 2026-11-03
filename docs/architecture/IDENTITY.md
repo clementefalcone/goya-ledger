@@ -64,9 +64,10 @@ register (DID fixed by first key, commits SHA3-512 of an ML-DSA-65 recovery key)
 ### Civil anchor (one person, one DID)
 
 - A civil anchor ties a DID to a verified civil document (e.g. a Chilean RUN) without putting the document on the chain. The anchor is a keyed digest (64 hex, e.g. HMAC-SHA3-256) computed by the issuer with a key only the issuer holds. A plain hash would not do: about 30 million RUNs can be hashed in seconds
-- `POST /identity/{did}/civil-anchor` (`TxPayload::BindCivilAnchor`, `identity::civil_anchor`). The issuer and the DID's current key both sign `identity:civil-anchor:{did}:{anchor}`: the issuer vouches for the document, and the owner consents
-- The issuer must be in `CIVIL_ANCHOR_ISSUERS`. Each anchor maps to exactly one DID, and each DID holds at most one anchor. Two binds of the same anchor in one block: the first wins on every node, and the second is `invalid_payload`
-- Rebind after a lost DID: the signed message adds `:replaces:{previous_did}`, and `replaces` must name the current holder. The anchor moves to the new DID. The previous DID stays active but loses its anchor, so the issuer cannot revoke anyone's DID
+- `POST /identity/{did}/civil-anchor` (`TxPayload::BindCivilAnchor`, `identity::civil_anchor`) with `issuer_did`, `anchor`, `issuer_signature`, `signature`. The issuer DID and the DID's current key both sign `identity:civil-anchor:{issuer_did}:{did}:{anchor}`: the issuer vouches for the document, and the owner consents to that issuer
+- Any registered, active DID can issue anchors; the node keeps no list of issuers. Uniqueness holds per issuer: under one issuer each anchor maps to exactly one DID, and each DID holds at most one anchor per issuer. A verifier decides which issuers it believes. A rogue issuer can only fill its own namespace, so it cannot take a document another issuer bound
+- Two binds of the same issuer and anchor in one block: the first wins on every node, and the second is `invalid_payload`
+- Rebind after a lost DID: the signed message adds `:replaces:{previous_did}`, and `replaces` must name the current holder under that issuer. The anchor moves to the new DID. The previous DID stays active but loses that issuer's anchor, so an issuer cannot revoke anyone's DID
 - Registration rejects a record that already carries a civil anchor: an anchor enters only through a bind
 
 ### HSM Support
@@ -185,7 +186,7 @@ External verification via `IdentityVerificationProvider` trait. Smart-ID integra
 | status | String | active, revoked, migrated (legacy DID format only) |
 | migrated_from | Option\<String\> | Previous legacy-format DID |
 | recovery_commitment | Option\<String\> | `did_from_pubkey_hex` of the committed recovery key |
-| civil_anchor | Option\<String\> | Keyed digest of the civil document bound by a trusted issuer |
+| civil_anchors | Vec\<CivilAnchor\> | `{issuer_did, anchor}`: keyed digests of civil documents, one per issuer |
 | created_at | u64 | Unix timestamp |
 | updated_at | u64 | Unix timestamp |
 
@@ -200,7 +201,7 @@ Light client: `LocalIdentityStore` persists identities as JSON in `~/.goya/ident
 | POST | /identity/{did}/verify-signature | `{message, signature}` → `valid` only if the DID is active and its current registry key signed `message` |
 | POST | /identity/{did}/revoke | Revoke (current key) |
 | POST | /identity/{did}/rotate | Rotate key with recovery key (same DID) |
-| POST | /identity/{did}/civil-anchor | Bind a civil document (trusted issuer + current key) |
+| POST | /identity/{did}/civil-anchor | Bind a civil document (issuer DID + current key) |
 | POST | /identity/auth/challenge | DID Auth: get nonce |
 | POST | /identity/auth/verify | DID Auth: verify signature |
 | GET | /identity/auth/session-key | Public key that signs session JWTs |

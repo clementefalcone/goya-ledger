@@ -76,7 +76,7 @@ mod comprehensive_storage_tests {
             status: "active".to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         };
@@ -168,7 +168,7 @@ mod comprehensive_storage_tests {
             status: "active".to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         };
@@ -558,7 +558,7 @@ mod comprehensive_storage_tests {
             status: "active".to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         };
@@ -721,7 +721,7 @@ mod comprehensive_storage_tests {
             status: "suspended".to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         };
@@ -739,7 +739,7 @@ mod comprehensive_storage_tests {
             status: "revoked".to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
             recovery_commitment: None,
             vault_entries: Vec::new(),
         };

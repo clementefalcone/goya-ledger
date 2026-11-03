@@ -1,4 +1,4 @@
-use rust_bc::identity::civil_anchor::bind_civil_anchor_message;
+use rust_bc::identity::civil_anchor::{anchor_key, bind_civil_anchor_message};
 use rust_bc::identity::did::did_from_pubkey_hex;
 use rust_bc::identity::operations::register_message;
 use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider};
@@ -22,13 +22,9 @@ fn sign(key: &MlDsaSigningProvider, message: &str) -> String {
     hex::encode(key.sign(message.as_bytes()).unwrap())
 }
 
-fn trusted_issuer() -> &'static MlDsaSigningProvider {
-    static ISSUER: OnceLock<MlDsaSigningProvider> = OnceLock::new();
-    ISSUER.get_or_init(|| {
-        let issuer = MlDsaSigningProvider::generate();
-        std::env::set_var("CIVIL_ANCHOR_ISSUERS", public_key_of(&issuer));
-        issuer
-    })
+fn issuer() -> &'static Person {
+    static ISSUER: OnceLock<Person> = OnceLock::new();
+    ISSUER.get_or_init(person)
 }
 
 fn person() -> Person {
@@ -60,7 +56,7 @@ fn register_tx(person: &Person) -> Transaction {
         status: "active".to_string(),
         migrated_from: None,
         signature_algorithm: Some("MlDsa65".to_string()),
-        civil_anchor: None,
+        civil_anchors: Vec::new(),
         recovery_commitment: None,
         vault_entries: Vec::new(),
     };
@@ -75,8 +71,8 @@ fn register_tx(person: &Person) -> Transaction {
 }
 
 fn bind_tx(person: &Person, replaces: Option<&str>) -> Transaction {
-    let issuer = trusted_issuer();
-    let message = bind_civil_anchor_message(&person.did, ANCHOR, replaces);
+    let issuer = issuer();
+    let message = bind_civil_anchor_message(&issuer.did, &person.did, ANCHOR, replaces);
     tx(
         format!("bind-{}", &person.did[10..18]),
         &person.did,
@@ -85,8 +81,8 @@ fn bind_tx(person: &Person, replaces: Option<&str>) -> Transaction {
             anchor: ANCHOR.to_string(),
             replaces: replaces.map(str::to_string),
             bound_at: 1001,
-            issuer_public_key: public_key_of(issuer),
-            issuer_signature: sign(issuer, &message),
+            issuer_did: issuer.did.clone(),
+            issuer_signature: sign(&issuer.key, &message),
             owner_signature: sign(&person.key, &message),
         },
     )
@@ -112,11 +108,16 @@ fn two_nodes() -> (Arc<dyn BlockStore>, Arc<dyn BlockStore>, MiningService) {
 }
 
 fn holder(node: &dyn BlockStore) -> Option<String> {
-    node.resolve_by_civil_anchor(ANCHOR).ok()
+    node.resolve_by_civil_anchor(&anchor_key(&issuer().did, ANCHOR))
+        .ok()
 }
 
 fn anchor_of(node: &dyn BlockStore, person: &Person) -> Option<String> {
-    node.read_identity(&person.did).unwrap().civil_anchor
+    node.read_identity(&person.did)
+        .unwrap()
+        .civil_anchors
+        .first()
+        .map(|held| held.anchor.clone())
 }
 
 #[test]
@@ -125,7 +126,14 @@ fn bound_document_replicates_to_another_node() {
     let alice = person();
 
     miner
-        .mine_block("miner-a", vec![register_tx(&alice), bind_tx(&alice, None)])
+        .mine_block(
+            "miner-a",
+            vec![
+                register_tx(issuer()),
+                register_tx(&alice),
+                bind_tx(&alice, None),
+            ],
+        )
         .unwrap();
     receive_block(node_a.as_ref(), node_b.as_ref(), 0);
 
@@ -143,6 +151,7 @@ fn every_node_keeps_the_first_of_two_binds_in_one_block() {
         .mine_block(
             "miner-a",
             vec![
+                register_tx(issuer()),
                 register_tx(&first),
                 register_tx(&second),
                 bind_tx(&first, None),
@@ -167,7 +176,14 @@ fn rebind_replicates_and_unanchors_the_lost_did_everywhere() {
     let fresh = person();
 
     miner
-        .mine_block("miner-a", vec![register_tx(&lost), bind_tx(&lost, None)])
+        .mine_block(
+            "miner-a",
+            vec![
+                register_tx(issuer()),
+                register_tx(&lost),
+                bind_tx(&lost, None),
+            ],
+        )
         .unwrap();
     miner
         .mine_block(

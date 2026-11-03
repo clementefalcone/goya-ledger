@@ -130,7 +130,7 @@ mod tests {
                 status: "active".to_string(),
                 migrated_from: None,
                 signature_algorithm: Some("MlDsa65".to_string()),
-                civil_anchor: None,
+                civil_anchors: Vec::new(),
                 recovery_commitment: None,
                 vault_entries: vec![phone_copy()],
             })
