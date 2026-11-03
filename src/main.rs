@@ -919,6 +919,7 @@ async fn async_main_inner() -> std::io::Result<()> {
         tx_pool: Arc::new(std::sync::Mutex::new(
             transaction::mempool::TransactionPool::new(),
         )),
+        block_wake: Arc::new(tokio::sync::Notify::new()),
         vault_recovery_secret: std::env::var("VAULT_RECOVERY_SECRET")
             .ok()
             .filter(|s| !s.is_empty())
@@ -1158,40 +1159,28 @@ async fn async_main_inner() -> std::io::Result<()> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(5);
         let mine_store = gateway_store.clone();
-        let mine_tx_pool = app_state.tx_pool.clone();
-        let mine_mining = app_state.mining_service.clone();
         let mine_node = node_arc.clone();
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(mine_interval_secs));
-            loop {
-                interval.tick().await;
-                let Some(ref mining_service) = mine_mining else {
-                    continue;
-                };
-                let txs = {
-                    let mut pool = mine_tx_pool.lock().unwrap_or_else(|e| e.into_inner());
-                    pool.drain_for_block(50)
-                };
-                if txs.is_empty() {
-                    continue;
+        let producer = mining::BlockProducer {
+            pool: app_state.tx_pool.clone(),
+            mining: app_state
+                .mining_service
+                .clone()
+                .expect("MiningService required for solo block production"),
+            wake: app_state.block_wake.clone(),
+        };
+        tokio::spawn(mining::run_block_producer(
+            producer,
+            tokio::time::Duration::from_secs(mine_interval_secs),
+            move |height| {
+                if let Ok(block) = mine_store.read_block(height) {
+                    let node = mine_node.clone();
+                    tokio::spawn(async move {
+                        node.broadcast_ordered_block(&block).await;
+                    });
                 }
-                let tx_count = txs.len();
-                match mining_service.mine_block("auto-miner", txs) {
-                    Ok(height) => {
-                        log::info!("⛏ Auto-mined block {height} with {tx_count} tx(s)");
-                        if let Ok(block) = mine_store.read_block(height) {
-                            let node = mine_node.clone();
-                            tokio::spawn(async move {
-                                node.broadcast_ordered_block(&block).await;
-                            });
-                        }
-                    }
-                    Err(e) => log::error!("Auto-mine failed: {e}"),
-                }
-            }
-        });
-        log::info!("Solo auto-mine loop started (interval=5s)");
+            },
+        ));
+        log::info!("Solo block producer started (interval={mine_interval_secs}s, wakes on new tx)");
     }
 
     let rate_limit_config = middleware::RateLimitConfig {
