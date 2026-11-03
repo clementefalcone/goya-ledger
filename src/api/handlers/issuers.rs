@@ -63,7 +63,8 @@ pub async fn register_credential_key(
         TxPayload::RegisterIssuerCredentialKey {
             registration: Box::new(registration.clone()),
         },
-    )?;
+    )
+    .await?;
     Ok(HttpResponse::Created().json(ApiResponse::success(
         registration,
         uuid::Uuid::new_v4().to_string(),
@@ -140,7 +141,8 @@ pub async fn publish_status_list(
         TxPayload::PublishIssuerStatusList {
             status_list: Box::new(status_list.clone()),
         },
-    )?;
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         serde_json::json!({ "did": status_list.did, "list_id": status_list.list_id }),
         uuid::Uuid::new_v4().to_string(),
@@ -442,7 +444,7 @@ mod tests {
 
     #[actix_web::test]
     async fn signed_credential_key_is_registered_replicated_and_served() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let app = issuers_app!(state);
         let issuer = issuer();
         let uri = format!("/api/v1/issuers/{}/credential-key", issuer.did);
@@ -457,10 +459,7 @@ mod tests {
         assert_eq!(served["data"]["jwk"], jwk);
 
         let queued = state
-            .tx_pool
-            .lock()
-            .unwrap()
-            .all()
+            .mined_transactions()
             .iter()
             .find(|tx| {
                 matches!(
@@ -481,7 +480,7 @@ mod tests {
 
     #[actix_web::test]
     async fn credential_key_not_signed_by_the_did_key_is_refused() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let app = issuers_app!(state);
         let (issuer, impostor) = (issuer(), issuer());
         let uri = format!("/api/v1/issuers/{}/credential-key", issuer.did);
@@ -500,7 +499,7 @@ mod tests {
 
     #[actix_web::test]
     async fn credential_key_carrying_a_private_component_is_refused() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let app = issuers_app!(state);
         let issuer = issuer();
         let uri = format!("/api/v1/issuers/{}/credential-key", issuer.did);
@@ -596,7 +595,7 @@ mod tests {
 
     #[actix_web::test]
     async fn jwt_vc_issuer_metadata_serves_the_registered_key_only() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let app = issuers_app!(state);
         let issuer = issuer();
         let uris = [
@@ -624,7 +623,7 @@ mod tests {
 
     #[actix_web::test]
     async fn pending_issuances_are_listed_only_to_their_issuer_with_a_fresh_signature() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let pending = web::Data::new(PendingIssuanceStore::new());
         let tokens = web::Data::new(AccessTokenStore::new());
         let app = issuers_app!(state, pending, tokens);
@@ -659,7 +658,7 @@ mod tests {
 
     #[actix_web::test]
     async fn delivered_credential_reaches_the_wallet_through_deferred_credential() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let pending = web::Data::new(PendingIssuanceStore::new());
         let tokens = web::Data::new(AccessTokenStore::new());
         let app = issuers_app!(state, pending, tokens);
@@ -696,7 +695,7 @@ mod tests {
 
     #[actix_web::test]
     async fn delivery_refuses_a_credential_that_does_not_match_the_issuance() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let pending = web::Data::new(PendingIssuanceStore::new());
         let tokens = web::Data::new(AccessTokenStore::new());
         let app = issuers_app!(state, pending, tokens);
@@ -803,12 +802,12 @@ mod tests {
     }
 
     fn queued_transactions(state: &AppState) -> Vec<crate::storage::traits::Transaction> {
-        state.tx_pool.lock().unwrap().all().to_vec()
+        state.mined_transactions()
     }
 
     #[actix_web::test]
     async fn status_list_signed_by_the_registered_key_is_published_replicated_and_served() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let app = issuers_app!(state);
         let issuer = issuer();
         let credential_key = EcdsaP256SigningProvider::generate();
@@ -854,7 +853,7 @@ mod tests {
 
     #[actix_web::test]
     async fn status_list_is_refused_unless_signed_and_named_for_its_list() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let app = issuers_app!(state);
         let (issuer, other) = (issuer(), issuer());
         let credential_key = EcdsaP256SigningProvider::generate();
@@ -932,7 +931,7 @@ mod tests {
 
     #[actix_web::test]
     async fn newer_status_list_replaces_and_an_older_one_is_refused() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let app = issuers_app!(state);
         let issuer = issuer();
         let credential_key = EcdsaP256SigningProvider::generate();
@@ -954,7 +953,7 @@ mod tests {
 
     #[actix_web::test]
     async fn status_list_already_expired_is_refused() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let app = issuers_app!(state);
         let issuer = issuer();
         let credential_key = EcdsaP256SigningProvider::generate();
@@ -980,7 +979,7 @@ mod tests {
 
     #[actix_web::test]
     async fn delivery_accepts_only_a_status_list_of_the_same_issuer() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let pending = web::Data::new(PendingIssuanceStore::new());
         let tokens = web::Data::new(AccessTokenStore::new());
         let app = issuers_app!(state, pending, tokens);

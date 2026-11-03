@@ -1160,16 +1160,7 @@ async fn async_main_inner() -> std::io::Result<()> {
             .unwrap_or(5);
         let mine_store = gateway_store.clone();
         let mine_node = node_arc.clone();
-        let producer = mining::BlockProducer {
-            pool: app_state.tx_pool.clone(),
-            mining: app_state
-                .mining_service
-                .clone()
-                .expect("MiningService required for solo block production"),
-            wake: app_state.block_wake.clone(),
-        };
-        tokio::spawn(mining::run_block_producer(
-            producer,
+        app_state.spawn_block_producer(
             tokio::time::Duration::from_secs(mine_interval_secs),
             move |height| {
                 if let Ok(block) = mine_store.read_block(height) {
@@ -1179,7 +1170,7 @@ async fn async_main_inner() -> std::io::Result<()> {
                     });
                 }
             },
-        ));
+        );
         log::info!("Solo block producer started (interval={mine_interval_secs}s, wakes on new tx)");
     }
 

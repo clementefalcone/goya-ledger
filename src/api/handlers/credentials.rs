@@ -82,7 +82,8 @@ pub async fn store_write_credential(
             credential: Box::new(credential.clone()),
             issuer_public_key,
         },
-    )?;
+    )
+    .await?;
     emit_credential_audit(
         &state,
         &req,
@@ -131,7 +132,8 @@ pub async fn store_revoke_credential(
                 issuer_public_key: body.issuer_public_key.clone(),
                 signature: body.signature.clone(),
             },
-        )?;
+        )
+        .await?;
         emit_credential_audit(
             &state,
             &req,
@@ -242,7 +244,7 @@ mod tests {
     use actix_web::{test, App};
 
     fn make_app_data() -> web::Data<AppState> {
-        web::Data::new(AppState::test_default())
+        web::Data::new(AppState::test_with_block_producer())
     }
 
     #[actix_web::test]
@@ -352,9 +354,8 @@ mod tests {
             post!(&app, "/api/v1/store/credentials", issue_body(&issuer)),
             201
         );
-        let pool = state.tx_pool.lock().unwrap();
-        assert!(pool
-            .all()
+        assert!(state
+            .mined_transactions()
             .iter()
             .any(|tx| matches!(&tx.payload, Some(TxPayload::IssueCredential { credential, .. }) if credential.id == "cred-1")));
     }

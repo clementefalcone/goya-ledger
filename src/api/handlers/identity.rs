@@ -22,7 +22,10 @@ pub(crate) fn identity_op_error(error: IdentityOpError) -> ApiError {
     }
 }
 
-pub(crate) fn commit_ledger_op(
+const BLOCK_INCLUSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const BLOCK_INCLUSION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+pub(crate) async fn commit_ledger_op(
     state: &AppState,
     store: &dyn BlockStore,
     channel: &str,
@@ -41,21 +44,66 @@ pub(crate) fn commit_ledger_op(
         payload: Some(payload),
     };
     if channel == "default" {
-        let mut pool = state.tx_pool.lock().unwrap_or_else(|e| e.into_inner());
-        pool.add(tx.clone())
-            .map_err(|reason| ApiError::ConsensusError {
-                reason: format!("transaction {} not queued: {reason}", tx.id),
-            })?;
-    } else {
-        store
-            .write_transaction(&tx)
-            .map_err(|e| ApiError::StorageError {
-                reason: format!("transaction {} not recorded: {e}", tx.id),
-            })?;
+        return queue_and_await_block(state, store, tx).await.map(|_| ());
     }
+    store
+        .write_transaction(&tx)
+        .map_err(|e| ApiError::StorageError {
+            reason: format!("transaction {} not recorded: {e}", tx.id),
+        })?;
     crate::transaction::apply_tx_payload(store, &tx).map_err(|e| ApiError::StorageError {
         reason: format!("transaction {} not applied: {e}", tx.id),
     })
+}
+
+pub(crate) async fn queue_and_await_block(
+    state: &AppState,
+    store: &dyn BlockStore,
+    tx: Transaction,
+) -> Result<u64, ApiError> {
+    let id = tx.id.clone();
+    state
+        .tx_pool
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .add(tx)
+        .map_err(|reason| ApiError::ConsensusError {
+            reason: format!("transaction {id} not queued: {reason}"),
+        })?;
+    state.block_wake.notify_one();
+    let mined = tokio::time::timeout(BLOCK_INCLUSION_TIMEOUT, read_mined(store, &id))
+        .await
+        .map_err(|_| ApiError::ConsensusError {
+            reason: format!(
+                "transaction {id} queued but not in a block after {}s",
+                BLOCK_INCLUSION_TIMEOUT.as_secs()
+            ),
+        })??;
+    if mined.state != "confirmed" {
+        return Err(ApiError::Conflict {
+            reason: format!(
+                "transaction {id} rejected by block {}: an earlier transaction changed the state it was checked against",
+                mined.block_height
+            ),
+        });
+    }
+    Ok(mined.block_height)
+}
+
+async fn read_mined(store: &dyn BlockStore, id: &str) -> Result<Transaction, ApiError> {
+    loop {
+        match store.read_transaction(id) {
+            Ok(mined) => return Ok(mined),
+            Err(crate::storage::errors::StorageError::KeyNotFound(_)) => {
+                tokio::time::sleep(BLOCK_INCLUSION_POLL).await
+            }
+            Err(e) => {
+                return Err(ApiError::StorageError {
+                    reason: format!("transaction {id} unreadable while awaiting its block: {e}"),
+                })
+            }
+        }
+    }
 }
 
 /// GET /identity/{did} - Fetch DID document from store.
@@ -174,7 +222,8 @@ pub async fn revoke_identity(
             revoked_at: now,
             owner_signature: body.signature.clone(),
         },
-    )?;
+    )
+    .await?;
 
     crate::audit::emit_if_present(
         &state.audit_store,
@@ -277,7 +326,8 @@ pub async fn rotate_key(
             recovery_signature: body.recovery_signature.clone(),
             new_key_signature: body.new_key_signature.clone(),
         },
-    )?;
+    )
+    .await?;
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         serde_json::json!({
@@ -328,7 +378,8 @@ pub async fn store_write_identity(
             record: record.clone(),
             owner_signature: Some(signature),
         },
-    )?;
+    )
+    .await?;
     crate::audit::emit_if_present(
         &state.audit_store,
         crate::audit::AuditAction::DidRegistered,
@@ -728,6 +779,49 @@ mod tests {
         }
     }
 
+    #[actix_web::test]
+    async fn ledger_op_changes_state_only_once_its_block_is_mined() {
+        use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
+        let state = std::sync::Arc::new(AppState::test_default());
+        let store = get_channel_store(&state, "default").unwrap();
+        let key = SoftwareSigningProvider::generate();
+        let public_key = hex::encode(key.public_key());
+        let did = crate::identity::did::did_from_pubkey_hex(&public_key);
+        let signature = hex::encode(
+            key.sign(operations::register_message(&did, None).as_bytes())
+                .unwrap(),
+        );
+        let record = identity_record(&did, &public_key, "active");
+
+        let pending = tokio::spawn({
+            let state = state.clone();
+            let store = store.clone();
+            async move {
+                commit_ledger_op(
+                    &state,
+                    store.as_ref(),
+                    "default",
+                    &record.did,
+                    TxPayload::RegisterIdentity {
+                        record: record.clone(),
+                        owner_signature: Some(signature),
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(store.read_identity(&did).is_err());
+
+        state.spawn_block_producer(std::time::Duration::from_secs(3600), |_| {});
+        pending.await.unwrap().unwrap();
+        assert_eq!(store.read_identity(&did).unwrap().public_key, public_key);
+        assert!(state.mined_transactions().iter().any(|tx| matches!(
+            &tx.payload,
+            Some(TxPayload::RegisterIdentity { record, .. }) if record.did == did
+        )));
+    }
+
     #[test]
     fn challenge_store_insert_and_remove() {
         let nonce = "test-nonce-123".to_string();
@@ -806,7 +900,7 @@ mod tests {
                 crate::identity::signing::MlDsaSigningProvider::generate(),
             )),
             pairwise_secret: Some(vec![9; 32]),
-            ..AppState::test_default()
+            ..AppState::test_with_block_producer()
         }
     }
 
@@ -886,7 +980,7 @@ mod tests {
 
     #[actix_web::test]
     async fn register_rejects_signature_from_another_key() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let key = crate::identity::signing::SoftwareSigningProvider::generate();
         let attacker = crate::identity::signing::SoftwareSigningProvider::generate();
         let (status, did) = post_registration(&state, &key, &attacker).await;
@@ -899,7 +993,7 @@ mod tests {
 
     #[actix_web::test]
     async fn register_with_key_holder_signature_stores_identity() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let key = crate::identity::signing::SoftwareSigningProvider::generate();
         let (status, did) = post_registration(&state, &key, &key).await;
         assert_eq!(status, 201);
@@ -1225,7 +1319,7 @@ mod tests {
     async fn node_without_session_key_refuses_to_issue_tokens() {
         let owner = registered_owner();
         let keyless = RegisteredOwner {
-            state: web::Data::new(AppState::test_default()),
+            state: web::Data::new(AppState::test_with_block_producer()),
             ..owner
         };
         get_channel_store(&keyless.state, "default")

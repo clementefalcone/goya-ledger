@@ -107,7 +107,7 @@ macro_rules! node {
     () => {
         test::init_service(
             App::new()
-                .app_data(web::Data::new(AppState::test_default()))
+                .app_data(web::Data::new(AppState::test_with_block_producer()))
                 .app_data(web::Data::new(NonceStore::new()))
                 .app_data(web::Data::new(PendingIssuanceStore::new()))
                 .app_data(web::Data::new(CredentialOfferStore::new()))

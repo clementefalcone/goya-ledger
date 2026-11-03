@@ -68,7 +68,8 @@ pub async fn add_vault_entry(
             entry: entry.clone(),
             owner_signature: body.signature.clone(),
         },
-    )?;
+    )
+    .await?;
     Ok(HttpResponse::Created().json(ApiResponse::success(
         serde_json::json!({ "did": did, "entry_id": entry.entry_id, "added_at": entry.added_at }),
         trace_id,
@@ -114,7 +115,8 @@ pub async fn revoke_vault_entry(
             revoked_at,
             owner_signature: body.signature.clone(),
         },
-    )?;
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         serde_json::json!({ "did": did, "entry_id": entry_id, "revoked_at": revoked_at }),
         trace_id,
@@ -165,7 +167,8 @@ pub async fn commit_recovery_key(
             committed_at,
             owner_signature: body.signature.clone(),
         },
-    )?;
+    )
+    .await?;
     Ok(HttpResponse::Created().json(ApiResponse::success(
         serde_json::json!({ "did": did, "committed_at": committed_at }),
         trace_id,
@@ -227,7 +230,8 @@ pub async fn bind_civil_anchor(
             issuer_signature: body.issuer_signature.clone(),
             owner_signature: body.signature.clone(),
         },
-    )?;
+    )
+    .await?;
     Ok(HttpResponse::Created().json(ApiResponse::success(
         serde_json::json!({ "did": did, "bound_at": bound_at }),
         trace_id,
@@ -253,7 +257,7 @@ mod tests {
     }
 
     fn registered_owner() -> Owner {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let key = MlDsaSigningProvider::generate();
         let public_key = hex::encode(key.public_key());
         let did = crate::identity::did::did_from_pubkey_hex(&public_key);

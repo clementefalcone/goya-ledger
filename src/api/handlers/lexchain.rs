@@ -76,7 +76,8 @@ async fn deploy_contract(
         TxPayload::DeployContract {
             contract: Box::new(contract.public_view()),
         },
-    )?;
+    )
+    .await?;
     state
         .lexchain_store
         .save(contract.clone())
@@ -120,7 +121,8 @@ async fn sign_contract(
             contract_id: contract_id.clone(),
             envelope: Box::new(envelope),
         },
-    )?;
+    )
+    .await?;
     let mut contract =
         state
             .lexchain_store
@@ -242,7 +244,7 @@ mod tests {
 
     #[actix_web::test]
     async fn deploy_and_signature_are_queued_for_the_chain() {
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(AppState::test_with_block_producer());
         let app = test::init_service(
             App::new()
                 .app_data(state.clone())
@@ -298,10 +300,7 @@ mod tests {
         assert_eq!(resp.status(), 200);
 
         let queued: Vec<&str> = state
-            .tx_pool
-            .lock()
-            .unwrap()
-            .all()
+            .mined_transactions()
             .iter()
             .filter_map(|tx| match &tx.payload {
                 Some(TxPayload::DeployContract { contract }) => {
