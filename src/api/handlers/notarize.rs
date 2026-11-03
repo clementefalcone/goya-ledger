@@ -488,7 +488,6 @@ impl EntryVerification {
 }
 
 fn verify_entry(
-    state: &AppState,
     store: &dyn crate::storage::traits::BlockStore,
     entry: &NotarizationEntry,
 ) -> EntryVerification {
@@ -514,7 +513,7 @@ fn verify_entry(
     let cades = entry
         .cades_der
         .as_ref()
-        .map(|cades_hex| verify_entry_cades(state, entry, cades_hex));
+        .map(|cades_hex| verify_entry_cades(entry, cades_hex));
     let signer = is_signer_proven(
         &SignerClaim {
             signer: &entry.signer,
@@ -534,7 +533,7 @@ fn verify_entry(
     }
 }
 
-fn verify_entry_cades(state: &AppState, entry: &NotarizationEntry, cades_hex: &str) -> bool {
+fn verify_entry_cades(entry: &NotarizationEntry, cades_hex: &str) -> bool {
     let Ok(der) = hex::decode(cades_hex) else {
         return false;
     };
@@ -543,7 +542,6 @@ fn verify_entry_cades(state: &AppState, entry: &NotarizationEntry, cades_hex: &s
     let signing_content = [content_bytes.as_slice(), bio_hash.as_bytes()].concat();
     let ctx = crate::signature::cades_der::VerifyContext {
         trusted_roots: &[],
-        crl_store: state.crl_store.as_deref(),
         verify_timestamp: true,
     };
     crate::signature::cades_der::verify_cades_with_context(
@@ -576,7 +574,7 @@ pub async fn verify_notarization(
 
     match store.read_notarization_by_hash(&content_hash) {
         Ok(entry) => {
-            let verification = verify_entry(&state, store.as_ref(), &entry);
+            let verification = verify_entry(store.as_ref(), &entry);
             if !verification.is_authentic() {
                 return Ok(HttpResponse::UnprocessableEntity().json(ApiResponse::<()>::error(
                     err_dto(
@@ -1370,7 +1368,7 @@ pub async fn verify_fes_bulk(
 
         match store.read_notarization_by_hash(&hash) {
             Ok(entry) => {
-                let status = if verify_entry(&state, store.as_ref(), &entry).is_authentic() {
+                let status = if verify_entry(store.as_ref(), &entry).is_authentic() {
                     "verified"
                 } else {
                     "invalid_signature"
@@ -1617,6 +1615,44 @@ mod tests {
             .uri(&format!("/api/v1/notarize/verify/{hash}"))
             .to_request();
         assert_eq!(test::call_service(&app, req).await.status(), 200);
+    }
+
+    #[actix_web::test]
+    async fn revoked_did_cannot_notarize() {
+        let state = make_app_data();
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(web::scope("/api/v1").service(submit_notarization)),
+        )
+        .await;
+        let (signer_did, signer_pk, signer) = ed25519_identity();
+        get_channel_store(&state, "default")
+            .unwrap()
+            .write_identity(&crate::storage::traits::IdentityRecord {
+                did: signer_did.clone(),
+                public_key: signer_pk,
+                created_at: 0,
+                updated_at: 0,
+                status: "revoked".to_string(),
+                migrated_from: None,
+                signature_algorithm: None,
+                civil_anchor: None,
+                recovery_commitment: None,
+                vault_entries: Vec::new(),
+            })
+            .unwrap();
+        let mut request = node_signed_fea_request(&signer_did, &content_hash());
+        request.body["signer_proof"] = signer_proof_for(&signer, &request.payload);
+
+        let req = test::TestRequest::post()
+            .uri("/api/v1/notarize")
+            .set_json(request.body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["error"]["code"], "SIGNER_MISMATCH");
     }
 
     #[actix_web::test]
