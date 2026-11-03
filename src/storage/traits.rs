@@ -1113,19 +1113,19 @@ pub trait BlockStore: Send + Sync {
     /// balance indexes should override for O(1) lookups.
     fn calculate_balance(&self, address: &str) -> StorageResult<u64> {
         let latest = self.get_latest_height().unwrap_or(0);
-        let mut balance: u64 = 0;
+        let mut balance: i128 = 0;
         for h in 0..=latest {
             let txs = self.transactions_by_block_height(h).unwrap_or_default();
             for tx in &txs {
                 if tx.output_recipient == address {
-                    balance = balance.saturating_add(tx.amount);
+                    balance += i128::from(tx.amount);
                 }
                 if tx.input_did == address {
-                    balance = balance.saturating_sub(tx.amount);
+                    balance -= i128::from(tx.amount);
                 }
             }
         }
-        Ok(balance)
+        Ok(u64::try_from(balance.max(0)).unwrap_or(u64::MAX))
     }
 
     /// Return all transactions where the given address is sender or recipient.
@@ -1386,6 +1386,34 @@ mod tests {
     use crate::storage::MemoryStore;
 
     use super::*;
+
+    #[test]
+    fn balance_ignores_the_order_of_transactions_within_a_block() {
+        let store = MemoryStore::new();
+        let movement = |id: String, from: &str, to: &str| Transaction {
+            id,
+            block_height: 0,
+            timestamp: 1_000,
+            input_did: from.to_string(),
+            output_recipient: to.to_string(),
+            amount: 30,
+            state: "confirmed".to_string(),
+            fee: 0,
+            payload: None,
+        };
+        let vaults: Vec<String> = (0..20).map(|i| format!("savings:lock-{i}")).collect();
+        for vault in &vaults {
+            store
+                .write_transaction(&movement(format!("{vault}-in"), "did:goya:alice", vault))
+                .unwrap();
+            store
+                .write_transaction(&movement(format!("{vault}-out"), vault, "did:goya:alice"))
+                .unwrap();
+        }
+        for vault in &vaults {
+            assert_eq!(store.calculate_balance(vault).unwrap(), 0, "{vault}");
+        }
+    }
 
     fn sample_block(height: u64) -> Block {
         Block {
