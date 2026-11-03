@@ -43,8 +43,17 @@ pub(crate) async fn commit_ledger_op(
         fee: 0,
         payload: Some(payload),
     };
+    commit_tx(state, store, channel, tx).await
+}
+
+pub(crate) async fn commit_tx(
+    state: &AppState,
+    store: &dyn BlockStore,
+    channel: &str,
+    tx: Transaction,
+) -> Result<(), ApiError> {
     if channel == "default" {
-        return queue_and_await_block(state, store, tx).await.map(|_| ());
+        return queue_and_await_block(state, store, tx).await;
     }
     store
         .write_transaction(&tx)
@@ -56,11 +65,11 @@ pub(crate) async fn commit_ledger_op(
     })
 }
 
-pub(crate) async fn queue_and_await_block(
+async fn queue_and_await_block(
     state: &AppState,
     store: &dyn BlockStore,
     tx: Transaction,
-) -> Result<u64, ApiError> {
+) -> Result<(), ApiError> {
     let id = tx.id.clone();
     state
         .tx_pool
@@ -87,7 +96,7 @@ pub(crate) async fn queue_and_await_block(
             ),
         });
     }
-    Ok(mined.block_height)
+    Ok(())
 }
 
 async fn read_mined(store: &dyn BlockStore, id: &str) -> Result<Transaction, ApiError> {

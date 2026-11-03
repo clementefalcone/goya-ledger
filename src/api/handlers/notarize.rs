@@ -17,6 +17,7 @@
 
 use crate::api::errors::{ApiResponse, ApiResult, ErrorDto};
 use crate::api::handlers::channels::{channel_id_from_req, get_channel_store};
+use crate::api::handlers::identity::commit_tx;
 use crate::app_state::AppState;
 use crate::document::DocumentFingerprint;
 use crate::identity::operations;
@@ -107,75 +108,39 @@ pub struct NotarizeListQuery {
     pub signer: Option<String>,
 }
 
-fn queue_payload(state: &AppState, tx: crate::storage::traits::Transaction) -> ApiResult<()> {
-    let id = tx.id.clone();
-    state
-        .tx_pool
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .add(tx)
-        .map_err(|reason| crate::api::errors::ApiError::ConsensusError {
-            reason: format!("{id} not queued: {reason}"),
-        })
+fn notarization_tx(entry: &NotarizationEntry) -> crate::storage::traits::Transaction {
+    crate::storage::traits::Transaction {
+        id: format!("notarize:{}", entry.id),
+        block_height: 0,
+        timestamp: entry.notarized_at,
+        input_did: entry.signer.clone(),
+        output_recipient: entry.content_hash.clone(),
+        amount: 0,
+        state: "pending".to_string(),
+        fee: 0,
+        payload: Some(crate::storage::traits::TxPayload::Notarize {
+            entry: Box::new(entry.clone()),
+        }),
+    }
 }
 
-fn commit_notarization(
-    state: &AppState,
-    store: &dyn crate::storage::traits::BlockStore,
-    entry: &NotarizationEntry,
-) -> ApiResult<()> {
-    queue_payload(
-        state,
-        crate::storage::traits::Transaction {
-            id: format!("notarize:{}", entry.id),
-            block_height: 0,
-            timestamp: entry.notarized_at,
-            input_did: entry.signer.clone(),
-            output_recipient: entry.content_hash.clone(),
-            amount: 0,
-            state: "pending".to_string(),
-            fee: 0,
-            payload: Some(crate::storage::traits::TxPayload::Notarize {
-                entry: Box::new(entry.clone()),
-            }),
-        },
-    )?;
-    store
-        .write_notarization(entry)
-        .map_err(|e| crate::api::errors::ApiError::StorageError {
-            reason: format!("notarization {} not recorded: {e}", entry.id),
-        })
-}
-
-fn commit_transfer(
-    state: &AppState,
-    store: &dyn crate::storage::traits::BlockStore,
-    transfer: &OwnershipTransfer,
-) -> ApiResult<()> {
-    queue_payload(
-        state,
-        crate::storage::traits::Transaction {
-            id: format!(
-                "transfer:{}:{}:{}",
-                transfer.content_hash, transfer.from_did, transfer.transferred_at
-            ),
-            block_height: 0,
-            timestamp: transfer.transferred_at,
-            input_did: transfer.from_did.clone(),
-            output_recipient: transfer.to_did.clone(),
-            amount: 0,
-            state: "pending".to_string(),
-            fee: 0,
-            payload: Some(crate::storage::traits::TxPayload::TransferOwnership {
-                transfer: Box::new(transfer.clone()),
-            }),
-        },
-    )?;
-    store.write_ownership_transfer(transfer).map_err(|e| {
-        crate::api::errors::ApiError::StorageError {
-            reason: format!("transfer of {} not recorded: {e}", transfer.content_hash),
-        }
-    })
+fn transfer_tx(transfer: &OwnershipTransfer) -> crate::storage::traits::Transaction {
+    crate::storage::traits::Transaction {
+        id: format!(
+            "transfer:{}:{}:{}",
+            transfer.content_hash, transfer.from_did, transfer.transferred_at
+        ),
+        block_height: 0,
+        timestamp: transfer.transferred_at,
+        input_did: transfer.from_did.clone(),
+        output_recipient: transfer.to_did.clone(),
+        amount: 0,
+        state: "pending".to_string(),
+        fee: 0,
+        payload: Some(crate::storage::traits::TxPayload::TransferOwnership {
+            transfer: Box::new(transfer.clone()),
+        }),
+    }
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -278,7 +243,7 @@ pub async fn submit_notarization(
         biometric_evidence: body.biometric_evidence.clone(),
     };
 
-    commit_notarization(&state, store.as_ref(), &entry)?;
+    commit_tx(&state, store.as_ref(), channel, notarization_tx(&entry)).await?;
 
     Ok(HttpResponse::Created().json(ApiResponse::success(
         serde_json::json!({
@@ -442,7 +407,7 @@ pub async fn notarize_pdf(
         biometric_evidence: body.biometric_evidence.clone(),
     };
 
-    commit_notarization(&state, store.as_ref(), &entry)?;
+    commit_tx(&state, store.as_ref(), channel, notarization_tx(&entry)).await?;
 
     crate::audit::emit_if_present(
         &state.audit_store,
@@ -789,7 +754,7 @@ pub async fn transfer_document(
         )));
     }
 
-    commit_transfer(&state, store.as_ref(), &transfer)?;
+    commit_tx(&state, store.as_ref(), channel, transfer_tx(&transfer)).await?;
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         serde_json::json!({
@@ -1467,7 +1432,7 @@ mod tests {
     use actix_web::{test, web, App};
 
     fn make_app_data() -> web::Data<AppState> {
-        web::Data::new(AppState::test_default())
+        web::Data::new(AppState::test_with_block_producer())
     }
 
     fn ed25519_identity() -> (String, String, SoftwareSigningProvider) {
@@ -1545,7 +1510,7 @@ mod tests {
 
     #[actix_web::test]
     async fn sign_seal_rejects_signer_proof_from_another_key() {
-        let mut state = AppState::test_default();
+        let mut state = AppState::test_with_block_producer();
         state.signing_provider = Some(std::sync::Arc::new(MlDsaSigningProvider::generate()));
         let app = test::init_service(
             App::new()
@@ -1805,7 +1770,7 @@ mod tests {
 
     #[actix_web::test]
     async fn notarize_fails_without_writing_when_the_mempool_refuses_it() {
-        let mut state = AppState::test_default();
+        let mut state = AppState::test_with_block_producer();
         state.tx_pool = std::sync::Arc::new(std::sync::Mutex::new(
             crate::transaction::mempool::TransactionPool::with_max_size(0),
         ));
@@ -2541,7 +2506,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn transfer_by_the_owner_is_queued_for_the_chain() {
+    async fn transfer_by_the_owner_is_mined_into_the_chain() {
         let state = make_app_data();
         let app = test::init_service(
             App::new().app_data(state.clone()).service(
@@ -2571,13 +2536,15 @@ mod tests {
             .to_request();
         assert_eq!(test::call_service(&app, req).await.status(), 200);
 
-        let pool = state.tx_pool.lock().unwrap();
-        let queued = pool.all().iter().find_map(|tx| match &tx.payload {
-            Some(crate::storage::traits::TxPayload::TransferOwnership { transfer }) => {
-                Some(transfer.to_did.clone())
-            }
-            _ => None,
-        });
+        let queued = state
+            .mined_transactions()
+            .iter()
+            .find_map(|tx| match &tx.payload {
+                Some(crate::storage::traits::TxPayload::TransferOwnership { transfer }) => {
+                    Some(transfer.to_did.clone())
+                }
+                _ => None,
+            });
         assert_eq!(queued.as_deref(), Some("did:goya:bob"));
     }
 
@@ -2702,7 +2669,7 @@ mod tests {
 
     #[actix_web::test]
     async fn sign_seal_rejects_ed25519_provider() {
-        let mut state = AppState::test_default();
+        let mut state = AppState::test_with_block_producer();
         state.signing_provider = Some(std::sync::Arc::new(SoftwareSigningProvider::generate()));
         let state = web::Data::new(state);
         let app = test::init_service(
@@ -2731,7 +2698,7 @@ mod tests {
 
     #[actix_web::test]
     async fn sign_seal_succeeds_with_mldsa65_provider() {
-        let mut state = AppState::test_default();
+        let mut state = AppState::test_with_block_producer();
         state.signing_provider = Some(std::sync::Arc::new(MlDsaSigningProvider::generate()));
         let state = web::Data::new(state);
         let app = test::init_service(

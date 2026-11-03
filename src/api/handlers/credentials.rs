@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn issuer_signed_credential_is_recorded_and_queued_for_the_chain() {
+    async fn issuer_signed_credential_is_recorded_and_mined_into_the_chain() {
         let state = make_app_data();
         let app = test::init_service(
             App::new()

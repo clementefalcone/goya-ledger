@@ -15,11 +15,11 @@ use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider, Software
 use std::sync::Arc;
 
 fn app_state() -> web::Data<AppState> {
-    web::Data::new(AppState::test_default())
+    web::Data::new(AppState::test_with_block_producer())
 }
 
 fn app_state_with_governance() -> web::Data<AppState> {
-    let mut state = AppState::test_default();
+    let mut state = AppState::test_with_block_producer();
     state.proposal_store = Some(Arc::new(
         rust_bc::governance::proposals::ProposalStore::new(),
     ));

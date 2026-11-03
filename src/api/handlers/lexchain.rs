@@ -243,7 +243,7 @@ mod tests {
     use actix_web::{test, App};
 
     #[actix_web::test]
-    async fn deploy_and_signature_are_queued_for_the_chain() {
+    async fn deploy_and_signature_are_mined_into_the_chain() {
         let state = web::Data::new(AppState::test_with_block_producer());
         let app = test::init_service(
             App::new()
