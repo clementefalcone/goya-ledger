@@ -111,6 +111,13 @@ pub fn apply_tx_payload(store: &dyn BlockStore, tx: &Transaction) -> StorageResu
         Some(TxPayload::TransferOwnership { transfer }) => {
             crate::signature::notarization::apply_ownership_transfer(store, transfer)
         }
+        Some(TxPayload::DeployContract { contract }) => {
+            crate::lexchain::engine::apply_deploy(store, contract)
+        }
+        Some(TxPayload::SignContract {
+            contract_id,
+            envelope,
+        }) => crate::lexchain::engine::apply_signature(store, contract_id, envelope),
         Some(TxPayload::IssueCredential {
             credential,
             issuer_public_key,

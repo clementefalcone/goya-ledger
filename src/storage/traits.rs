@@ -148,6 +148,13 @@ pub enum TxPayload {
     TransferOwnership {
         transfer: Box<OwnershipTransfer>,
     },
+    DeployContract {
+        contract: Box<crate::lexchain::types::LexContract>,
+    },
+    SignContract {
+        contract_id: String,
+        envelope: Box<crate::signature::SignedEnvelope>,
+    },
     IssueCredential {
         credential: Box<Credential>,
         issuer_public_key: String,

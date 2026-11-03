@@ -432,69 +432,25 @@ Es un **orquestador declarativo**, no un lenguaje de programación.
 
 ---
 
-## API
+## API (implementada)
 
-### Deploy
+Desplegar y firmar se replican por la cadena; cada nodo vuelve a verificar. En la cadena solo viajan los DIDs de las partes, las firmas y una huella sellada del texto (`payload_commitment` = hash de sal + texto). El texto y su sal quedan en el nodo donde se desplegó el contrato.
 
-```
-POST /api/v1/lexchain/deploy
-Content-Type: multipart/form-data
+### POST /api/v1/lexchain/deploy
 
-Body: contract file (YAML)
-Response: { contract_id, status, current_stage, parties_pending }
-```
+Body: `{ "type", "parties": [{ "role", "did", "signature_level" }], "payload", "require_notarization"?, "deadline_secs"?, "webhook_url"? }`, o `{ "template", "parties": { rol: did }, "payload" }`. Cualquiera puede proponer un contrato; nadie queda obligado hasta firmar. Respuesta: el contrato completo con `payload_salt` (guárdalo para probar el texto más adelante).
 
-### Advance
+### POST /api/v1/lexchain/{id}/sign
 
-```
-POST /api/v1/lexchain/{contract_id}/advance
-Content-Type: application/json
+Body: `{ "did", "public_key", "signature", "biometric_evidence"? }`. La firma es sobre `fes:{did}:{content_hash}` (o `fea:{did}:{content_hash}:{bio_hash}` en nivel avanzado). La autoriza la firma de la parte con la clave registrada de su DID; no hace falta certificado de organización.
 
-Body: {
-  party: "did:goya:...",
-  signature: "hex...",
-  public_key: "hex...",
-  biometric_evidence: [...],    // if advanced
-  document_hash: "sha256..."    // if signing
-}
+### GET /api/v1/lexchain/{id}
 
-Response: {
-  previous_stage: "borrador",
-  current_stage: "revision",
-  actions_executed: ["notarize", "timestamp"],
-  parties_pending: ["comprador", "notario"],
-  artifacts: {
-    notarization_id: "...",
-    timestamp_token: "base64...",
-    credential: "ey..."
-  }
-}
-```
+Sin parámetros devuelve la vista pública (sin texto). Una parte obtiene el texto completo con `?did=…&issued_at=…&signature=…`, firmando `lexchain:read:{id}:{issued_at}` con su DID (vigencia de 300 s).
 
-### Status
+### GET /api/v1/lexchain · GET /api/v1/lexchain/templates
 
-```
-GET /api/v1/lexchain/{contract_id}
-
-Response: {
-  contract_id: "lex_a1b2c3",
-  name: "Compraventa Inmueble",
-  jurisdiction: "chile",
-  current_stage: "firma",
-  stages_completed: ["borrador", "revision"],
-  parties: { vendedor: { signed: true }, comprador: { signed: false } },
-  created_at: 1723...,
-  documents: [{ title: "Escritura", notarized: true, hash: "..." }]
-}
-```
-
-### List
-
-```
-GET /api/v1/lexchain?party=did:goya:...&status=active
-
-Response: [{ contract_id, name, current_stage, role, created_at }]
-```
+Lista de contratos (vista pública) y plantillas disponibles.
 
 ---
 

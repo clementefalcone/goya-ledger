@@ -249,7 +249,7 @@ impl BiometricEvidence {
 /// ```
 ///
 /// Where `biometrics_hash = SHA-256(sorted commitments joined by ':')`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedEnvelope {
     /// Signature level claimed by the signer.
     pub level: SignatureLevel,
