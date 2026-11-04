@@ -20,9 +20,9 @@ A biometric never leaves the phone's secure chip. It unlocks the key on that dev
 ### 1. The app verifies the phone itself
 
 1. The app creates a challenge: 32 random bytes, its origin, its audience, an expiry of at most 5 minutes.
-2. It sends the person to Saturnus ID with that challenge. After the fingerprint, Saturnus ID signs `saturnus-id:login:v1:{audience}:{origin}:{challenge}:{expires_at}` with the person's key for that app (see per-app identity).
-3. Saturnus ID returns the DID, the public key and the signature to the app.
-4. The app checks that the DID is the SHA3-512 of the public key, that the signature verifies, that the challenge is its own, unused and unexpired, and that the registry on any node lists that DID as active with that public key.
+2. It sends the person to `https://id.mysaturnus.com/?return_to={url}&challenge={hex}&expires_at={unix}`. The return address must be an allowed Saturnus app; its origin and audience come from that allowlist. After the fingerprint, Saturnus ID signs `saturnus-id:login:v1:{audience}:{origin}:{challenge}:{expires_at}:{factor}` with the person's key for that app (see per-app identity). `factor` is `biometric` for a passkey unlock and `passphrase` for an older local identity.
+3. Saturnus ID returns to `{url}#saturnus_assertion={base64url(JSON)}` with `did`, `public_key`, `challenge`, `expires_at`, `factor` and `signature`. The fragment never reaches servers or logs.
+4. The app checks that the DID is the SHA3-512 of the public key, that the signature verifies for its own audience and origin, that the challenge is its own, unused and unexpired (at most 300 s), and that the registry on any node lists that DID as active with that public key. Reference implementation: `saturnus-afp/src/loginAssertion.js` (`verifyLoginAssertion`).
 
 No node signs anything and nothing is kept in node memory. `/identity/auth/challenge`, `/identity/auth/verify`, `/identity/auth/session/redeem` and `PAIRWISE_SECRET` retire once every app has moved.
 
