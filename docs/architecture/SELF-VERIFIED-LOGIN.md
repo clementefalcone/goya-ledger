@@ -30,7 +30,7 @@ No node signs anything and nothing is kept in node memory. `/identity/auth/chall
 
 Each app sees a different DID for the same person, so two apps cannot correlate them. The phone derives it, not the node:
 
-- A 32-byte **identity root** is created with the identity and sealed in every vault copy next to the signing key. Existing vaults derive it once from their current signing key and re-seal it.
+- A 32-byte **identity root** is sealed in every vault copy next to the signing key. It is first derived from the signing key (HKDF-SHA256, info `saturnus-id identity root v1`), so copies sealed before roots existed yield it without migration. A key rotation carries the root over from the recovery kit's copy.
 - The key for an app is `ML-DSA-65(HKDF-SHA256(root, "saturnus-id app key v1:{audience}"))`. Its DID is registered on Goya the first time the person enters that app, with a recovery commitment derived from the root the same way.
 - Rotating the main key after a lost phone keeps the root, so every app still sees the same DID. The root travels to the new phone through a surviving device, the recovery kit, or (step 2) guardians.
 - Revealing the main DID to an app is a separate, explicit choice made on the phone.
