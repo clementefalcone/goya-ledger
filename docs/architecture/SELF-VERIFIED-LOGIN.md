@@ -1,6 +1,6 @@
 # Self-verified login
 
-A person unlocks their phone with a fingerprint or face, enters any Saturnus app (Pet, Salud, AFP, Wallet), and the app knows it was that person's phone. This holds whichever Goya node the app talks to, after the phone is lost, and when the network has thousands of nodes. No node and no institution has to be trusted.
+A person unlocks their phone with a fingerprint or face, enters any Saturnus app (Pet, Salud, AFP, Wallet, Vino), and the app knows it was that person's phone. This holds whichever Goya node the app talks to, after the phone is lost, and when the network has thousands of nodes. No node and no institution has to be trusted.
 
 ## Today
 
@@ -22,7 +22,7 @@ A biometric never leaves the phone's secure chip. It unlocks the key on that dev
 1. The app creates a challenge: 32 random bytes, its origin, its audience, an expiry of at most 5 minutes.
 2. It sends the person to `https://id.mysaturnus.com/?return_to={url}&challenge={hex}&expires_at={unix}`. The return address must be an allowed Saturnus app; its origin and audience come from that allowlist. After the fingerprint, Saturnus ID signs `saturnus-id:login:v1:{audience}:{origin}:{challenge}:{expires_at}:{factor}` with the person's key for that app (see per-app identity). `factor` is `biometric` for a passkey unlock and `passphrase` for an older local identity.
 3. Saturnus ID returns to `{url}#saturnus_assertion={base64url(JSON)}` with `did`, `public_key`, `challenge`, `expires_at`, `factor` and `signature`. The fragment never reaches servers or logs.
-4. The app checks that the DID is the SHA3-512 of the public key, that the signature verifies for its own audience and origin, that the challenge is its own, unused and unexpired (at most 300 s), and that the registry on any node lists that DID as active with that public key. Reference implementation: `saturnus-afp/src/loginAssertion.js` (`verifyLoginAssertion`).
+4. The app checks that the DID is the SHA3-512 of the public key, that the signature verifies for its own audience and origin, that the challenge is its own, unused and unexpired (at most 300 s), and that the registry on any node lists that DID as active with that public key. Reference implementation: `saturnus-id/src/loginAssertion.js` (`verifyLoginAssertion`). Saturnus ID lives in its own repo, `saturnus-id`, and its allowlist of app origins and audiences is `src/returnTo.js`.
 
 No node signs anything and nothing is kept in node memory. `/identity/auth/challenge`, `/identity/auth/verify`, `/identity/auth/session/redeem` and `PAIRWISE_SECRET` retire once every app has moved.
 
@@ -34,6 +34,7 @@ Each app sees a different DID for the same person, so two apps cannot correlate 
 - The key for an app is `ML-DSA-65(HKDF-SHA256(root, "saturnus-id app key v1:{audience}"))`. Its DID is registered on Goya the first time the person enters that app, with a recovery commitment derived from the root the same way.
 - Rotating the main key after a lost phone keeps the root, so every app still sees the same DID. The root travels to the new phone through a surviving device, the recovery kit, or (step 2) guardians.
 - Revealing the main DID to an app is a separate, explicit choice made on the phone.
+- Ledger signatures an app requests through `?sign=ledger` follow the same rule. `src/ledgerSigning.js` lists, per origin, which kinds it may request and which identity signs them: research signs with the main key; Vino may only `notarize`, and signs with its app key, so a notarized document carries the DID that signed in to Vino.
 
 ### 2. Recovery guardians
 
