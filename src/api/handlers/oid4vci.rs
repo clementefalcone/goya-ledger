@@ -733,6 +733,7 @@ pub async fn oauth_as_metadata(req: HttpRequest) -> ApiResult<HttpResponse> {
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "issuer": base,
+        "authorization_endpoint": format!("{api}/authorize"),
         "token_endpoint": format!("{api}/token"),
         "grant_types_supported": [PRE_AUTHORIZED_CODE_GRANT],
         "token_endpoint_auth_methods_supported": ["none", "attest_jwt_client_auth"],
@@ -1459,7 +1460,13 @@ mod tests {
             body["grant_types_supported"],
             serde_json::json!([PRE_AUTHORIZED_CODE_GRANT])
         );
-        assert!(body.get("authorization_endpoint").is_none());
+        assert_eq!(
+            body["authorization_endpoint"],
+            serde_json::json!(format!(
+                "{}/api/v1/authorize",
+                body["issuer"].as_str().unwrap()
+            ))
+        );
     }
 
     fn make_token_form(code: &str) -> TokenRequest {
