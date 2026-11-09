@@ -35,21 +35,41 @@ echo ""
 
 # ── Seed identities (once) ───────────────────────────────────────────────────
 
+TMPDIR=$(mktemp -d)
+trap "rm -rf $TMPDIR" EXIT
+
+ACCOUNT_TOOL="$(cd "$(dirname "$0")" && pwd)/ledger-account/account.mjs"
+[[ -d "$(dirname "$ACCOUNT_TOOL")/node_modules" ]] || npm ci --silent --prefix "$(dirname "$ACCOUNT_TOOL")"
+
+account() {
+    local name="$1"
+    shift
+    NODE_URL="$NODE/api/v1" SEED_PATH="$TMPDIR/$name.hex" node "$ACCOUNT_TOOL" "$@"
+}
+
 SEED_IDENTITIES=100
 echo -n "Seeding $SEED_IDENTITIES identities... "
 seed_errors=0
 for i in $(seq 1 $SEED_IDENTITIES); do
-    code=$(curl -s -o /dev/null -w "%{http_code}" \
-        -X POST "$NODE/api/v1/store/identities" \
-        -H "Content-Type: application/json" \
-        -H "X-Org-Id: stress" -H "X-Msp-Role: client" \
-        -d "{\"did\":\"did:goya:s-$i\",\"created_at\":$(date +%s),\"updated_at\":$(date +%s),\"status\":\"active\"}" 2>/dev/null)
-    if [[ "$code" -lt 200 || "$code" -gt 201 ]]; then
-        seed_errors=$((seed_errors + 1))
-    fi
+    account "s-$i" keygen > /dev/null
+    account "s-$i" register > /dev/null 2>&1 || seed_errors=$((seed_errors + 1))
 done
 echo -e "${GREEN}done${NC} ($seed_errors errors)"
 echo ""
+
+sign_level_credentials() {
+    local level="$1" count="$2" offset="$3" idx global_idx hash
+    rm -rf "$TMPDIR/lines" && mkdir "$TMPDIR/lines"
+    for idx in $(seq 1 "$count"); do
+        global_idx=$((offset + idx))
+        hash=$(printf '%064d' $((global_idx * 7)))
+        printf 'sig-r%s-%06d\tdid:goya:doc:%s\tDigitalSignature\t{"document":"%s"}\t0\n' \
+            "$level" "$idx" "$hash" "$hash" >> "$TMPDIR/lines/s-$(( (global_idx % SEED_IDENTITIES) + 1 )).tsv"
+    done
+    for lines in "$TMPDIR"/lines/*.tsv; do
+        account "$(basename "$lines" .tsv)" credentials < "$lines"
+    done > "$TMPDIR/bodies.jsonl"
+}
 
 # ── Ramp levels ───────────────────────────────────────────────────────────────
 #        credentials  concurrency
@@ -58,9 +78,6 @@ LEVELS=( "500         10"
          "2000        50"
          "5000        100"
          "10000       200" )
-
-TMPDIR=$(mktemp -d)
-trap "rm -rf $TMPDIR" EXIT
 
 echo -e "${CYAN}Level  Creds  Conc   TPS      p50    p95    p99    max    Errors${NC}"
 echo "-----  -----  ----   ------   -----  -----  -----  -----  ------"
@@ -75,24 +92,20 @@ for level_idx in "${!LEVELS[@]}"; do
     # Clear results
     > "$TMPDIR/results.txt"
 
+    sign_level_credentials "$LEVEL" "$SIGS" "$CRED_OFFSET"
+
     T_START=$(now_ms)
 
-    # Fire concurrent credential writes
     running=0
-    for idx in $(seq 1 $SIGS); do
-        global_idx=$((CRED_OFFSET + idx))
+    while IFS= read -r body; do
         (
-            did_num=$(( (global_idx % SEED_IDENTITIES) + 1 ))
-            hash=$(printf '%064d' $((global_idx * 7)))
-            cred_id="sig-r${LEVEL}-$(printf '%06d' $idx)"
-            ts=$(date +%s)
             t0=$(now_ms)
             code=$(curl -s -o /dev/null -w "%{http_code}" \
                 --max-time 10 \
                 -X POST "$NODE/api/v1/store/credentials" \
                 -H "Content-Type: application/json" \
                 -H "X-Org-Id: stress" -H "X-Msp-Role: client" \
-                -d "{\"id\":\"$cred_id\",\"issuer_did\":\"did:goya:s-$did_num\",\"subject_did\":\"did:goya:doc:$hash\",\"cred_type\":\"DigitalSignature\",\"issued_at\":$ts,\"expires_at\":0,\"revoked_at\":null}" 2>/dev/null || echo "000")
+                -d "$body" 2>/dev/null || echo "000")
             t1=$(now_ms)
             echo "$((t1 - t0)) $code" >> "$TMPDIR/results.txt"
         ) &
@@ -101,7 +114,7 @@ for level_idx in "${!LEVELS[@]}"; do
             wait -n 2>/dev/null || wait
             running=$((running - 1))
         fi
-    done
+    done < "$TMPDIR/bodies.jsonl"
     wait
 
     T_END=$(now_ms)
