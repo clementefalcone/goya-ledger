@@ -954,12 +954,7 @@ pub async fn token_endpoint(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let host = req
-        .headers()
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost:8080");
-    let htu = format!("https://{host}/token");
+    let htu = format!("{}/api/v1/token", credential_issuer(&req));
 
     let dpop_jkt = if let Some(dpop_jwt) = &dpop_header {
         match verify_dpop_proof(dpop_jwt, "POST", &htu) {
@@ -1586,11 +1581,21 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn e2e_token_with_dpop() {
+    async fn e2e_token_with_dpop_for_the_advertised_token_endpoint() {
         let state = make_state();
         let app = oid4vci_app!(state);
         let code = pre_authorized_code!(app);
-        let dpop = make_dpop_jwt("POST", "https://localhost:8080/token", now_secs());
+        let metadata_req = test::TestRequest::get()
+            .uri("/.well-known/oauth-authorization-server")
+            .insert_header(("host", "localhost:8080"))
+            .to_request();
+        let metadata: serde_json::Value =
+            test::read_body_json(test::call_service(&app, metadata_req).await).await;
+        let dpop = make_dpop_jwt(
+            "POST",
+            metadata["token_endpoint"].as_str().unwrap(),
+            now_secs(),
+        );
         let req = test::TestRequest::post()
             .uri("/token")
             .insert_header(("host", "localhost:8080"))
@@ -1609,7 +1614,7 @@ mod tests {
         let state = make_state();
         let app = oid4vci_app!(state);
         let code = pre_authorized_code!(app);
-        let dpop = make_dpop_jwt("GET", "https://localhost:8080/token", now_secs());
+        let dpop = make_dpop_jwt("GET", "https://localhost:8080/api/v1/token", now_secs());
         let req = test::TestRequest::post()
             .uri("/token")
             .insert_header(("host", "localhost:8080"))
