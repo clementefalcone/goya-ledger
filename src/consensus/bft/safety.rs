@@ -258,7 +258,9 @@ impl SafetyState {
         //     BUT the proposal must extend the justify_qc's certified block.
         //     A higher QC attached to an unrelated sibling is not sufficient.
         if let Some(jqc) = justify_qc {
-            if jqc.round > lock.round && ancestry.is_ancestor(&jqc.block_hash, proposal_block_hash)
+            if jqc.round > lock.round
+                && jqc.round < proposal_round
+                && ancestry.is_ancestor(&jqc.block_hash, proposal_block_hash)
             {
                 return Ok(());
             }
@@ -491,6 +493,18 @@ mod tests {
         let jqc = make_qc(BftPhase::Prepare, 0xFF, 3);
         let r = s.safe_to_vote(6, &block_hash(0xFF), Some(&jqc), &chain);
         assert!(matches!(r, Err(SafetyError::LockedConflict { .. })));
+    }
+
+    #[test]
+    fn justify_qc_from_proposal_round_or_later_does_not_unlock() {
+        let mut s = SafetyState::new();
+        s.update_locked_qc(&make_qc(BftPhase::PreCommit, 0xAA, 5));
+        let chain = chain_abc();
+        for justify_round in [7, 8] {
+            let jqc = make_qc(BftPhase::Prepare, 0xFF, justify_round);
+            let r = s.safe_to_vote(7, &block_hash(0xFF), Some(&jqc), &chain);
+            assert!(matches!(r, Err(SafetyError::LockedConflict { .. })));
+        }
     }
 
     // ── high_qc / locked_qc updates ─────────────────────────────────
