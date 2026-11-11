@@ -23,7 +23,7 @@ El 100% del código fuente fue desarrollado mediante pair-programming asistido p
 
 - **Goya Ledger** (núcleo blockchain): ~125.500 líneas de Rust
 - **LexChain** (motor de contratos legales): módulo integrado en `src/`
-- **Pruebas formales** (Lean 4): ~700 líneas en `formal/`
+- **Pruebas formales** (Lean 4): ~190 líneas en `formal/`
 - **Documentación técnica y de compliance**: `docs/`
 
 La herramienta fue utilizada como asistente de desarrollo bajo dirección humana continua, no como generador autónomo.
@@ -83,7 +83,7 @@ Independientemente del análisis de copyright, el codebase está protegido como 
 
 ### Pruebas formales (Lean 4)
 
-Las demostraciones matemáticas en `formal/` son verificables mecánicamente por el kernel de Lean 4. La validez de una prueba formal no depende de quién la escribió sino de que el verificador la acepte. Ejecutar `lean --run` sobre los archivos reproduce la verificación de forma independiente y determinista.
+Las demostraciones matemáticas en `formal/` son verificables mecánicamente por el kernel de Lean 4. La validez de una prueba formal no depende de quién la escribió sino de que el verificador la acepte. Ejecutar `lake build` dentro de `formal/` reproduce la verificación de forma independiente y determinista.
 
 ### Tests automatizados
 
@@ -141,7 +141,7 @@ Estas decisiones fueron tomadas una vez y sostenidas a lo largo de 791 commits. 
 Las pruebas en Lean 4 (`formal/`) no fueron generadas por un prompt genérico. El autor definió:
 
 - Qué propiedades probar (no-fork BFT, correctness de cuarentena, FSM FIPS).
-- Qué axiomas aceptar y cuáles demostrar.
+- Que ninguna prueba dependa de axiomas propios ni de `sorry` (lo verifica `scripts/gauntlet.sh`).
 - Cómo estructurar los teoremas para que sean verificables por el kernel.
 
 El kernel de Lean 4 verificó las pruebas. Pero la selección de qué probar y por qué es conocimiento humano de dominio.
