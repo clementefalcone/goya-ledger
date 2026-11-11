@@ -57,7 +57,6 @@ Key environment variables per node:
 | `SEED_NODES` | — | Always-tried peer list |
 | `P2P_RESPONSE_BUFFER_BYTES` | 262144 | Response buffer (256 KB) |
 | `P2P_HANDLER_BUFFER_BYTES` | 65536 | Handler buffer (64 KB) |
-| `P2P_SYNC_BUFFER_BYTES` | 4194304 | State sync buffer (4 MB) |
 
 ### Ordering configuration
 
@@ -107,7 +106,6 @@ docker compose up -d
 
 - [ ] Use `P2P_EXTERNAL_ADDRESS` when nodes are behind NAT/load balancer
 - [ ] Set `BOOTSTRAP_NODES` on every peer for initial discovery
-- [ ] Tune `P2P_SYNC_BUFFER_BYTES` for networks with large blocks
 
 ### Backup
 

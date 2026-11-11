@@ -48,14 +48,6 @@ fn p2p_handler_buffer_size() -> usize {
         .unwrap_or(1024 * 1024) // 1 MB (was 64 KB)
 }
 
-/// Buffer for pull-based state sync responses.  Default 4 MB.
-fn p2p_sync_buffer_size() -> usize {
-    std::env::var("P2P_SYNC_BUFFER_BYTES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4 * 1024 * 1024)
-}
-
 /// Abstracts over plain TCP and TLS peer streams.
 trait AsyncStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> AsyncStream for T {}
@@ -2771,50 +2763,8 @@ impl Node {
                 };
 
                 for peer_addr in &peers {
-                    // Send StateRequest.
-                    let req = Message::StateRequest {
-                        from_height: local_height + 1,
-                    };
-                    let Ok(json) = serde_json::to_string(&req) else {
-                        continue;
-                    };
-
-                    let mut stream = match node.open_stream(peer_addr).await {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-
-                    if tokio::io::AsyncWriteExt::write_all(&mut stream, json.as_bytes())
-                        .await
-                        .is_err()
-                    {
-                        continue;
-                    }
-
-                    // Read response.
-                    let mut buf = vec![0u8; p2p_sync_buffer_size()];
-                    let n = match tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
-                        Ok(n) if n > 0 => n,
-                        _ => continue,
-                    };
-
-                    let resp: Message = match serde_json::from_slice(&buf[..n]) {
-                        Ok(m) => m,
-                        Err(_) => continue,
-                    };
-
-                    if let Message::StateResponse { blocks } = resp {
-                        let trusted_signers = crate::ordering::trusted_block_signers(
-                            node.signing_provider.as_deref(),
-                        );
-                        for block in blocks.iter().take(gossip::STATE_BATCH_SIZE) {
-                            if let Err(e) =
-                                commit_incoming_block(store.as_ref(), block, &trusted_signers)
-                            {
-                                log::warn!("pull sync from {peer_addr} stopped: {e}");
-                                break;
-                            }
-                        }
+                    if let Err(e) = node.request_state_sync(peer_addr, local_height + 1).await {
+                        log::debug!("pull sync from {peer_addr} skipped: {e}");
                     }
                 }
             }
@@ -3145,6 +3095,44 @@ mod tests {
 
     fn trusted_provider() -> Arc<dyn crate::identity::signing::SigningProvider> {
         Arc::new(crate::identity::signing::SoftwareSigningProvider::generate())
+    }
+
+    #[tokio::test]
+    async fn pull_sync_reassembles_a_response_split_across_reads() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let signer = trusted_provider();
+        let response = serde_json::to_vec(&Message::StateResponse {
+            blocks: vec![block_signed_by(signer.clone())],
+        })
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0u8; 4096];
+                let _ = socket.read(&mut request).await;
+                let (head, tail) = response.split_at(response.len() / 2);
+                let _ = socket.write_all(head).await;
+                let _ = socket.flush().await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let _ = socket.write_all(tail).await;
+            }
+        });
+        let store: Arc<dyn crate::storage::traits::BlockStore> =
+            Arc::new(crate::storage::MemoryStore::new());
+        let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None, None);
+        node.store = Some(store.clone());
+        node.signing_provider = Some(signer);
+        node.peers.lock().unwrap().insert(peer);
+
+        let sync = node.start_pull_sync_loop(20);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while store.read_block(7).is_err() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        sync.abort();
+
+        assert_eq!(store.read_block(7).unwrap().height, 7);
     }
 
     #[tokio::test]
