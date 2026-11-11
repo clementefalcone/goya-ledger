@@ -2849,20 +2849,7 @@ fn commit_incoming_block(
         return Ok(());
     }
     crate::ordering::validate_incoming_block(block, store, trusted_signers)?;
-    store
-        .write_block(block)
-        .map_err(|e| format!("failed to write block {}: {e}", block.height))?;
-    for tx in &block.transaction_data {
-        let mut committed_tx = tx.clone();
-        if let Err(e) = crate::transaction::apply_tx_payload(store, tx) {
-            log::warn!("tx {} payload rejected: {e}", tx.id);
-            committed_tx.state = "invalid_payload".to_string();
-        }
-        store
-            .write_transaction(&committed_tx)
-            .map_err(|e| format!("failed to write tx {}: {e}", tx.id))?;
-    }
-    Ok(())
+    crate::mining::persist_block(store, block)
 }
 
 #[cfg(test)]
@@ -3165,7 +3152,9 @@ mod tests {
         let signer = trusted_provider();
         let store = deliver_ordered_block(block_signed_by(signer.clone()), signer).await;
         assert_eq!(store.read_block(7).unwrap().height, 7);
-        assert!(store.read_transaction("tx-1").is_ok());
+        let tx = store.read_transaction("tx-1").unwrap();
+        assert_eq!(tx.state, "confirmed");
+        assert_eq!(tx.block_height, 7);
     }
 
     fn notarization_tx(

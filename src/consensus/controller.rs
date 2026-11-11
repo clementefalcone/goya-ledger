@@ -469,17 +469,9 @@ async fn commit_block(
     tx_pool: &std::sync::Mutex<TransactionPool>,
 ) {
     block.commit_qc = manager.highest_commit_qc().cloned();
-    match store.write_block(&block) {
+    match crate::mining::persist_block(store.as_ref(), &block) {
         Ok(()) => {
             forget_committed(tx_pool, &block);
-            for tx in &block.transaction_data {
-                let mut committed_tx = tx.clone();
-                if let Err(e) = crate::transaction::apply_tx_payload(store.as_ref(), tx) {
-                    log::warn!("BFT: tx {} payload rejected: {e}", tx.id);
-                    committed_tx.state = "invalid_payload".to_string();
-                }
-                let _ = store.write_transaction(&committed_tx);
-            }
             log::info!("BFT: committed block {} with QC", block.height);
             let node = node.clone();
             let blk = block.clone();
