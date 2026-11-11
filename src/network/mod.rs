@@ -1324,6 +1324,10 @@ impl Node {
             }
 
             Message::SubmitTransaction(tx) => {
+                if let Some(bft) = bft_tx {
+                    let _ = bft.send(crate::consensus::controller::BftEvent::Transaction(tx));
+                    return Ok(None);
+                }
                 if matches!(role, NodeRole::Orderer | NodeRole::PeerAndOrderer) {
                     if let Some(svc) = &ordering_service {
                         let _ = svc.submit_tx(tx);
@@ -3036,6 +3040,50 @@ mod tests {
         .unwrap();
 
         assert_eq!(svc.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn bft_node_hands_submitted_transaction_to_consensus() {
+        let svc = Arc::new(crate::ordering::service::OrderingService::with_config(
+            100, 2000,
+        ));
+        let (peers, receipts, rates) = empty_process_message_args();
+        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = make_storage_tx();
+
+        Node::process_message(
+            Message::SubmitTransaction(tx.clone()),
+            &peers,
+            None,
+            None,
+            None,
+            None,
+            None,
+            receipts,
+            rates,
+            None,
+            NodeRole::PeerAndOrderer,
+            Some(svc.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "default",
+            None,
+            None,
+            None,
+            Some(&bft_tx),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            bft_rx.try_recv(),
+            Ok(crate::consensus::controller::BftEvent::Transaction(received)) if received.id == tx.id
+        ));
+        assert_eq!(svc.pending_count(), 0);
     }
 
     async fn deliver_ordered_block(

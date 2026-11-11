@@ -14,7 +14,7 @@ use crate::consensus::bft::validator_registry::RegistryVerifier;
 use crate::identity::signing::SigningProvider;
 use crate::mining::MiningService;
 use crate::network::Node;
-use crate::storage::traits::Block;
+use crate::storage::traits::{Block, Transaction};
 use crate::storage::BlockStore;
 use crate::transaction::mempool::TransactionPool;
 
@@ -33,6 +33,7 @@ pub enum BftEvent {
     },
     /// A BFT vote arrived from a peer.
     Vote(VoteMessage),
+    Transaction(Transaction),
 }
 
 /// Run the BFT consensus loop. Mines when leader, votes when follower.
@@ -47,6 +48,7 @@ pub async fn run_bft_loop(
     mining_service: Arc<MiningService>,
     tx_pool: Arc<std::sync::Mutex<TransactionPool>>,
     verifier: RegistryVerifier,
+    wake: Arc<tokio::sync::Notify>,
 ) {
     let config = RoundManagerConfig::default();
     let mut book = ProposalBook::new(store.clone());
@@ -121,7 +123,7 @@ pub async fn run_bft_loop(
                         early_votes.clear();
                         if decided {
                             if let Some(blk) = pending_block.take() {
-                                commit_block(blk, &manager, &store, &node).await;
+                                commit_block(blk, &manager, &store, &node, &tx_pool).await;
                             }
                             advance_round(&mut manager, &mut pending_block, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
                         } else {
@@ -138,13 +140,28 @@ pub async fn run_bft_loop(
                         let action = manager.process_event(RoundEvent::Vote(vote));
                         if handle_action(&action, &node, &signer, &node_id, &mut manager).await {
                             if let Some(blk) = pending_block.take() {
-                                commit_block(blk, &manager, &store, &node).await;
+                                commit_block(blk, &manager, &store, &node, &tx_pool).await;
                             }
                             advance_round(&mut manager, &mut pending_block, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
                         } else {
                             reset_timeout(&mut timeout, &manager);
                         }
                     }
+                    BftEvent::Transaction(tx) => {
+                        let id = tx.id.clone();
+                        if let Err(reason) = tx_pool.lock().unwrap_or_else(|e| e.into_inner()).add(tx) {
+                            log::debug!("BFT: gossiped transaction {id} not queued: {reason}");
+                            continue;
+                        }
+                        if manager.is_current_leader() && pending_block.is_none() {
+                            try_mine_and_propose(&mut manager, &mut pending_block, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
+                        }
+                    }
+                }
+            }
+            _ = wake.notified() => {
+                if manager.is_current_leader() && pending_block.is_none() {
+                    try_mine_and_propose(&mut manager, &mut pending_block, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
                 }
             }
             _ = &mut timeout => {
@@ -437,15 +454,24 @@ async fn handle_action(
     }
 }
 
+fn forget_committed(tx_pool: &std::sync::Mutex<TransactionPool>, block: &Block) {
+    let mut pool = tx_pool.lock().unwrap_or_else(|e| e.into_inner());
+    for tx in &block.transaction_data {
+        pool.remove(&tx.id);
+    }
+}
+
 async fn commit_block(
     mut block: Block,
     manager: &RoundManager<RegistryVerifier>,
     store: &Arc<dyn crate::storage::BlockStore>,
     node: &Arc<Node>,
+    tx_pool: &std::sync::Mutex<TransactionPool>,
 ) {
     block.commit_qc = manager.highest_commit_qc().cloned();
     match store.write_block(&block) {
         Ok(()) => {
+            forget_committed(tx_pool, &block);
             for tx in &block.transaction_data {
                 let mut committed_tx = tx.clone();
                 if let Err(e) = crate::transaction::apply_tx_payload(store.as_ref(), tx) {
@@ -506,6 +532,40 @@ mod tests {
             };
             reproposable_block(Some(&qc), &self.proposals, self.store.as_ref())
         }
+    }
+
+    #[test]
+    fn committed_transactions_leave_the_mempool() {
+        let fixture = Fixture::with_genesis();
+        let pending = |id: &str| Transaction {
+            id: id.to_string(),
+            block_height: 0,
+            timestamp: 0,
+            input_did: "did:goya:a".into(),
+            output_recipient: "did:goya:a".into(),
+            amount: 0,
+            state: "pending".into(),
+            fee: 0,
+            payload: None,
+        };
+        let pool = std::sync::Mutex::new(TransactionPool::new());
+        pool.lock().unwrap().add(pending("kept")).unwrap();
+        pool.lock().unwrap().add(pending("included")).unwrap();
+        let block = fixture
+            .mining
+            .build_block("leader", vec![pending("included")])
+            .unwrap();
+
+        forget_committed(&pool, &block);
+
+        let ids: Vec<_> = pool
+            .lock()
+            .unwrap()
+            .all()
+            .iter()
+            .map(|tx| tx.id.clone())
+            .collect();
+        assert_eq!(ids, vec!["kept".to_string()]);
     }
 
     #[test]

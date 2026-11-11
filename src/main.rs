@@ -342,7 +342,12 @@ async fn async_main_inner() -> std::io::Result<()> {
     // BFT event channel — created early so node_for_server can route incoming BFT messages.
     let (bft_tx, bft_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::consensus::controller::BftEvent>();
-    node_for_server.bft_tx = Some(bft_tx.clone());
+    let bft_enabled = std::env::var("BFT_VALIDATORS")
+        .ok()
+        .filter(|v| !v.is_empty());
+    if bft_enabled.is_some() {
+        node_for_server.bft_tx = Some(bft_tx);
+    }
     node_for_server.peers = shared_peers;
     node_for_server.contract_sync_metrics = shared_contract_sync_metrics;
     node_for_server.pending_contract_broadcasts = shared_pending_broadcasts;
@@ -1093,10 +1098,6 @@ async fn async_main_inner() -> std::io::Result<()> {
     }
 
     // ── BFT consensus + auto-mine loop ─────────────────────────────────
-    let bft_enabled = std::env::var("BFT_VALIDATORS")
-        .ok()
-        .filter(|v| !v.is_empty());
-
     if let Some(ref validator_csv) = bft_enabled {
         let validators: Vec<String> = validator_csv
             .split(',')
@@ -1136,6 +1137,7 @@ async fn async_main_inner() -> std::io::Result<()> {
             .clone()
             .expect("MiningService required for BFT");
         let bft_pool = app_state.tx_pool.clone();
+        let bft_wake = app_state.block_wake.clone();
         tokio::spawn(async move {
             crate::consensus::controller::run_bft_loop(
                 node_id,
@@ -1147,6 +1149,7 @@ async fn async_main_inner() -> std::io::Result<()> {
                 bft_mining,
                 bft_pool,
                 bft_verifier,
+                bft_wake,
             )
             .await;
         });
