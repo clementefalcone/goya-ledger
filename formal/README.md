@@ -32,7 +32,7 @@ Faulty validators may vote for anything. Each assumption below constrains honest
 ### Outside the model
 
 - Signatures cannot be forged, and block hashes do not collide (SHA-256, ML-DSA-65).
-- Liveness: the theorem says nothing about progress. A lock on a block that never reaches a CommitQC stalls the validators that hold it, because leaders always build on the last decided block.
+- Liveness: the theorem says nothing about progress. In the code, a leader whose `high_qc` block is still undecided and sits on the last decided block proposes that block again (`reproposable_block` in `controller.rs`), so validators locked on it can vote. A round-manager test checks that four locked validators decide it. A locked validator whose lock is newer than the leader's `high_qc` waits until it becomes leader itself.
 
 ## Other proofs
 

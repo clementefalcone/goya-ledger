@@ -960,6 +960,57 @@ mod tests {
     }
 
     #[test]
+    fn reproposing_the_locked_block_decides_after_lost_commit_votes() {
+        let mut nodes: Vec<_> = validators()
+            .iter()
+            .map(|id| manager_with_chain(id, chain_for_tests()))
+            .collect();
+        for node in &mut nodes {
+            node.start();
+            node.process_event(RoundEvent::Proposal {
+                block_hash: block_hash(0xAA),
+                leader_id: "v0".into(),
+                justify_qc: None,
+            });
+            for phase in [BftPhase::Prepare, BftPhase::PreCommit] {
+                for voter in &["v0", "v1", "v2"] {
+                    node.process_event(RoundEvent::Vote(make_vote(phase, 0xAA, 0, voter)));
+                }
+            }
+            node.on_timeout();
+        }
+
+        for node in &mut nodes {
+            let action = if node.is_current_leader() {
+                node.process_event(RoundEvent::StartAsLeader {
+                    block_hash: block_hash(0xAA),
+                })
+            } else {
+                node.process_event(RoundEvent::Proposal {
+                    block_hash: block_hash(0xAA),
+                    leader_id: "v1".into(),
+                    justify_qc: Some(make_prepare_qc(0xAA, 0)),
+                })
+            };
+            assert_ne!(action, ManagerAction::Round(RoundAction::None));
+        }
+
+        for node in &mut nodes {
+            let mut last = ManagerAction::None;
+            for phase in [BftPhase::Prepare, BftPhase::PreCommit, BftPhase::Commit] {
+                for voter in &["v0", "v1", "v2"] {
+                    last = node.process_event(RoundEvent::Vote(make_vote(phase, 0xAA, 1, voter)));
+                }
+            }
+            assert!(matches!(
+                last,
+                ManagerAction::Round(RoundAction::Decide { block_hash: decided, round: 1, .. })
+                    if decided == block_hash(0xAA)
+            ));
+        }
+    }
+
+    #[test]
     fn locked_leader_refuses_to_propose_conflicting_sibling() {
         let mut m = leader_v1_locked_on_a_in_round_1();
 
