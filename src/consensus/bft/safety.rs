@@ -94,6 +94,23 @@ impl ChainAncestryChecker {
     fn lookup(&self, idx: &BlockIndex, hash: &[u8; 32]) -> Option<BlockInfo> {
         idx.hash_to_info.get(hash).cloned()
     }
+
+    pub fn index_proposal(&self, block: &crate::storage::traits::Block) {
+        let mut idx = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        idx.hash_to_info.insert(
+            crate::mining::block_hash(block),
+            BlockInfo {
+                height: block.height,
+                parent_hash: block.parent_hash,
+            },
+        );
+    }
+}
+
+impl<T: AncestryChecker + ?Sized> AncestryChecker for std::sync::Arc<T> {
+    fn is_ancestor(&self, ancestor: &[u8; 32], descendant: &[u8; 32]) -> bool {
+        (**self).is_ancestor(ancestor, descendant)
+    }
 }
 
 impl AncestryChecker for ChainAncestryChecker {
@@ -650,6 +667,21 @@ mod tests {
         let (store, hash_a, _, hash_c) = store_with_chain();
         let checker = ChainAncestryChecker::new(store);
         assert!(!checker.is_ancestor(&hash_c, &hash_a));
+    }
+
+    #[test]
+    fn chain_checker_sees_indexed_proposal_on_top_of_tip() {
+        let (store, hash_a, hash_b, hash_c) = store_with_chain();
+        let proposal = make_block(3, hash_c);
+        let proposal_hash = crate::mining::block_hash(&proposal);
+        let checker = ChainAncestryChecker::new(store);
+        assert!(!checker.is_ancestor(&hash_c, &proposal_hash));
+
+        checker.index_proposal(&proposal);
+
+        assert!(checker.is_ancestor(&hash_c, &proposal_hash));
+        assert!(checker.is_ancestor(&hash_a, &proposal_hash));
+        assert!(!checker.is_ancestor(&hash_b, &proposal_hash));
     }
 
     #[test]

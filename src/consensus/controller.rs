@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::consensus::bft::round::{RoundAction, RoundEvent};
 use crate::consensus::bft::round_manager::{ManagerAction, RoundManager, RoundManagerConfig};
+use crate::consensus::bft::safety::ChainAncestryChecker;
 use crate::consensus::bft::types::VoteMessage;
 use crate::consensus::bft::validator_registry::RegistryVerifier;
 use crate::identity::signing::SigningProvider;
@@ -46,11 +47,14 @@ pub async fn run_bft_loop(
     verifier: RegistryVerifier,
 ) {
     let config = RoundManagerConfig::default();
-    let ancestry = Box::new(crate::consensus::bft::safety::ChainAncestryChecker::new(
-        store.clone(),
-    ));
-    let mut manager =
-        RoundManager::with_ancestry(node_id.clone(), validators, verifier, config, ancestry);
+    let ancestry = Arc::new(ChainAncestryChecker::new(store.clone()));
+    let mut manager = RoundManager::with_ancestry(
+        node_id.clone(),
+        validators,
+        verifier,
+        config,
+        Box::new(ancestry.clone()),
+    );
     let mut pending_block: Option<Block> = None;
     // Buffer votes that arrive before the proposal for the current round.
     let mut early_votes: Vec<VoteMessage> = Vec::new();
@@ -68,7 +72,7 @@ pub async fn run_bft_loop(
             &signer,
             &mining_service,
             &tx_pool,
-            &store,
+            &ancestry,
         )
         .await;
     }
@@ -89,6 +93,11 @@ pub async fn run_bft_loop(
                         if round != manager.current_round() {
                             continue;
                         }
+                        if crate::mining::block_hash(&block) != block_hash {
+                            log::warn!("BFT: rejected proposal from {leader_id} in round {round}: block body does not hash to {}", hex::encode(block_hash));
+                            continue;
+                        }
+                        ancestry.index_proposal(&block);
                         reset_timeout(&mut timeout, &manager);
                         pending_block = Some(block);
                         let action = manager.process_event(RoundEvent::Proposal { block_hash, leader_id, justify_qc });
@@ -108,7 +117,7 @@ pub async fn run_bft_loop(
                             if let Some(blk) = pending_block.take() {
                                 commit_block(blk, &manager, &store, &node).await;
                             }
-                            advance_round(&mut manager, &mut pending_block, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &store).await;
+                            advance_round(&mut manager, &mut pending_block, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &ancestry).await;
                         } else {
                             reset_timeout(&mut timeout, &manager);
                         }
@@ -125,7 +134,7 @@ pub async fn run_bft_loop(
                             if let Some(blk) = pending_block.take() {
                                 commit_block(blk, &manager, &store, &node).await;
                             }
-                            advance_round(&mut manager, &mut pending_block, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &store).await;
+                            advance_round(&mut manager, &mut pending_block, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &ancestry).await;
                         } else {
                             reset_timeout(&mut timeout, &manager);
                         }
@@ -141,7 +150,7 @@ pub async fn run_bft_loop(
                 let am_leader = manager.is_current_leader();
                 log::info!("BFT timeout: advanced to round {}, am_leader={am_leader}", manager.current_round());
                 if am_leader {
-                    try_mine_and_propose(&mut manager, &mut pending_block, &node_id, &node, &signer, &mining_service, &tx_pool, &store).await;
+                    try_mine_and_propose(&mut manager, &mut pending_block, &node_id, &node, &signer, &mining_service, &tx_pool, &ancestry).await;
                 }
             }
         }
@@ -158,7 +167,7 @@ async fn try_mine_and_propose(
     signer: &Arc<dyn SigningProvider>,
     mining_service: &Arc<MiningService>,
     tx_pool: &Arc<std::sync::Mutex<TransactionPool>>,
-    store: &Arc<dyn crate::storage::BlockStore>,
+    ancestry: &ChainAncestryChecker,
 ) {
     let txs = {
         let mut pool = tx_pool.lock().unwrap_or_else(|e| e.into_inner());
@@ -172,36 +181,36 @@ async fn try_mine_and_propose(
 
     let tx_count = txs.len();
 
-    match mining_service.mine_block("auto-miner", txs) {
-        Ok(height) => {
-            log::info!("⛏ BFT leader mined block {height} with {tx_count} tx(s)");
-            if let Ok(block) = store.read_block(height) {
-                let block_hash = crate::mining::block_hash(&block);
-                *pending_block = Some(block.clone());
+    match mining_service.build_block("auto-miner", txs) {
+        Ok(block) => {
+            let height = block.height;
+            log::info!("⛏ BFT leader built block {height} with {tx_count} tx(s)");
+            let block_hash = crate::mining::block_hash(&block);
+            ancestry.index_proposal(&block);
+            *pending_block = Some(block.clone());
 
-                let block_data = serde_json::to_vec(&block).unwrap_or_default();
-                let justify_qc_data = manager
-                    .safety()
-                    .high_qc()
-                    .and_then(|qc| serde_json::to_vec(qc).ok())
-                    .unwrap_or_default();
-                let msg = crate::network::Message::BftProposal {
-                    round: manager.current_round(),
-                    block_hash,
-                    leader_id: node_id.to_string(),
-                    block_data,
-                    justify_qc: justify_qc_data,
-                };
-                node.broadcast_message(&msg).await;
+            let block_data = serde_json::to_vec(&block).unwrap_or_default();
+            let justify_qc_data = manager
+                .safety()
+                .high_qc()
+                .and_then(|qc| serde_json::to_vec(qc).ok())
+                .unwrap_or_default();
+            let msg = crate::network::Message::BftProposal {
+                round: manager.current_round(),
+                block_hash,
+                leader_id: node_id.to_string(),
+                block_data,
+                justify_qc: justify_qc_data,
+            };
+            node.broadcast_message(&msg).await;
 
-                let action = manager.process_event(RoundEvent::StartAsLeader { block_hash });
-                handle_action(&action, node, signer, node_id, manager).await;
-                log::info!(
-                    "BFT: proposed block {} at round {}",
-                    height,
-                    manager.current_round()
-                );
-            }
+            let action = manager.process_event(RoundEvent::StartAsLeader { block_hash });
+            handle_action(&action, node, signer, node_id, manager).await;
+            log::info!(
+                "BFT: proposed block {} at round {}",
+                height,
+                manager.current_round()
+            );
         }
         Err(e) => log::error!("BFT leader mine failed: {e}"),
     }
@@ -217,7 +226,7 @@ async fn advance_round(
     signer: &Arc<dyn SigningProvider>,
     mining_service: &Arc<MiningService>,
     tx_pool: &Arc<std::sync::Mutex<TransactionPool>>,
-    store: &Arc<dyn crate::storage::BlockStore>,
+    ancestry: &ChainAncestryChecker,
 ) {
     let adv = manager.advance_after_decide();
     handle_action(&adv, node, signer, node_id, manager).await;
@@ -231,7 +240,7 @@ async fn advance_round(
             signer,
             mining_service,
             tx_pool,
-            store,
+            ancestry,
         )
         .await;
     }
