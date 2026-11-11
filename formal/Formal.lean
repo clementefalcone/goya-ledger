@@ -1,3 +1,3 @@
 import Formal.FipsStateMachine
-import Formal.BftSafety
+import Formal.HotStuffSafety
 import Formal.QuarantineCorrectness

@@ -86,7 +86,7 @@ Audit date: 2026-08-31 · Codebase: v0.13.3
 | BFT protocol | HotStuff-inspired 4-phase: Prepare → PreCommit → Commit → Decide | `src/consensus/bft/types.rs:5-19` |
 | Fault tolerance | f = (n−1)/3, quorum = 2f+1, minimum n=4 | `src/consensus/bft/quorum.rs:50-79` |
 | Safety (no fork) | `SafetyState` with `high_qc` / `locked_qc` locking (two-chain/three-chain) | `src/consensus/bft/safety.rs:1-14` |
-| Formal safety proof | Lean 4: `no_fork` — two 2f+1 quorums of 3f+1 overlap by ≥ f+1 nodes, so ≥ 1 is honest (quorum arithmetic, not the full HotStuff protocol) | `formal/Formal/BftSafety.lean` |
+| Formal safety proof | Lean 4: `no_fork` — with 3f+1 validators and at most f faulty, two blocks with a CommitQC never conflict, under the voting rules of `safe_to_vote` (assumptions mapped to code in `formal/README.md`) | `formal/Formal/HotStuffSafety.lean` |
 | Leader rotation | Round-robin with exponential backoff timeouts | `src/consensus/bft/round_manager.rs:48-66` |
 | Equivocation detection | Dedicated module for conflicting-vote detection | `src/consensus/equivocation.rs` |
 | Slashing | Penalty mechanism for Byzantine validators | `src/consensus/slashing.rs` |
