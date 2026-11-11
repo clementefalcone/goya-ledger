@@ -217,6 +217,21 @@ impl<V: SignatureVerifier + Clone> RoundManager<V> {
             }
         }
 
+        if let RoundEvent::StartAsLeader { ref block_hash } = event {
+            if let Err(e) = self.safety.safe_to_vote(
+                self.current_round,
+                block_hash,
+                self.safety.high_qc(),
+                self.ancestry.as_ref(),
+            ) {
+                log::warn!(
+                    "BFT safety: refused to propose in round {}: {e}",
+                    self.current_round
+                );
+                return ManagerAction::Round(RoundAction::None);
+            }
+        }
+
         let round = self.current.as_mut().unwrap();
         let action = round.process(event);
 
@@ -224,6 +239,9 @@ impl<V: SignatureVerifier + Clone> RoundManager<V> {
         match &action {
             RoundAction::SendVote(vote) if vote.phase == BftPhase::Prepare => {
                 self.safety.record_vote(vote.round);
+            }
+            RoundAction::BroadcastProposal { .. } => {
+                self.safety.record_vote(self.current_round);
             }
             RoundAction::PhaseComplete { phase, qc } => match phase {
                 BftPhase::Prepare => self.safety.update_high_qc(qc),
@@ -921,6 +939,54 @@ mod tests {
             ManagerAction::Round(RoundAction::None),
             "locked node must reject sibling proposal"
         );
+    }
+
+    fn leader_v1_locked_on_a_in_round_1() -> RoundManager<AcceptAllVerifier> {
+        let mut m = manager_with_chain("v1", chain_for_tests());
+        m.start();
+        m.process_event(RoundEvent::Proposal {
+            block_hash: block_hash(0xAA),
+            leader_id: "v0".into(),
+            justify_qc: None,
+        });
+        for phase in [BftPhase::Prepare, BftPhase::PreCommit] {
+            for voter in &["v0", "v1", "v2"] {
+                m.process_event(RoundEvent::Vote(make_vote(phase, 0xAA, 0, voter)));
+            }
+        }
+        m.on_timeout();
+        assert!(m.is_current_leader());
+        m
+    }
+
+    #[test]
+    fn locked_leader_refuses_to_propose_conflicting_sibling() {
+        let mut m = leader_v1_locked_on_a_in_round_1();
+
+        let action = m.process_event(RoundEvent::StartAsLeader {
+            block_hash: block_hash(0xBB),
+        });
+
+        assert_eq!(action, ManagerAction::Round(RoundAction::None));
+        assert_eq!(m.round_state(), Some(RoundState::AwaitingProposal));
+        assert_eq!(m.safety().last_voted_round(), Some(0));
+    }
+
+    #[test]
+    fn locked_leader_proposes_descendant_and_records_its_vote() {
+        let mut m = leader_v1_locked_on_a_in_round_1();
+
+        let action = m.process_event(RoundEvent::StartAsLeader {
+            block_hash: block_hash(0xCC),
+        });
+
+        assert_eq!(
+            action,
+            ManagerAction::Round(RoundAction::BroadcastProposal {
+                block_hash: block_hash(0xCC)
+            })
+        );
+        assert_eq!(m.safety().last_voted_round(), Some(1));
     }
 
     // ── Test 2: Locked node accepts descendant ──────────────────────
