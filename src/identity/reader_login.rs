@@ -1,13 +1,15 @@
 use crate::identity::signing::SigningAlgorithm;
 use crate::storage::traits::{IdentityRecord, VaultEntryKind};
 
-pub const READER_PUBLIC_KEY_HEX_CHARS: usize = 64;
-
 pub fn is_reader_public_key(text: &str) -> bool {
-    text.len() == READER_PUBLIC_KEY_HEX_CHARS
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    let is_lowercase_hex = text
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    is_lowercase_hex
+        && matches!(
+            crate::signature::verify::infer_algorithm_from_key(text),
+            Some(SigningAlgorithm::Ed25519 | SigningAlgorithm::MlDsa65)
+        )
 }
 
 pub fn reader_login_message(nonce: &str) -> String {
@@ -33,10 +35,9 @@ pub fn is_signed_by_reader(
     signature_hex: &str,
 ) -> bool {
     active_reader_key(record, entry_id).is_some_and(|public_key| {
-        crate::signature::verify_signature(
-            SigningAlgorithm::Ed25519,
+        crate::identity::operations::is_signed_by(
             public_key,
-            reader_login_message(nonce).as_bytes(),
+            &reader_login_message(nonce),
             signature_hex,
         )
     })
@@ -45,7 +46,9 @@ pub fn is_signed_by_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
+    use crate::identity::signing::{
+        MlDsaSigningProvider, SigningProvider, SoftwareSigningProvider,
+    };
     use crate::storage::traits::VaultEntry;
 
     fn reader_entry(entry_id: &str, public_key: &str, kind: VaultEntryKind) -> VaultEntry {
@@ -74,13 +77,35 @@ mod tests {
         }
     }
 
-    fn sign(reader: &SoftwareSigningProvider, nonce: &str) -> String {
+    fn sign(reader: &dyn SigningProvider, nonce: &str) -> String {
         hex::encode(reader.sign(reader_login_message(nonce).as_bytes()).unwrap())
     }
 
     #[test]
     fn active_reader_signs_the_read_challenge() {
         let reader = SoftwareSigningProvider::generate();
+        let record = record_with(vec![reader_entry(
+            "aa01",
+            &hex::encode(reader.public_key()),
+            VaultEntryKind::Reader,
+        )]);
+        assert!(is_signed_by_reader(
+            &record,
+            "aa01",
+            "n1",
+            &sign(&reader, "n1")
+        ));
+        assert!(!is_signed_by_reader(
+            &record,
+            "aa01",
+            "n2",
+            &sign(&reader, "n1")
+        ));
+    }
+
+    #[test]
+    fn ml_dsa_reader_signs_the_read_challenge() {
+        let reader = MlDsaSigningProvider::generate();
         let record = record_with(vec![reader_entry(
             "aa01",
             &hex::encode(reader.public_key()),
@@ -142,10 +167,13 @@ mod tests {
     }
 
     #[test]
-    fn reader_public_key_is_64_lowercase_hex() {
+    fn reader_public_key_is_lowercase_hex_ed25519_or_ml_dsa() {
         assert!(is_reader_public_key(&"ab".repeat(32)));
+        assert!(is_reader_public_key(&"ab".repeat(1952)));
         assert!(!is_reader_public_key(&"AB".repeat(32)));
         assert!(!is_reader_public_key(&"ab".repeat(31)));
+        assert!(!is_reader_public_key(&"ab".repeat(65)));
+        assert!(!is_reader_public_key(&"ab".repeat(256)));
         assert!(!is_reader_public_key(r#"{"kdf":"hkdf"}"#));
     }
 }

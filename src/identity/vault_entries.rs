@@ -106,7 +106,7 @@ fn validate_entry(entry: &VaultEntry) -> Result<(), IdentityOpError> {
         (
             entry.kind == VaultEntryKind::Reader
                 && !crate::identity::reader_login::is_reader_public_key(&entry.sealed_key),
-            "a reader entry carries its 64-hex Ed25519 public key in sealed_key".to_string(),
+            "a reader entry carries its Ed25519 or ML-DSA-65 public key, lowercase hex, in sealed_key".to_string(),
         ),
     ]
     .into_iter()
