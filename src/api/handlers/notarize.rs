@@ -158,6 +158,10 @@ pub async fn submit_notarization(
     let trace = uuid::Uuid::new_v4().to_string();
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
+    super::validation::require_post_quantum_algorithm(
+        "signature_algorithm",
+        body.signature_algorithm,
+    )?;
 
     // Validate content_hash: must be 64 hex chars (SHA-256)
     if body.content_hash.len() != 64 || hex::decode(&body.content_hash).is_err() {
@@ -672,6 +676,10 @@ pub async fn transfer_document(
     let content_hash = path.into_inner();
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
+    super::validation::require_post_quantum_algorithm(
+        "signature_algorithm",
+        body.signature_algorithm,
+    )?;
 
     // Validate content_hash format
     if content_hash.len() != 64 || hex::decode(&content_hash).is_err() {
@@ -1449,7 +1457,7 @@ mod tests {
         (did, pk_hex, provider)
     }
 
-    fn signer_proof_for(provider: &SoftwareSigningProvider, payload: &str) -> serde_json::Value {
+    fn signer_proof_for(provider: &MlDsaSigningProvider, payload: &str) -> serde_json::Value {
         serde_json::json!({
             "public_key": hex::encode(provider.public_key()),
             "signature": hex::encode(provider.sign(payload.as_bytes()).unwrap()),
@@ -1460,7 +1468,7 @@ mod tests {
         content_hash: &str,
         biometric_evidence: serde_json::Value,
     ) -> serde_json::Value {
-        let (did, _, provider) = ed25519_identity();
+        let (did, _, provider) = mldsa65_identity();
         let evidence: Vec<BiometricEvidence> =
             serde_json::from_value(biometric_evidence.clone()).unwrap_or_default();
         let payload = format!(
@@ -1518,8 +1526,8 @@ mod tests {
                 .service(web::scope("/api/v1").service(sign_seal)),
         )
         .await;
-        let (victim_did, _, _) = ed25519_identity();
-        let (_, _, attacker) = ed25519_identity();
+        let (victim_did, _, _) = mldsa65_identity();
+        let (_, _, attacker) = mldsa65_identity();
         let mut body = sign_seal_body(&"a".repeat(64), fingerprint_evidence());
         body["signer"] = serde_json::json!(victim_did);
         body["signer_proof"] = signer_proof_for(&attacker, "anything");
@@ -1542,7 +1550,7 @@ mod tests {
                 .service(web::scope("/api/v1").service(submit_notarization)),
         )
         .await;
-        let (victim_did, _, _) = ed25519_identity();
+        let (victim_did, _, _) = mldsa65_identity();
         let request = node_signed_fea_request(&victim_did, &content_hash());
 
         let req = test::TestRequest::post()
@@ -1565,7 +1573,7 @@ mod tests {
             ),
         )
         .await;
-        let (signer_did, _, signer) = ed25519_identity();
+        let (signer_did, _, signer) = mldsa65_identity();
         let hash = content_hash();
         let mut request = node_signed_fea_request(&signer_did, &hash);
         request.body["signer_proof"] = signer_proof_for(&signer, &request.payload);
@@ -1591,7 +1599,7 @@ mod tests {
                 .service(web::scope("/api/v1").service(submit_notarization)),
         )
         .await;
-        let (signer_did, signer_pk, signer) = ed25519_identity();
+        let (signer_did, signer_pk, signer) = mldsa65_identity();
         get_channel_store(&state, "default")
             .unwrap()
             .write_identity(&crate::storage::traits::IdentityRecord {
@@ -1623,7 +1631,7 @@ mod tests {
     #[actix_web::test]
     async fn verify_rejects_advanced_entry_without_signer_proof() {
         let state = make_app_data();
-        let (victim_did, _, _) = ed25519_identity();
+        let (victim_did, _, _) = mldsa65_identity();
         let (_, node_pk, node) = mldsa65_identity();
         let hash = content_hash();
         let payload = format!(
@@ -1668,7 +1676,7 @@ mod tests {
     }
 
     fn store_forged_notarization(state: &web::Data<AppState>, hash: &str) {
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let signature_over_other_document = hex::encode(
             provider
                 .sign(format!("notarize:{did}:{}", "0".repeat(64)).as_bytes())
@@ -1746,7 +1754,7 @@ mod tests {
                 .service(web::scope("/api/v1").service(submit_notarization)),
         )
         .await;
-        let (_, pk_hex, provider) = ed25519_identity();
+        let (_, pk_hex, provider) = mldsa65_identity();
         let wallet_did = format!(
             "did:goya:{}",
             operations::wallet_address_of(&pk_hex).unwrap()
@@ -1759,6 +1767,7 @@ mod tests {
                 "content_hash": hash,
                 "signer": wallet_did,
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": hex::encode(provider.sign(payload.as_bytes()).unwrap()),
             }))
             .to_request();
@@ -1781,7 +1790,7 @@ mod tests {
                 .service(web::scope("/api/v1").service(submit_notarization)),
         )
         .await;
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let hash = content_hash();
         let payload = format!("notarize:{did}:{hash}");
         let req = test::TestRequest::post()
@@ -1790,6 +1799,7 @@ mod tests {
                 "content_hash": hash,
                 "signer": did,
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": hex::encode(provider.sign(payload.as_bytes()).unwrap()),
             }))
             .to_request();
@@ -1799,7 +1809,7 @@ mod tests {
         assert!(store.read_notarization_by_hash(&hash).is_err());
     }
 
-    // ── E2E: Simple (FES) with Ed25519 ──────────────────────────────
+    // ── E2E: Simple (FES) with ML-DSA-65 ────────────────────────────
 
     #[actix_web::test]
     async fn e2e_simple_notarize_and_verify() {
@@ -1813,7 +1823,7 @@ mod tests {
         )
         .await;
 
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let hash = content_hash();
         let payload = format!("notarize:{did}:{hash}");
         let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
@@ -1824,6 +1834,7 @@ mod tests {
                 "content_hash": hash,
                 "signer": did,
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": sig,
             }))
             .to_request();
@@ -1832,7 +1843,7 @@ mod tests {
         assert_eq!(resp.status(), 201);
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["data"]["signature_level"], "simple");
-        assert_eq!(body["data"]["signature_algorithm"], "Ed25519");
+        assert_eq!(body["data"]["signature_algorithm"], "MlDsa65");
 
         // Verify
         let req = test::TestRequest::get()
@@ -1849,7 +1860,7 @@ mod tests {
         state: web::Data<AppState>,
         did: &str,
         public_key: &str,
-        provider: &SoftwareSigningProvider,
+        provider: &MlDsaSigningProvider,
     ) -> u16 {
         let app = test::init_service(
             App::new()
@@ -1865,6 +1876,7 @@ mod tests {
                 "content_hash": hash,
                 "signer": did,
                 "public_key": public_key,
+                "signature_algorithm": "MlDsa65",
                 "signature": hex::encode(provider.sign(payload.as_bytes()).unwrap()),
             }))
             .to_request();
@@ -1875,11 +1887,11 @@ mod tests {
         state: &web::Data<AppState>,
     ) -> (
         String,
-        (String, SoftwareSigningProvider),
-        (String, SoftwareSigningProvider),
+        (String, MlDsaSigningProvider),
+        (String, MlDsaSigningProvider),
     ) {
-        let (did, first_key, first_provider) = ed25519_identity();
-        let (_, current_key, current_provider) = ed25519_identity();
+        let (did, first_key, first_provider) = mldsa65_identity();
+        let (_, current_key, current_provider) = mldsa65_identity();
         crate::api::handlers::channels::get_channel_store(state, "default")
             .unwrap()
             .write_identity(&crate::storage::traits::IdentityRecord {
@@ -2052,7 +2064,7 @@ mod tests {
         )
         .await;
 
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let hash = content_hash();
         let payload = format!("notarize:{did}:{hash}");
         let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
@@ -2133,18 +2145,19 @@ mod tests {
         )
         .await;
 
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let hash = content_hash();
         let payload = format!("notarize:{did}:{hash}");
         let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
 
-        // No signature_level, signature_algorithm, or biometric_evidence
+        // No signature_level or biometric_evidence
         let req = test::TestRequest::post()
             .uri("/api/v1/notarize")
             .set_json(serde_json::json!({
                 "content_hash": hash,
                 "signer": did,
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": sig,
             }))
             .to_request();
@@ -2167,7 +2180,7 @@ mod tests {
         )
         .await;
 
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let sig = hex::encode(provider.sign(b"whatever").unwrap());
 
         let req = test::TestRequest::post()
@@ -2176,6 +2189,7 @@ mod tests {
                 "content_hash": "tooshort",
                 "signer": did,
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": sig,
             }))
             .to_request();
@@ -2196,7 +2210,7 @@ mod tests {
         )
         .await;
 
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let sig = hex::encode(provider.sign(b"whatever").unwrap());
 
         let req = test::TestRequest::post()
@@ -2205,6 +2219,7 @@ mod tests {
                 "content_hash": "z".repeat(64),
                 "signer": did,
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": sig,
             }))
             .to_request();
@@ -2227,7 +2242,7 @@ mod tests {
         )
         .await;
 
-        let (_did, _pk_hex, provider) = ed25519_identity();
+        let (_did, _pk_hex, provider) = mldsa65_identity();
         let hash = content_hash();
         let wrong_did = "did:goya:0000000000000000";
         let pk_hex = hex::encode(provider.public_key());
@@ -2240,6 +2255,7 @@ mod tests {
                 "content_hash": hash,
                 "signer": wrong_did,
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": sig,
             }))
             .to_request();
@@ -2262,7 +2278,7 @@ mod tests {
         )
         .await;
 
-        let (did, pk_hex, _provider) = ed25519_identity();
+        let (did, pk_hex, _provider) = mldsa65_identity();
         let hash = content_hash();
         let bad_sig = "aa".repeat(32);
 
@@ -2272,6 +2288,7 @@ mod tests {
                 "content_hash": hash,
                 "signer": did,
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": bad_sig,
             }))
             .to_request();
@@ -2294,7 +2311,7 @@ mod tests {
         )
         .await;
 
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let hash = content_hash();
         let payload = format!("notarize:{did}:{hash}");
         let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
@@ -2303,6 +2320,7 @@ mod tests {
             "content_hash": hash,
             "signer": did,
             "public_key": pk_hex,
+            "signature_algorithm": "MlDsa65",
             "signature": sig,
         });
 
@@ -2330,7 +2348,7 @@ mod tests {
     fn notarize_json(
         did: &str,
         pk_hex: &str,
-        provider: &SoftwareSigningProvider,
+        provider: &MlDsaSigningProvider,
         hash: &str,
     ) -> serde_json::Value {
         let payload = format!("notarize:{did}:{hash}");
@@ -2339,6 +2357,7 @@ mod tests {
             "content_hash": hash,
             "signer": did,
             "public_key": pk_hex,
+            "signature_algorithm": "MlDsa65",
             "signature": sig,
         })
     }
@@ -2359,6 +2378,7 @@ mod tests {
                 "from_did": "did:goya:aaa",
                 "to_did": "did:goya:bbb",
                 "public_key": "aa".repeat(32),
+                "signature_algorithm": "MlDsa65",
                 "signature": "bb".repeat(32),
             }))
             .to_request();
@@ -2383,6 +2403,7 @@ mod tests {
                 "from_did": "did:goya:aaa",
                 "to_did": "did:goya:bbb",
                 "public_key": "aa".repeat(32),
+                "signature_algorithm": "MlDsa65",
                 "signature": "bb".repeat(32),
             }))
             .to_request();
@@ -2402,7 +2423,7 @@ mod tests {
         )
         .await;
 
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let hash = content_hash();
         let req = test::TestRequest::post()
             .uri("/api/v1/notarize")
@@ -2420,6 +2441,7 @@ mod tests {
                 "from_did": wrong_did,
                 "to_did": "did:goya:recipient",
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": sig,
             }))
             .to_request();
@@ -2441,7 +2463,7 @@ mod tests {
         )
         .await;
 
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let hash = content_hash();
         let req = test::TestRequest::post()
             .uri("/api/v1/notarize")
@@ -2455,6 +2477,7 @@ mod tests {
                 "from_did": did,
                 "to_did": "did:goya:recipient",
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": "aa".repeat(32),
             }))
             .to_request();
@@ -2477,7 +2500,7 @@ mod tests {
         .await;
 
         // Alice notarizes
-        let (alice_did, alice_pk, alice_provider) = ed25519_identity();
+        let (alice_did, alice_pk, alice_provider) = mldsa65_identity();
         let hash = content_hash();
         let req = test::TestRequest::post()
             .uri("/api/v1/notarize")
@@ -2486,7 +2509,7 @@ mod tests {
         assert_eq!(test::call_service(&app, req).await.status(), 201);
 
         // Bob tries to transfer Alice's document
-        let (bob_did, bob_pk, bob_provider) = ed25519_identity();
+        let (bob_did, bob_pk, bob_provider) = mldsa65_identity();
         let transfer_payload = format!("transfer_doc:{hash}:0:{bob_did}:did:goya:thief");
         let sig = hex::encode(bob_provider.sign(transfer_payload.as_bytes()).unwrap());
 
@@ -2496,6 +2519,7 @@ mod tests {
                 "from_did": bob_did,
                 "to_did": "did:goya:thief",
                 "public_key": bob_pk,
+                "signature_algorithm": "MlDsa65",
                 "signature": sig,
             }))
             .to_request();
@@ -2516,7 +2540,7 @@ mod tests {
             ),
         )
         .await;
-        let (alice_did, alice_pk, alice_provider) = ed25519_identity();
+        let (alice_did, alice_pk, alice_provider) = mldsa65_identity();
         let hash = content_hash();
         let req = test::TestRequest::post()
             .uri("/api/v1/notarize")
@@ -2531,6 +2555,7 @@ mod tests {
                 "from_did": alice_did,
                 "to_did": "did:goya:bob",
                 "public_key": alice_pk,
+                "signature_algorithm": "MlDsa65",
                 "signature": hex::encode(alice_provider.sign(message.as_bytes()).unwrap()),
             }))
             .to_request();
@@ -2549,7 +2574,7 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn transfer_rejects_advanced_with_ed25519() {
+    async fn transfer_rejects_ed25519() {
         let state = make_app_data();
         let app = test::init_service(
             App::new().app_data(state.clone()).service(
@@ -2560,7 +2585,7 @@ mod tests {
         )
         .await;
 
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let hash = content_hash();
         let req = test::TestRequest::post()
             .uri("/api/v1/notarize")
@@ -2588,7 +2613,44 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 400);
         let body: serde_json::Value = test::read_body_json(resp).await;
-        assert_eq!(body["error"]["code"], "VALIDATION");
+        assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+    }
+
+    #[actix_web::test]
+    async fn submit_refuses_a_classical_or_undeclared_algorithm() {
+        let state = make_app_data();
+        let app = test::init_service(
+            App::new()
+                .app_data(state)
+                .service(web::scope("/api/v1").service(submit_notarization)),
+        )
+        .await;
+        let (did, pk_hex, provider) = ed25519_identity();
+        let hash = content_hash();
+        let signature = hex::encode(
+            provider
+                .sign(format!("notarize:{did}:{hash}").as_bytes())
+                .unwrap(),
+        );
+        for algorithm in [Some("Ed25519"), None] {
+            let mut body = serde_json::json!({
+                "content_hash": hash,
+                "signer": did,
+                "public_key": pk_hex,
+                "signature": signature,
+            });
+            if let Some(algorithm) = algorithm {
+                body["signature_algorithm"] = serde_json::json!(algorithm);
+            }
+            let req = test::TestRequest::post()
+                .uri("/api/v1/notarize")
+                .set_json(body)
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), 400);
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["error"]["code"], "VALIDATION_ERROR");
+        }
     }
 
     // ── sign_seal: rejection paths ───────────────────────────────────────
@@ -2808,7 +2870,7 @@ mod tests {
 
     macro_rules! notarize_fp {
         ($app:expr, $fp:expr) => {{
-            let (did, pk_hex, provider) = ed25519_identity();
+            let (did, pk_hex, provider) = mldsa65_identity();
             let hash = &$fp.canonical_hash;
             let payload = format!("notarize:{did}:{hash}");
             let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
@@ -2818,6 +2880,7 @@ mod tests {
                     "content_hash": hash,
                     "signer": did,
                     "public_key": pk_hex,
+                    "signature_algorithm": "MlDsa65",
                     "signature": sig,
                     "metadata": { "fingerprint": $fp },
                 }))
@@ -2964,7 +3027,7 @@ mod tests {
         .await;
 
         // Notarize without fingerprint in metadata
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let hash = content_hash();
         let payload = format!("notarize:{did}:{hash}");
         let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
@@ -2975,6 +3038,7 @@ mod tests {
                 "content_hash": hash,
                 "signer": did,
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": sig,
             }))
             .to_request();
@@ -3039,7 +3103,7 @@ mod tests {
             crate::crypto::hasher::HashAlgorithm::Sha256,
             document,
         ));
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let payload = format!("notarize:{did}:{hash}");
         let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
 
@@ -3049,6 +3113,7 @@ mod tests {
                 "content_hash": hash,
                 "signer": did,
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": sig,
             }))
             .to_request();
@@ -3086,7 +3151,7 @@ mod tests {
             crate::crypto::hasher::HashAlgorithm::Sha256,
             original,
         ));
-        let (did, pk_hex, provider) = ed25519_identity();
+        let (did, pk_hex, provider) = mldsa65_identity();
         let payload = format!("notarize:{did}:{hash}");
         let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
 
@@ -3096,6 +3161,7 @@ mod tests {
                 "content_hash": hash,
                 "signer": did,
                 "public_key": pk_hex,
+                "signature_algorithm": "MlDsa65",
                 "signature": sig,
             }))
             .to_request();

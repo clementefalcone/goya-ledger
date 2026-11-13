@@ -33,6 +33,9 @@ pub async fn add_vault_entry(
     let trace_id = uuid::Uuid::new_v4().to_string();
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
+    if body.kind == VaultEntryKind::Reader {
+        super::validation::require_post_quantum_key("sealed_key", &body.sealed_key)?;
+    }
 
     let entry = VaultEntry {
         entry_id: body.entry_id.clone(),

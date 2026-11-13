@@ -11,7 +11,7 @@
 use actix_web::{test, web, App};
 use rust_bc::api::handlers::{governance, notarize};
 use rust_bc::app_state::AppState;
-use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider, SoftwareSigningProvider};
+use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider};
 use std::sync::Arc;
 
 fn app_state() -> web::Data<AppState> {
@@ -28,13 +28,6 @@ fn app_state_with_governance() -> web::Data<AppState> {
         rust_bc::governance::params::ParamRegistry::with_defaults(),
     ));
     web::Data::new(state)
-}
-
-fn ed25519_identity() -> (String, String, SoftwareSigningProvider) {
-    let provider = SoftwareSigningProvider::generate();
-    let pk_hex = hex::encode(provider.public_key());
-    let did = rust_bc::identity::did::did_from_pubkey_hex(&pk_hex);
-    (did, pk_hex, provider)
 }
 
 fn mldsa65_identity() -> (String, String, MlDsaSigningProvider) {
@@ -67,7 +60,7 @@ async fn uc_notarize_document_fes_and_verify() {
     )
     .await;
 
-    let (did, pk, provider) = ed25519_identity();
+    let (did, pk, provider) = mldsa65_identity();
     let hash = sha256_hex(b"Contrato de arriendo - Av. Providencia 1234, Santiago");
     let payload = format!("notarize:{did}:{hash}");
     let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
@@ -79,6 +72,7 @@ async fn uc_notarize_document_fes_and_verify() {
             "content_hash": hash,
             "signer": did,
             "public_key": pk,
+            "signature_algorithm": "MlDsa65",
             "signature": sig,
         }))
         .to_request();
@@ -132,7 +126,7 @@ async fn uc_firma_electronica_simple_fes() {
     )
     .await;
 
-    let (did, pk, provider) = ed25519_identity();
+    let (did, pk, provider) = mldsa65_identity();
     let hash = sha256_hex(b"Declaracion jurada - RUT 12.345.678-9");
     let payload = format!("notarize:{did}:{hash}");
     let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
@@ -145,14 +139,14 @@ async fn uc_firma_electronica_simple_fes() {
             "public_key": pk,
             "signature": sig,
             "signature_level": "simple",
-            "signature_algorithm": "Ed25519",
+            "signature_algorithm": "MlDsa65",
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 201);
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["data"]["signature_level"], "simple");
-    assert_eq!(body["data"]["signature_algorithm"], "Ed25519");
+    assert_eq!(body["data"]["signature_algorithm"], "MlDsa65");
 
     // Verify persisted
     let req = test::TestRequest::get()
@@ -343,7 +337,7 @@ async fn uc_document_ownership_transfer() {
     .await;
 
     // Alice notarizes
-    let (alice_did, alice_pk, alice_provider) = ed25519_identity();
+    let (alice_did, alice_pk, alice_provider) = mldsa65_identity();
     let hash = sha256_hex(b"Titulo de propiedad - Lote 7, Parcela 12, Rancagua");
     let payload = format!("notarize:{alice_did}:{hash}");
     let sig = hex::encode(alice_provider.sign(payload.as_bytes()).unwrap());
@@ -354,13 +348,14 @@ async fn uc_document_ownership_transfer() {
             "content_hash": hash,
             "signer": alice_did,
             "public_key": alice_pk,
+            "signature_algorithm": "MlDsa65",
             "signature": sig,
         }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 201);
 
     // Alice transfers to Bob
-    let (bob_did, _, _) = ed25519_identity();
+    let (bob_did, _, _) = mldsa65_identity();
     let transfer_payload = format!("transfer_doc:{hash}:0:{alice_did}:{bob_did}");
     let transfer_sig = hex::encode(alice_provider.sign(transfer_payload.as_bytes()).unwrap());
 
@@ -370,6 +365,7 @@ async fn uc_document_ownership_transfer() {
             "from_did": alice_did,
             "to_did": bob_did,
             "public_key": alice_pk,
+            "signature_algorithm": "MlDsa65",
             "signature": transfer_sig,
         }))
         .to_request();
