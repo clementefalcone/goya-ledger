@@ -52,6 +52,7 @@ pub async fn store_write_credential(
         issuer_public_key,
     } = body.into_inner();
     super::validation::validate_store_credential(&credential)?;
+    super::validation::require_post_quantum_key("issuer_public_key", &issuer_public_key)?;
     let trace_id = uuid::Uuid::new_v4().to_string();
     let channel = channel_id_from_req(&req);
     enforce_channel_membership(&state, channel, &req)?;
@@ -271,16 +272,16 @@ mod tests {
         assert_eq!(resp.status(), 404);
     }
 
-    use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
+    use crate::identity::signing::{MlDsaSigningProvider, SigningProvider};
 
     struct Issuer {
-        key: SoftwareSigningProvider,
+        key: MlDsaSigningProvider,
         public_key: String,
         did: String,
     }
 
     fn registered_issuer(state: &AppState) -> Issuer {
-        let key = SoftwareSigningProvider::generate();
+        let key = MlDsaSigningProvider::generate();
         let public_key = hex::encode(key.public_key());
         let did = crate::identity::did::did_from_pubkey_hex(&public_key);
         get_channel_store(state, "default")

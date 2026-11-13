@@ -307,6 +307,7 @@ pub async fn rotate_key(
     let trace_id = uuid::Uuid::new_v4().to_string();
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
+    super::validation::require_post_quantum_key("new_public_key", &body.new_public_key)?;
 
     let request = operations::RotateRequest {
         did: &did,
@@ -371,6 +372,7 @@ pub async fn store_write_identity(
 ) -> ApiResult<HttpResponse> {
     let RegisterIdentityRequest { record, signature } = body.into_inner();
     super::validation::validate_store_identity(&record)?;
+    super::validation::require_post_quantum_key("public_key", &record.public_key)?;
     let trace_id = uuid::Uuid::new_v4().to_string();
     let _channel = channel_id_from_req(&req);
     enforce_channel_membership(&state, _channel, &req)?;
@@ -930,8 +932,7 @@ mod tests {
         RegisteredOwner { state, did, key }
     }
 
-    fn sign_hex(key: &crate::identity::signing::SoftwareSigningProvider, message: &str) -> String {
-        use crate::identity::signing::SigningProvider;
+    fn sign_hex(key: &dyn crate::identity::signing::SigningProvider, message: &str) -> String {
         hex::encode(key.sign(message.as_bytes()).unwrap())
     }
 
@@ -965,10 +966,9 @@ mod tests {
 
     async fn post_registration(
         state: &web::Data<AppState>,
-        key: &crate::identity::signing::SoftwareSigningProvider,
-        signer: &crate::identity::signing::SoftwareSigningProvider,
+        key: &dyn crate::identity::signing::SigningProvider,
+        signer: &dyn crate::identity::signing::SigningProvider,
     ) -> (actix_web::http::StatusCode, String) {
-        use crate::identity::signing::SigningProvider;
         let public_key = hex::encode(key.public_key());
         let did = crate::identity::did::did_from_pubkey_hex(&public_key);
         let app = actix_web::test::init_service(
@@ -994,8 +994,8 @@ mod tests {
     #[actix_web::test]
     async fn register_rejects_signature_from_another_key() {
         let state = web::Data::new(AppState::test_with_block_producer());
-        let key = crate::identity::signing::SoftwareSigningProvider::generate();
-        let attacker = crate::identity::signing::SoftwareSigningProvider::generate();
+        let key = crate::identity::signing::MlDsaSigningProvider::generate();
+        let attacker = crate::identity::signing::MlDsaSigningProvider::generate();
         let (status, did) = post_registration(&state, &key, &attacker).await;
         assert_eq!(status, 401);
         assert!(get_channel_store(&state, "default")
@@ -1005,9 +1005,21 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn register_with_key_holder_signature_stores_identity() {
+    async fn register_refuses_a_classical_key() {
         let state = web::Data::new(AppState::test_with_block_producer());
         let key = crate::identity::signing::SoftwareSigningProvider::generate();
+        let (status, did) = post_registration(&state, &key, &key).await;
+        assert_eq!(status, 400);
+        assert!(get_channel_store(&state, "default")
+            .unwrap()
+            .read_identity(&did)
+            .is_err());
+    }
+
+    #[actix_web::test]
+    async fn register_with_key_holder_signature_stores_identity() {
+        let state = web::Data::new(AppState::test_with_block_producer());
+        let key = crate::identity::signing::MlDsaSigningProvider::generate();
         let (status, did) = post_registration(&state, &key, &key).await;
         assert_eq!(status, 201);
         assert!(get_channel_store(&state, "default")

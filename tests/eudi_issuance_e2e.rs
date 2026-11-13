@@ -375,11 +375,6 @@ macro_rules! issue_and_revoke {
 }
 
 #[actix_web::test]
-async fn ed25519_issuer_issues_to_a_wallet_and_revokes() {
-    issue_and_revoke!(Box::new(SoftwareSigningProvider::generate()));
-}
-
-#[actix_web::test]
 async fn ml_dsa_issuer_issues_to_a_wallet_and_revokes() {
     issue_and_revoke!(Box::new(MlDsaSigningProvider::generate()));
 }

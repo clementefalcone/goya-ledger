@@ -67,3 +67,29 @@ pub fn validate_store_credential(
     validate_string_field("cred_type", &cred.cred_type)?;
     Ok(())
 }
+
+pub fn require_post_quantum_algorithm(
+    field_name: &str,
+    algorithm: crate::identity::signing::SigningAlgorithm,
+) -> Result<(), ApiError> {
+    if algorithm.is_post_quantum() {
+        return Ok(());
+    }
+    Err(ApiError::ValidationError {
+        field: field_name.to_string(),
+        reason: format!("{algorithm} is classical; new writes must use ML-DSA-65"),
+    })
+}
+
+pub fn require_post_quantum_key(field_name: &str, public_key_hex: &str) -> Result<(), ApiError> {
+    match crate::signature::verify::infer_algorithm_from_key(public_key_hex) {
+        Some(algorithm) => require_post_quantum_algorithm(field_name, algorithm),
+        None => Err(ApiError::ValidationError {
+            field: field_name.to_string(),
+            reason: format!(
+                "{} hex characters is not a known public key; new writes must use ML-DSA-65",
+                public_key_hex.len()
+            ),
+        }),
+    }
+}
