@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Goya Ledger — Registro distribuido post-cuántico, explicado en simple</title>
-<meta name="description" content="Goya Ledger es un registro distribuido (DLT) post-cuántico: lo que se registra no se puede falsificar. Explicado para quienes nunca han oído de blockchain.">
+<title>Goya Ledger — Firma y evidencia post-cuántica para plataformas de software</title>
+<meta name="description" content="Con una API, tus clientes firman dentro de tu producto y cada contrato se puede probar hoy y en 30 años, sin depender de Goya.">
 <meta name="theme-color" content="#060708">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -66,8 +66,6 @@ a { color: inherit; text-decoration: none; }
 }
 .nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
 .brand { font-family: var(--display); font-weight: 600; font-size: 21px; letter-spacing: -0.03em; }
-.nav-links { display: flex; gap: 28px; font-size: 14px; color: var(--muted); }
-.nav-links a:hover { color: var(--text); }
 .btn {
   display: inline-flex; align-items: center; gap: 8px;
   font-family: var(--body); font-weight: 600; font-size: 15px;
@@ -82,18 +80,6 @@ a { color: inherit; text-decoration: none; }
 .btn-sm { padding: 8px 16px; font-size: 14px; }
 
 .hero { position: relative; overflow: hidden; }
-.field {
-  position: absolute; top: 0; left: 0; width: 100%; height: calc(100svh - 64px);
-  pointer-events: none;
-  -webkit-mask-image: linear-gradient(90deg, transparent 30%, rgba(0, 0, 0, 0.5) 55%, #000 78%), linear-gradient(180deg, #000 70%, transparent);
-  -webkit-mask-composite: source-in;
-  mask-image: linear-gradient(90deg, transparent 30%, rgba(0, 0, 0, 0.5) 55%, #000 78%), linear-gradient(180deg, #000 70%, transparent);
-  mask-composite: intersect;
-}
-.field-caption {
-  position: absolute; right: var(--gutter); bottom: clamp(16px, 3svh, 32px); z-index: 1;
-  font-family: var(--mono); font-size: 12px; color: var(--faint); text-align: right; line-height: 1.5;
-}
 .hero-fold { position: relative; z-index: 1; min-height: calc(100svh - 64px); display: flex; flex-direction: column; justify-content: center; padding-block: clamp(20px, 4svh, 48px); }
 .horizon {
   position: absolute; left: 50%; bottom: -62vw; width: 140vw; height: 80vw;
@@ -194,25 +180,10 @@ h2 { font-size: clamp(36px, 5.6vw, 72px); }
 
 .section-title { font-size: clamp(32px, 4.4vw, 60px); max-width: 20ch; text-wrap: balance; margin-bottom: clamp(40px, 6vw, 72px); }
 .statements { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 20px; overflow: hidden; }
-.statement { background: var(--ink); padding: clamp(24px, 3vw, 36px); display: grid; grid-template-rows: subgrid; grid-row: span 3; row-gap: 12px; align-content: start; }
-.statement:not(:has(.tag)) { grid-row: span 2; }
-.statement:has(.more) { grid-row: span 4; }
-.nist-stat { display: flex; flex-direction: column; gap: 8px; }
-.nist-count { font-family: var(--display); font-size: clamp(44px, 4.4vw, 60px); font-weight: 600; letter-spacing: -0.04em; line-height: 1; color: var(--seal); }
-.nist-label { color: var(--text); font-size: 16px; }
-.nist-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-.nist-badges span { font-family: var(--mono); font-size: 12px; color: var(--seal); border: 1px solid rgba(255, 181, 71, 0.4); padding: 3px 9px; border-radius: 999px; }
-.more summary { list-style: none; cursor: pointer; font-size: 14px; color: var(--text); display: inline-flex; align-items: center; gap: 8px; padding-top: 4px; }
-.more summary::-webkit-details-marker { display: none; }
-.more summary::before { content: "+"; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line-strong); font-size: 14px; line-height: 1; color: var(--muted); transition: transform .2s ease; }
-.more[open] summary::before { content: "−"; }
-.more summary:hover::before { border-color: var(--text); color: var(--text); }
-.more p { margin-top: 12px; color: var(--muted); font-size: 15px; line-height: 1.6; }
+.statement { background: var(--ink); padding: clamp(24px, 3vw, 36px); display: grid; grid-template-rows: subgrid; grid-row: span 2; row-gap: 12px; align-content: start; }
 .statement h3 { font-size: clamp(21px, 2vw, 26px); font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
 .statement p { color: var(--muted); font-size: 16px; }
-.statement .tag { font-size: 14px; color: var(--faint); }
-.statement.highlight { background: linear-gradient(180deg, var(--seal-soft), var(--ink) 80%); }
-.statement.highlight .tag { color: var(--seal); }
+.statement a { color: var(--seal); text-decoration: underline; text-underline-offset: 3px; }
 .trial-note { font-size: 13px; color: var(--faint); }
 
 .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 20px; overflow: hidden; }
@@ -220,71 +191,7 @@ h2 { font-size: clamp(36px, 5.6vw, 72px); }
 .step-num { font-size: 15px; color: var(--faint); }
 .step h3 { font-size: clamp(21px, 2vw, 26px); font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
 .step p { color: var(--muted); font-size: 16px; }
-.step .aside { margin-top: auto; font-size: 14px; color: var(--faint); border-top: 1px solid var(--line); padding-top: 14px; }
-.step .aside b { color: var(--text); font-weight: 500; }
-
-.tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 32px; }
-.tab {
-  font-family: var(--body); font-size: 15px; font-weight: 500; color: var(--muted);
-  background: transparent; border: 1px solid var(--line-strong);
-  padding: 10px 18px; border-radius: 999px; cursor: pointer; transition: all .2s ease;
-}
-.tab[aria-selected="true"] { background: var(--text); color: var(--ink); border-color: var(--text); }
-.tab:hover:not([aria-selected="true"]) { color: var(--text); border-color: var(--text); }
-.cases { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-.case {
-  border: 1px solid var(--line); border-radius: 18px; padding: 28px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent);
-  display: flex; flex-direction: column; gap: 14px;
-  animation: rise .5s ease both;
-}
-.case:nth-child(2) { animation-delay: .06s; }
-.case:nth-child(3) { animation-delay: .12s; }
-.case .tag { font-size: 14px; color: var(--muted); }
-.case h3 { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; min-height: 2.4em; }
-.case p { color: var(--muted); font-size: 16px; }
-.case > p:not(.tag) { min-height: 3.2em; }
-.case .before-after { margin-top: auto; display: grid; gap: 8px; font-size: 14px; padding-top: 16px; border-top: 1px solid var(--line); }
-.case .before-after p { font-size: 15px; }
-.case .before-after div { display: grid; grid-template-columns: 72px 1fr; gap: 8px; align-items: baseline; }
-.case .before-after span { font-size: 13px; color: var(--faint); }
 @keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
-
-.quantum { position: relative; overflow: hidden; }
-.quantum::after {
-  content: ""; position: absolute; right: -20vw; top: 10%; width: 60vw; height: 60vw; border-radius: 50%;
-  background: radial-gradient(closest-side, rgba(207, 232, 255, 0.07), transparent);
-  pointer-events: none;
-}
-
-.timeline { position: relative; display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; padding-top: 36px; margin-top: clamp(48px, 6vw, 72px); }
-.timeline::before { content: ""; position: absolute; top: 8px; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, var(--seal) 0%, var(--seal) 30%, var(--line-strong) 34%, var(--line-strong)); }
-.tick { position: relative; }
-.tick::before { content: ""; position: absolute; top: -34px; left: 0; width: 13px; height: 13px; border-radius: 50%; background: var(--ink); border: 1px solid var(--line-strong); }
-.tick.past::before { background: var(--seal); border-color: var(--seal); }
-.tick.now::before { background: var(--seal); border-color: var(--seal); box-shadow: 0 0 0 6px var(--seal-soft), 0 0 18px var(--seal); }
-.tick .here { font-family: var(--body); font-size: 13px; font-weight: 600; letter-spacing: 0; vertical-align: middle; color: var(--ink); background: var(--seal); padding: 3px 9px; border-radius: 999px; margin-left: 6px; }
-.tick .year { font-family: var(--display); font-size: 34px; font-weight: 700; letter-spacing: -0.03em; }
-.tick p { color: var(--muted); font-size: 15px; margin-top: 6px; }
-.source { margin-top: 40px; font-size: 13px; color: var(--faint); }
-.source a { text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
-.source a:hover { color: var(--muted); }
-
-.sign-card {
-  display: grid; grid-template-columns: 1.2fr 1fr; gap: 40px; align-items: center;
-  border: 1px solid var(--line-strong); border-radius: 24px; padding: clamp(28px, 5vw, 56px);
-  background: radial-gradient(120% 140% at 100% 0%, rgba(255, 181, 71, 0.10), transparent 55%), var(--ink-2);
-}
-.sign-card h2 { font-size: clamp(32px, 4.4vw, 54px); margin: 14px 0 18px; }
-.sign-card p { color: var(--muted); }
-.levels { display: grid; gap: 12px; }
-.level { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 18px 20px; border-radius: 14px; border: 1px solid var(--line); }
-.level b { font-weight: 600; }
-.level small { display: block; color: var(--muted); font-size: 14px; }
-.pill { font-size: 13px; font-weight: 500; padding: 5px 12px; border-radius: 999px; white-space: nowrap; }
-.pill-on { color: var(--ink); background: var(--seal); }
-.pill-soon { color: var(--muted); border: 1px solid var(--line-strong); }
-
 
 .cta-final { text-align: center; padding: clamp(110px, 14vw, 180px) 0; position: relative; overflow: hidden; }
 .cta-final h2 { font-size: clamp(42px, 7vw, 96px); max-width: 14ch; margin: 0 auto 28px; }
@@ -305,10 +212,8 @@ footer a:hover { color: var(--text); }
 .load > *:nth-child(5) { animation-delay: .32s; }
 
 @media (max-width: 900px) {
-  .nav-links { display: none; }
   .chain { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .statements, .trial-stage, .steps, .cases, .sign-card { grid-template-columns: 1fr; }
-  .timeline { grid-template-columns: 1fr 1fr; row-gap: 56px; }
+  .statements, .trial-stage, .steps { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -316,18 +221,18 @@ footer a:hover { color: var(--text); }
   html { scroll-behavior: auto; }
 }
 </style>
+<script>
+(function(r,a){var s=document.createElement("script");s.async=true;
+s.src=a+"/public/tracking/"+r+"/script.js?v="+Math.floor(Date.now()/60000);
+document.head.appendChild(s);
+})("eeca0023-94f5-4206-b604-a6781323d1b2","https://emotio.cx/api");
+</script>
 </head>
 <body>
 
 <header class="nav">
   <div class="wrap">
     <a class="brand" href="#top" aria-label="Goya Ledger, inicio">goya ledger</a>
-    <nav class="nav-links" aria-label="Secciones">
-      <a href="#como">Cómo funciona</a>
-      <a href="#casos">En la vida real</a>
-      <a href="#cuantica">Cuántica</a>
-      <a href="#firma">Firma</a>
-    </nav>
     <a class="btn btn-light btn-sm" href="#prueba">Pruébalo</a>
   </div>
 </header>
@@ -335,20 +240,38 @@ footer a:hover { color: var(--text); }
 <main id="top">
 
   <div class="hero">
-    <canvas class="field" id="field" aria-hidden="true"></canvas>
     <div class="wrap hero-fold">
-      <p class="field-caption" aria-hidden="true">Interferencia de dos ondas.<br>Mueve el cursor: observar cambia el patrón.</p>
       <div class="load">
-        <p class="eyebrow">Goya Ledger · Registro distribuido (DLT) post-cuántico</p>
-        <h1>Lo que queda registrado en Goya no se puede falsificar. <span class="h1-quiet">Ni siquiera con un computador cuántico.</span></h1>
-        <p class="lede">Goya Ledger es una <strong>DLT</strong>, un registro distribuido: un libro copiado en muchos computadores a la vez, donde solo participantes autorizados pueden anotar. Lo que se registra queda con fecha y nadie puede cambiarlo a escondidas. Así, un contrato o un certificado se puede comprobar sin depender de la palabra de nadie.</p>
+        <p class="eyebrow">Goya · Firma y evidencia para plataformas de software</p>
+        <h1>Contratos que tu software firma, sigue y puede probar. <span class="h1-quiet">Hoy y en 30 años.</span></h1>
+        <p class="lede">Con una API, tus clientes firman dentro de tu producto y tu sistema se entera de cada firma. Cada firma queda con fecha y huella verificables con estándares públicos, <strong>sin depender de Goya</strong>, y con criptografía que resiste computadores cuánticos.</p>
         <div class="hero-actions">
           <a class="btn btn-light" href="#prueba">Haz la prueba</a>
-          <a class="btn btn-ghost" href="#como">Cómo funciona</a>
+          <a class="btn btn-ghost" href="/q-day">Escanea tus firmas</a>
         </div>
       </div>
     </div>
   </div>
+
+  <section id="beneficios">
+    <div class="wrap">
+      <h2 class="section-title reveal">Lo que gana tu plataforma.</h2>
+      <div class="statements reveal">
+        <div class="statement">
+          <h3>Tus clientes firman sin salir de tu producto.</h3>
+          <p>Firma electrónica simple (Ley 19.799) dentro de tu flujo o desde un enlace. Sin otra herramienta ni otra cuenta.</p>
+        </div>
+        <div class="statement">
+          <h3>Cada contrato avisa a tu sistema.</h3>
+          <p>Recibes un aviso cada vez que una parte firma, y activas un servicio o un cobro apenas se firma.</p>
+        </div>
+        <div class="statement">
+          <h3>La prueba no depende de nosotros.</h3>
+          <p>Firma, fecha y huella se verifican con estándares públicos y algoritmos post-cuánticos. <a href="/q-day">¿Tus firmas actuales resisten?</a></p>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <section id="prueba" class="trial">
     <div class="wrap">
@@ -397,138 +320,25 @@ footer a:hover { color: var(--text); }
     </div>
   </section>
 
-  <section id="problema">
-    <div class="wrap">
-      <h2 class="section-title reveal">En digital, una copia falsa puede verse idéntica.</h2>
-      <div class="statements">
-        <div class="statement reveal">
-          <h3>Editar un PDF toma segundos.</h3>
-          <p>Si no tiene firma digital, a simple vista no se nota.</p>
-        </div>
-        <div class="statement reveal">
-          <h3>Comprobarlo suele depender de otro.</h3>
-          <p>Del sitio de quien lo emitió, que debe seguir existiendo en diez años.</p>
-        </div>
-        <div class="statement reveal">
-          <h3>La mayoría de las firmas de hoy no resistirá lo cuántico.</h3>
-          <p>Un computador cuántico lo bastante grande podrá romperlas. EE.UU. busca migrar antes de 2035.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
   <section id="como">
     <div class="wrap">
       <h2 class="section-title reveal">Cómo funciona, en tres pasos.</h2>
       <div class="steps reveal">
         <article class="step">
           <span class="step-num">Paso 1</span>
-          <h3>Tu documento genera una huella.</h3>
-          <p>Un código que cambia por completo si cambia cualquier detalle. Se registra la huella, no el documento.</p>
+          <h3>Tu plataforma envía el contrato.</h3>
+          <p>Una llamada a la API con el documento y quiénes firman. Goya registra su huella, no el documento.</p>
         </article>
         <article class="step">
           <span class="step-num">Paso 2</span>
-          <h3>La huella queda anotada.</h3>
-          <p>Con fecha y hora, en un registro distribuido (DLT): copiado en varios computadores y validado solo por participantes autorizados.</p>
+          <h3>Tus clientes firman.</h3>
+          <p>Desde tu producto o un enlace. Tu sistema recibe un aviso con cada firma.</p>
         </article>
         <article class="step">
           <span class="step-num">Paso 3</span>
-          <h3>Cualquiera puede comprobarlo.</h3>
-          <p>Calcula la huella del documento que recibió y la compara con la registrada. Coincide o no coincide.</p>
+          <h3>Cualquiera lo comprueba.</h3>
+          <p>Calcula la huella del documento y la compara con la registrada. Coincide o no coincide, hoy o en 30 años.</p>
         </article>
-      </div>
-    </div>
-  </section>
-
-  <section id="casos">
-    <div class="wrap">
-      <h2 class="section-title reveal">En la vida real.</h2>
-      <div class="tabs reveal" role="tablist" aria-label="Para quién">
-        <button class="tab" role="tab" aria-selected="true" data-audience="personas">Personas</button>
-        <button class="tab" role="tab" aria-selected="false" data-audience="pymes">Pymes y profesionales</button>
-        <button class="tab" role="tab" aria-selected="false" data-audience="notarias">Notarías</button>
-        <button class="tab" role="tab" aria-selected="false" data-audience="instituciones">Instituciones</button>
-      </div>
-      <div class="cases" id="cases" role="tabpanel"></div>
-    </div>
-  </section>
-
-  <section id="cuantica" class="quantum">
-    <div class="wrap">
-      <h2 class="section-title reveal">La amenaza cuántica, en simple.</h2>
-      <div class="statements reveal">
-        <div class="statement">
-          <p class="tag">Una máquina distinta</p>
-          <h3>No es un computador más rápido.</h3>
-          <p>Resuelve de otra forma justo el problema matemático que protege la mayoría de las firmas de hoy.</p>
-          <details class="more">
-            <summary>¿Qué es un computador cuántico?</summary>
-            <p>Es un tipo nuevo de computador que calcula de una forma muy distinta a la de tu celular o tu notebook. No sirve para todo: no hará más rápidos tus correos ni tus videos. Pero hay un tipo de problema, justo el que protege las firmas digitales, que un computador normal tardaría miles de millones de años en resolver y uno cuántico lo bastante grande podría resolver en días. Hoy solo existen en laboratorios y todavía son demasiado pequeños para lograrlo.</p>
-          </details>
-        </div>
-        <div class="statement">
-          <p class="tag">Las cerraduras de hoy</p>
-          <h3>Seguras, por ahora.</h3>
-          <p>Un computador cuántico lo bastante grande podrá abrirlas, incluso las de firmas hechas años antes.</p>
-          <details class="more">
-            <summary>¿Qué cerraduras rompe?</summary>
-            <p>Tu firma digital funciona con un par de llaves: una secreta, que solo tienes tú y con la que firmas, y una pública, que cualquiera usa para comprobar que fuiste tú. Hoy es imposible adivinar la secreta a partir de la pública. Un computador cuántico lo bastante grande sí podría, y con ella firmar en tu nombre sin que nadie note la diferencia.</p>
-          </details>
-        </div>
-        <div class="statement highlight">
-          <p class="tag">Las cerraduras nuevas</p>
-          <h3>Diseñadas para resistir a ambos.</h3>
-          <div class="nist-stat">
-            <span class="nist-count">3 de 3</span>
-            <span class="nist-label">estándares post-cuánticos que NIST publicó en 2024, ya implementados en Goya.</span>
-            <span class="nist-badges"><span>FIPS 203</span><span>FIPS 204</span><span>FIPS 205</span></span>
-          </div>
-          <details class="more">
-            <summary>¿Qué es NIST y por qué importa?</summary>
-            <p>Es el organismo del gobierno de EE.UU. que define reglas técnicas de seguridad que después adoptan bancos, gobiernos y empresas de muchos países, incluidas las aplicaciones que usas a diario. Durante ocho años, expertos de todo el mundo pusieron a prueba distintas cerraduras nuevas, y en 2024 NIST publicó tres como estándar. Goya ya las implementa.</p>
-          </details>
-        </div>
-      </div>
-      <div class="timeline reveal" aria-label="Línea de tiempo">
-        <div class="tick past">
-          <p class="year">2024</p>
-          <p>NIST publicó los primeros estándares de criptografía post-cuántica.</p>
-        </div>
-        <div class="tick now">
-          <p class="year">2026 <span class="here">Hoy</span></p>
-          <p>La Unión Europea pide a sus países tener la migración en marcha antes de que termine este año.</p>
-        </div>
-        <div class="tick">
-          <p class="year">2030</p>
-          <p>La Unión Europea espera haber migrado los usos de alto riesgo.</p>
-        </div>
-        <div class="tick">
-          <p class="year">2035</p>
-          <p>Meta del gobierno de EE.UU. para reducir al máximo el riesgo cuántico en sus sistemas.</p>
-        </div>
-      </div>
-      <p class="source reveal">Fuentes: <a href="https://csrc.nist.gov/pubs/fips/204/final" rel="noopener" target="_blank">NIST FIPS 204</a> · <a href="https://digital-strategy.ec.europa.eu/en/library/coordinated-implementation-roadmap-transition-post-quantum-cryptography" rel="noopener" target="_blank">Hoja de ruta PQC de la UE</a> · <a href="https://bidenwhitehouse.archives.gov/briefing-room/statements-releases/2022/05/04/national-security-memorandum-on-promoting-united-states-leadership-in-quantum-computing-while-mitigating-risks-to-vulnerable-cryptographic-systems/" rel="noopener" target="_blank">Memorándum NSM-10 de EE.UU.</a></p>
-    </div>
-  </section>
-
-  <section id="firma">
-    <div class="wrap">
-      <div class="sign-card reveal">
-        <div>
-          <p class="eyebrow">Servicio adicional</p>
-          <h2>¿Además necesitas firmar?</h2>
-          <p>Goya Firma suma tu firma a la huella: quién firmó, cuándo y sobre qué versión exacta del documento. Tu contraparte firma desde un enlace, sin comprar un certificado.</p>
-        </div>
-        <div class="levels">
-          <div class="level">
-            <div><b>Firma electrónica simple</b><small>Identifica a quien firma. Ley 19.799.</small></div>
-            <span class="pill pill-on">Disponible</span>
-          </div>
-          <div class="level">
-            <div><b>Firma electrónica avanzada</b><small>Requiere acreditación como prestador. En trámite.</small></div>
-            <span class="pill pill-soon">Próximamente</span>
-          </div>
-        </div>
       </div>
     </div>
   </section>
@@ -557,7 +367,7 @@ footer a:hover { color: var(--text); }
     <div class="horizon" aria-hidden="true"></div>
     <div class="wrap">
       <h2 class="reveal">Que la verdad viaje con el documento.</h2>
-      <p class="reveal">Estamos trabajando con los primeros estudios, notarías e instituciones en Chile.</p>
+      <p class="reveal">Buscamos las primeras plataformas que quieran integrar Goya.</p>
       <a class="btn btn-light reveal" href="#prueba">Haz la prueba</a>
     </div>
   </div>
@@ -566,7 +376,7 @@ footer a:hover { color: var(--text); }
 
 <footer>
   <div class="wrap">
-    <span>© 2026 Goya Ledger SpA · Santiago, Chile</span>
+    <span>© 2026 Goya Ledger · Saturnus SpA, constituida en Chile en 2026 · Santiago, Chile</span>
   </div>
 </footer>
 
@@ -768,51 +578,6 @@ async function initTrial() {
   updateStepOne(originalHash);
 }
 
-const audiences = {
-  personas: [
-    { tag: 'Arriendo', title: 'El contrato que firmaste.', body: 'Si aparece una versión con otro monto, su huella no coincide.', before: 'Tu palabra contra otra.', after: 'Una huella con fecha.' },
-    { tag: 'Trabajo', title: 'Tu finiquito, tal cual.', body: 'Pruebas qué documento exacto recibiste, sin depender de la empresa.', before: 'Un PDF en un correo.', after: 'Una prueba comprobable.' },
-    { tag: 'Compraventa', title: 'Vender el auto, sin sorpresas.', body: 'El acuerdo queda con su huella: otra versión no coincidirá.', before: 'Capturas de WhatsApp.', after: 'Un acuerdo comprobable.' },
-  ],
-  pymes: [
-    { tag: 'Cotizaciones', title: 'Lo que ofreciste, tal cual.', body: 'Si el cliente reclama otro precio, la versión registrada lo aclara.', before: 'Discusiones por correo.', after: 'La versión exacta, con fecha.' },
-    { tag: 'Contratos', title: 'Tu cliente firma a distancia.', body: 'Desde un enlace, sin comprar un certificado ni ir a una notaría.', before: 'PDFs y recordatorios.', after: 'Firma ligada al documento.' },
-    { tag: 'Informes', title: 'Entregables comprobables.', body: 'Pruebas qué entregaste y cuándo, sin depender de tu servidor.', before: '"Nunca recibí eso".', after: 'Huella del día de entrega.' },
-  ],
-  notarias: [
-    { tag: 'Copias electrónicas', title: 'Copias que se comprueban.', body: 'Quien recibe una copia la compara con la registrada en segundos.', before: 'Llamar a la notaría.', after: 'Comprobarla uno mismo.' },
-    { tag: 'Repositorio', title: 'Integridad de todo el archivo.', body: 'Cada documento tiene huella y fecha: un cambio posterior no coincide.', before: 'Carpetas y respaldos.', after: 'Integridad comprobable.' },
-    { tag: 'Firmas', title: 'Las partes firman a distancia.', body: 'Sin que cada parte tenga que comprar su propio certificado.', before: 'Coordinar presencialidad.', after: 'Firmas desde un enlace.' },
-  ],
-  instituciones: [
-    { tag: 'Certificados', title: 'Certificados comprobables.', body: 'Títulos o licencias que se comprueban con un enlace o un QR.', before: 'Fáciles de falsificar.', after: 'Comprobables por cualquiera.' },
-    { tag: 'Salud', title: 'Trazabilidad sin exponer datos.', body: 'Se registra la huella del documento clínico, no los datos del paciente.', before: 'Solo un sistema interno.', after: 'Integridad comprobable.' },
-    { tag: 'Cumplimiento', title: 'Evidencia para auditorías.', body: 'Registros con huella y fecha para mostrar controles a un auditor.', before: 'Registros editables.', after: 'Un historial con fecha.' },
-  ],
-};
-
-const casesPanel = document.getElementById('cases');
-function renderCases(audience) {
-  casesPanel.replaceChildren(...audiences[audience].map((item) => {
-    const article = document.createElement('article');
-    article.className = 'case';
-    article.innerHTML = `<p class="tag"></p><h3></h3><p></p><div class="before-after"><div><span>Antes</span><p></p></div><div><span>Con Goya</span><p></p></div></div>`;
-    const [tag, title, body, before, after] = article.querySelectorAll('.tag, h3, article > p:not(.tag), .before-after p');
-    tag.textContent = item.tag;
-    title.textContent = item.title;
-    body.textContent = item.body;
-    before.textContent = item.before;
-    after.textContent = item.after;
-    return article;
-  }));
-}
-document.querySelectorAll('.tab').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach((other) => other.setAttribute('aria-selected', String(other === tab)));
-    renderCases(tab.dataset.audience);
-  });
-});
-
 const observer = new IntersectionObserver((entries) => {
   entries.forEach((entry) => {
     if (!entry.isIntersecting) return;
@@ -823,70 +588,6 @@ const observer = new IntersectionObserver((entries) => {
 document.querySelectorAll('.reveal').forEach((element) => observer.observe(element));
 
 initTrial();
-renderCases('personas');
-
-const field = document.getElementById('field');
-const fieldContext = field.getContext('2d');
-const prefersReducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
-const DOT_SPACING = 13;
-const WAVE_NUMBER = 0.032;
-const WAVE_SPEED = 0.0016;
-const pointer = { x: 0.92, y: 0.78, targetX: 0.92, targetY: 0.78 };
-let fieldWidth = 0;
-let fieldHeight = 0;
-let isFieldVisible = true;
-
-function resizeField() {
-  const ratio = Math.min(window.devicePixelRatio || 1, 2);
-  fieldWidth = field.clientWidth;
-  fieldHeight = field.clientHeight;
-  field.width = fieldWidth * ratio;
-  field.height = fieldHeight * ratio;
-  fieldContext.setTransform(ratio, 0, 0, ratio, 0, 0);
-}
-
-function drawField(time) {
-  fieldContext.clearRect(0, 0, fieldWidth, fieldHeight);
-  pointer.x += (pointer.targetX - pointer.x) * 0.04;
-  pointer.y += (pointer.targetY - pointer.y) * 0.04;
-  const sourceA = { x: fieldWidth * (0.58 + 0.03 * Math.sin(time * 0.00017)), y: fieldHeight * (0.16 + 0.05 * Math.sin(time * 0.00021)) };
-  const sourceB = { x: fieldWidth * pointer.x, y: fieldHeight * pointer.y };
-  const phase = time * WAVE_SPEED;
-  for (let y = DOT_SPACING / 2; y < fieldHeight; y += DOT_SPACING) {
-    for (let x = DOT_SPACING / 2; x < fieldWidth; x += DOT_SPACING) {
-      const distanceA = Math.hypot(x - sourceA.x, y - sourceA.y);
-      const distanceB = Math.hypot(x - sourceB.x, y - sourceB.y);
-      const amplitude = (Math.sin(distanceA * WAVE_NUMBER - phase) + Math.sin(distanceB * WAVE_NUMBER - phase)) / 2;
-      const intensity = amplitude * amplitude;
-      if (intensity < 0.02) continue;
-      fieldContext.fillStyle = `rgba(207, 232, 255, ${(intensity * 0.75).toFixed(3)})`;
-      fieldContext.beginPath();
-      fieldContext.arc(x, y, 0.5 + intensity * 1.4, 0, Math.PI * 2);
-      fieldContext.fill();
-    }
-  }
-}
-
-function animateField(time) {
-  if (isFieldVisible) drawField(time);
-  requestAnimationFrame(animateField);
-}
-
-window.addEventListener('pointermove', (event) => {
-  const bounds = field.getBoundingClientRect();
-  if (event.clientY > bounds.bottom) return;
-  pointer.targetX = Math.min(Math.max(event.clientX / bounds.width, 0.35), 1);
-  pointer.targetY = Math.min(Math.max((event.clientY - bounds.top) / bounds.height, 0), 1);
-});
-window.addEventListener('resize', () => {
-  resizeField();
-  if (prefersReducedMotion) drawField(0);
-});
-new IntersectionObserver(([entry]) => { isFieldVisible = entry.isIntersecting; }).observe(field);
-
-resizeField();
-if (prefersReducedMotion) drawField(0);
-else requestAnimationFrame(animateField);
 </script>
 </body>
 </html>
