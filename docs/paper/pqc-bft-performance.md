@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This paper reports the computational overhead of NIST post-quantum cryptographic standards (ML-DSA-65, ML-KEM-768, SLH-DSA-128s) integrated into a HotStuff-based BFT consensus implementation. We instrument the complete block production pipeline of a 4-validator configuration — key generation, transaction signing, consensus voting, signature verification, and parallel transaction execution — running in a single process without network transport, and compare classical (Ed25519) against post-quantum (ML-DSA-65) configurations. This isolates cryptographic cost from network cost. In-process throughput with ML-DSA-65 reaches 10,260 TPS with 9.75 ms block latency on a laptop-class CPU using unoptimized reference implementations. The primary bottleneck is transaction signing (83.2% of total time); verification overhead is small (1.3x). We validate implementation correctness against 117 official NIST ACVP test vectors with byte-exact output matching. Results are reproducible from the open-source implementation.
+This paper reports the computational overhead of NIST post-quantum cryptographic standards (ML-DSA-65, ML-KEM-768, SLH-DSA-128s) integrated into a HotStuff-based BFT consensus implementation. We instrument the complete block production pipeline of a 4-validator configuration — key generation, transaction signing, consensus voting, signature verification, and parallel transaction execution — running in a single process without network transport, and compare classical (Ed25519) against post-quantum (ML-DSA-65) configurations. This isolates cryptographic cost from network cost. Across 6 runs on an Apple M4 laptop with unoptimized reference implementations, in-process throughput with ML-DSA-65 has a median of 10,116 TPS (range 6,449–10,747) and a median block latency of 9.89 ms. The primary bottleneck is transaction signing (83.7% of total time); verification overhead is small (1.2x). We validate implementation correctness against 117 official NIST ACVP test vectors with byte-exact output matching. Results are reproducible from the open-source implementation.
 
 ## 1. Introduction
 
@@ -38,11 +38,12 @@ Following ANSSI [7] and BSI [9] recommendations, the system supports dual signat
 
 ### 3.1 Test Environment
 
-- Hardware: Apple M-series, 8 cores, 16 GB RAM
+- Hardware: Apple M4, 10 cores, 16 GB RAM
 - Toolchain: Rust nightly, release profile (optimizations enabled)
 - Crypto library: PQClean (C reference implementations via FFI)
 - Measurement: `std::time::Instant` (monotonic clock)
 - Iterations: 20 blocks x 100 transactions per benchmark run
+- Repetitions: each benchmark executed 6 times on a machine with other user workloads running; tables report the median and, where shown, [min–max]
 - Validators: 4 (minimum BFT with f=1), instantiated in one process; messages are passed in memory with no network transport, serialization over sockets, or propagation delay
 
 ### 3.2 Pipeline Instrumentation
@@ -71,71 +72,71 @@ Implementation correctness verified against official NIST ACVP-Server test vecto
 
 ### 4.1 Isolated Cryptographic Operations
 
-100 iterations per algorithm (SLH-DSA: 10), release build.
+100 iterations per algorithm (SLH-DSA: 10), release build. Median [min–max] over 6 runs.
 
 | Operation | Ed25519 | ML-DSA-65 | SLH-DSA-128s | ML-DSA/Ed25519 |
 |-----------|---------|-----------|--------------|----------------|
-| KeyGen (us) | 9.2 | 39.1 | 456,048 | 4.2x |
-| Sign (us) | 9.1 | 90.5 | 352,797 | 9.9x |
-| Verify (us) | 19.6 | 25.5 | 352.5 | 1.3x |
+| KeyGen (us) | 9.6 [9.0–13.9] | 43.8 [37.4–47.8] | 501,572 [457,303–568,993] | 4.6x |
+| Sign (us) | 9.4 [8.8–12.5] | 78.4 [70.8–106.8] | 385,993 [359,219–420,716] | 8.3x |
+| Verify (us) | 20.4 [19.1–26.1] | 24.9 [24.5–42.2] | 398.5 [350.0–499.0] | 1.2x |
 | Public key (B) | 32 | 1,952 | 32 | 61.0x |
 | Signature (B) | 64 | 3,309 | 7,856 | 51.7x |
 
-SLH-DSA-128s signing is 3,880x slower than ML-DSA-65, confirming its role as emergency backup only.
+SLH-DSA-128s signing is about 4,900x slower than ML-DSA-65, confirming its role as emergency backup only.
 
 ### 4.2 End-to-End Pipeline
 
-20 blocks, 100 transactions per block, 4 validators, real cryptography.
+20 blocks, 100 transactions per block, 4 validators, real cryptography. Median [min–max] over 6 runs.
 
 | Metric | Ed25519 | ML-DSA-65 | Overhead |
 |--------|---------|-----------|----------|
-| Throughput (TPS) | 64,561 | 10,260 | 6.3x |
-| Block rate (blocks/s) | 646 | 103 | 6.3x |
-| Block latency (ms) | 1.55 | 9.75 | 6.3x |
+| Throughput (TPS) | 65,681 [59,845–69,056] | 10,116 [6,449–10,747] | 6.5x |
+| Block rate (blocks/s) | 657 [598–691] | 102 [64–107] | 6.5x |
+| Block latency (ms) | 1.52 [1.45–1.67] | 9.89 [9.30–15.51] | 6.5x |
 
 ### 4.3 Time Breakdown
 
 | Phase | Ed25519 (ms) | Ed25519 (%) | ML-DSA-65 (ms) | ML-DSA-65 (%) |
 |-------|-------------|-------------|----------------|---------------|
-| BFT consensus | 6.20 | 20.0 | 28.67 | 14.7 |
-| TX signing | 20.73 | 66.9 | 162.22 | 83.2 |
-| Execution | 3.62 | 11.7 | 3.53 | 1.8 |
+| BFT consensus | 6.11 | 20.2 | 27.81 | 14.2 |
+| TX signing | 20.25 | 66.4 | 166.35 | 83.7 |
+| Execution | 3.67 | 12.1 | 3.62 | 1.9 |
 
-Transaction signing dominates in both configurations. The shift from 66.9% to 83.2% reflects the 9.9x signing overhead of ML-DSA-65 while execution cost remains constant.
+Transaction signing dominates in both configurations. The shift from 66.4% to 83.7% (medians over 6 runs) reflects the 8.3x signing overhead of ML-DSA-65 while execution cost remains constant.
 
 ### 4.4 Scaling Behavior
 
-ML-DSA-65, 10 blocks per configuration.
+ML-DSA-65, 10 blocks per configuration. Median over 6 runs.
 
 | Txs/Block | TPS | Block Latency (ms) | Bottleneck |
 |-----------|-----|---------------------|------------|
-| 10 | 4,442 | 2.25 | BFT |
-| 50 | 8,956 | 5.58 | Signing |
-| 100 | 10,041 | 9.96 | Signing |
-| 200 | 10,790 | 18.54 | Signing |
-| 500 | 11,014 | 45.40 | Signing |
+| 10 | 4,565 | 2.20 | BFT |
+| 50 | 9,002 | 5.55 | Signing |
+| 100 | 10,379 | 9.64 | Signing |
+| 200 | 10,852 | 18.43 | Signing |
+| 500 | 10,572 | 47.35 | Signing |
 
-TPS plateaus around 11,000 as signing becomes the dominant cost. At low transaction counts (<50), BFT consensus overhead dominates. The crossover occurs near 30 transactions per block.
+TPS plateaus between roughly 10,400 and 10,900 as signing becomes the dominant cost. At low transaction counts (<50), BFT consensus overhead dominates. The crossover occurs near 30 transactions per block.
 
 ### 4.5 Hybrid Signature Overhead
 
-Hybrid dual signature as recommended by ANSSI (Ed25519 primary + ML-DSA-65 secondary), 50 iterations.
+Hybrid dual signature as recommended by ANSSI (Ed25519 primary + ML-DSA-65 secondary), 50 iterations. Median [min–max] over 6 runs.
 
 | Operation | Classical (us) | Hybrid (us) | Overhead |
 |-----------|---------------|-------------|----------|
-| Sign | 12.6 | 85.4 | 6.8x |
-| Verify | 18.9 | 64.2 | 3.4x |
+| Sign | 11.0 [9.0–20.0] | 104.1 [86.6–127.1] | 9.5x |
+| Verify | 19.1 [18.3–20.5] | 44.0 [42.7–48.5] | 2.3x |
 | Bandwidth per envelope | 96 B | 5,325 B | 55.5x |
 
 ### 4.6 Key Exchange (TLS)
 
-ML-KEM-768, 100 iterations.
+ML-KEM-768, 100 iterations. Median over 6 runs.
 
 | Operation | Latency (us) |
 |-----------|-------------|
-| KeyGen | 9.8 |
-| Encapsulate | 9.7 |
-| Decapsulate | 8.9 |
+| KeyGen | 7.2 |
+| Encapsulate | 7.0 |
+| Decapsulate | 8.0 |
 | Handshake overhead | +2,208 B |
 
 ### 4.7 Block Size Impact
@@ -153,25 +154,25 @@ Estimated block size with N endorsements (signature + payload hash + public key 
 
 ### 5.1 Verification is Not the Bottleneck
 
-The 1.3x verification overhead of ML-DSA-65 contradicts the assumption that PQC significantly impacts consensus validation. In HotStuff BFT, validators verify O(n) signatures per phase — at 25.5 us per verify, a 100-validator network adds only 2.55 ms per phase, well within typical network round-trip times.
+The 1.2x verification overhead of ML-DSA-65 contradicts the assumption that PQC significantly impacts consensus validation. In HotStuff BFT, validators verify O(n) signatures per phase — at 24.9 us per verify, a 100-validator network adds only 2.49 ms per phase, well within typical network round-trip times.
 
 ### 5.2 Signing Dominates
 
-Transaction signing consumes 83.2% of pipeline time with ML-DSA-65. This cost is per-transaction and scales linearly. Parallelizing transaction signing across available cores is the most direct optimization path — the current implementation signs sequentially.
+Transaction signing consumes 83.7% of pipeline time with ML-DSA-65. This cost is per-transaction and scales linearly. Parallelizing transaction signing across available cores is the most direct optimization path — the current implementation signs sequentially.
 
 ### 5.3 Bandwidth Considerations
 
-ML-DSA-65 signatures (3,309 B) are 51.7x larger than Ed25519 (64 B). For a block with 100 transactions and 5 endorsements each, the bandwidth difference is approximately 1.5 MB (ML-DSA) vs 30 KB (Ed25519). At 103 blocks/second, this produces approximately 155 MB/s of signature data. This is within the capacity of modern datacenter networks but may constrain geographic distribution over slower links.
+ML-DSA-65 signatures (3,309 B) are 51.7x larger than Ed25519 (64 B). For a block with 100 transactions and 5 endorsements each, the bandwidth difference is approximately 1.5 MB (ML-DSA) vs 30 KB (Ed25519). At 102 blocks/second, this produces approximately 150 MB/s of signature data. This is within the capacity of modern datacenter networks but may constrain geographic distribution over slower links.
 
 ### 5.4 Comparison with Existing Work and Systems
 
-Yu et al. [11] measure ML-DSA-65 in a geo-distributed BFT deployment and find roughly 2x latency, an effect dominated by network and message size. Our in-process measurements show the purely computational side: verification costs 1.3x and signing 9.9x Ed25519, so in a networked deployment the bandwidth of 3,309-byte signatures (Section 5.3), not verification time, is the more likely source of added latency. Santos et al. [12] show that supporting several signature schemes at the transaction-format level adds no measurable overhead, which is consistent with our hybrid-envelope design.
+Yu et al. [11] measure ML-DSA-65 in a geo-distributed BFT deployment and find roughly 2x latency, an effect dominated by network and message size. Our in-process measurements show the purely computational side: verification costs 1.2x and signing 8.3x Ed25519, so in a networked deployment the bandwidth of 3,309-byte signatures (Section 5.3), not verification time, is the more likely source of added latency. Santos et al. [12] show that supporting several signature schemes at the transaction-format level adds no measurable overhead, which is consistent with our hybrid-envelope design.
 
 Among deployed systems, Algorand executed its first Falcon-signed transaction on mainnet in November 2025 and enabled native Falcon-1024 accounts in August 2026 [13]. QRL 2.0 uses ML-DSA-87 for accounts and validators and is on public testnet as of 2026 [14]. As of November 2026, neither Bitcoin nor Ethereum has deployed a post-quantum signature scheme on mainnet; Bitcoin's BIP-360 removes the Taproot key-path exposure without introducing a post-quantum scheme [15], and Ethereum's post-quantum migration targets 2029 [16].
 
 ### 5.5 Limitations
 
-All validators run in one process, so the reported throughput excludes network latency, bandwidth limits and real message serialization; it is an upper bound on what the cryptographic pipeline allows, not a network throughput figure. Measurements use PQClean reference implementations without AVX2 or NEON optimizations, on a single laptop-class machine; optimized implementations would reduce ML-DSA signing cost. Transaction signing is sequential, which overstates its share of pipeline time on multi-core hardware. A networked multi-machine evaluation is left for future work.
+All validators run in one process, so the reported throughput excludes network latency, bandwidth limits and real message serialization; it is an upper bound on what the cryptographic pipeline allows, not a network throughput figure. Measurements use PQClean reference implementations without AVX2 or NEON optimizations, on a single laptop-class machine; optimized implementations would reduce ML-DSA signing cost. Transaction signing is sequential, which overstates its share of pipeline time on multi-core hardware. The machine was not idle during measurement, which explains the wide ranges, such as the slowest end-to-end run at 6,449 TPS; medians are reported for that reason. A networked multi-machine evaluation is left for future work.
 
 ## 6. Reproducibility
 
