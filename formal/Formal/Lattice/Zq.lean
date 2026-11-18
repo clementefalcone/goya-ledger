@@ -1,5 +1,5 @@
 import Mathlib.Data.ZMod.Basic
-import Mathlib.Data.Nat.Prime.Basic
+import Mathlib.Tactic.NormNum.Prime
 
 namespace GoyaFormal
 
@@ -9,7 +9,7 @@ theorem q_pos : 0 < q := by decide
 
 instance : NeZero q := ⟨by decide⟩
 
-instance : Fact (Nat.Prime q) := ⟨by native_decide⟩
+instance : Fact (Nat.Prime q) := ⟨by norm_num [q]⟩
 
 abbrev Zq := ZMod q
 

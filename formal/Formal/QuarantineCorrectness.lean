@@ -43,28 +43,28 @@ theorem ed25519_is_classical : isClassical Ed25519 = true := by rfl
 theorem mldsa_is_pqc : isPostQuantum MlDsa65 = true := by rfl
 
 theorem mldsa_not_in_classical_list :
-    classicalAlgos.contains MlDsa65 = false := by native_decide
+    classicalAlgos.contains MlDsa65 = false := by decide
 
 theorem slhdsa_not_in_classical_list :
-    classicalAlgos.contains SlhDsa128s = false := by native_decide
+    classicalAlgos.contains SlhDsa128s = false := by decide
 
 theorem ed25519_in_classical_list :
-    classicalAlgos.contains Ed25519 = true := by native_decide
+    classicalAlgos.contains Ed25519 = true := by decide
 
 theorem pqc_prevents_quarantine_singleton :
-    allCompromised classicalAlgos [MlDsa65] = false := by native_decide
+    allCompromised classicalAlgos [MlDsa65] = false := by decide
 
 theorem pqc_prevents_quarantine_mixed :
-    allCompromised classicalAlgos [Ed25519, MlDsa65] = false := by native_decide
+    allCompromised classicalAlgos [Ed25519, MlDsa65] = false := by decide
 
 theorem ed25519_only_quarantined :
-    allCompromised classicalAlgos [Ed25519] = true := by native_decide
+    allCompromised classicalAlgos [Ed25519] = true := by decide
 
 theorem ed25519_pair_quarantined :
-    allCompromised classicalAlgos [Ed25519, Ed25519] = true := by native_decide
+    allCompromised classicalAlgos [Ed25519, Ed25519] = true := by decide
 
 theorem rsa_quarantined :
-    allCompromised classicalAlgos [Rsa] = true := by native_decide
+    allCompromised classicalAlgos [Rsa] = true := by decide
 
 theorem empty_is_vacuously_quarantined :
-    allCompromised classicalAlgos [] = true := by native_decide
+    allCompromised classicalAlgos [] = true := by decide

@@ -36,11 +36,11 @@ structure MlDsaSignature where
   response : MlDsaSecretVec
   challenge : Rq
 
-axiom expandA : ByteArray → MlDsaPublicMatrix
+opaque expandA : ByteArray → MlDsaPublicMatrix
 
-axiom sampleSecret : ByteArray → Nat → MlDsaSecretVec
+opaque sampleSecret : ByteArray → Nat → MlDsaSecretVec
 
-axiom sampleNoise : ByteArray → Nat → MlDsaPublicVec
+opaque sampleNoise : ByteArray → Nat → MlDsaPublicVec
 
 def keyGen (seed : ByteArray) (rho rhoPrime seedK : ByteArray) : MlDsaKeyPair :=
   let matA := expandA rho
@@ -69,9 +69,9 @@ theorem keygen_public_key_is_mlwe (seed rho rhoPrime seedK : ByteArray) :
 -- Sign
 -- ════════════════════════════════════════════════════════════════
 
-axiom hashToChallenge : ByteArray → MlDsaPublicVec → ByteArray → Rq
+opaque hashToChallenge : ByteArray → MlDsaPublicVec → ByteArray → Rq
 
-axiom sampleMaskingVec : ByteArray → Nat → MlDsaSecretVec
+opaque sampleMaskingVec : ByteArray → Nat → MlDsaSecretVec
 
 def scalarVecMul (c : Rq) (v : RqVec d) : RqVec d :=
   fun i => c * v i
@@ -89,11 +89,10 @@ def sign (sk : MlDsaSecretKey) (message : ByteArray) (nonce : Nat) : MlDsaSignat
 
 theorem sign_response_structure (sk : MlDsaSecretKey) (msg : ByteArray) (nonce : Nat) :
     let sig := sign sk msg nonce
-    let matA := expandA sk.seedRho
     let y := sampleMaskingVec sk.seedK nonce
     let c := sig.challenge
     sig.response = vecAdd y (scalarVecMul c sk.vecS1) := by
-  simp [sign, vecAdd, scalarVecMul]
+  simp [sign]
 
 -- ════════════════════════════════════════════════════════════════
 -- Verify
