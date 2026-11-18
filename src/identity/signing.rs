@@ -282,11 +282,14 @@ impl EcdsaP256SigningProvider {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn from_bytes(secret_key_bytes: &[u8]) -> Result<Self, SigningError> {
-        let sk = p256::ecdsa::SigningKey::from_bytes(secret_key_bytes.into())
-            .map_err(|e| SigningError::KeyNotAvailable(format!("invalid P-256 secret key: {e}")))?;
-        Ok(Self { signing_key: sk })
+    pub fn from_secret_bytes(secret: &[u8]) -> Result<Self, SigningError> {
+        p256::ecdsa::SigningKey::from_slice(secret)
+            .map(|signing_key| Self { signing_key })
+            .map_err(|e| SigningError::KeyNotAvailable(format!("invalid P-256 secret key: {e}")))
+    }
+
+    pub fn secret_bytes(&self) -> zeroize::Zeroizing<Vec<u8>> {
+        zeroize::Zeroizing::new(self.signing_key.to_bytes().to_vec())
     }
 }
 
@@ -730,16 +733,6 @@ mod tests {
         let provider: Box<dyn SigningProvider> = Box::new(EcdsaP256SigningProvider::generate());
         let sig = provider.sign(b"es256 data").unwrap();
         assert!(provider.verify(b"es256 data", &sig).unwrap());
-    }
-
-    #[test]
-    fn es256_from_bytes_roundtrip() {
-        let provider = EcdsaP256SigningProvider::generate();
-        let sk_bytes = provider.signing_key.to_bytes();
-        let restored = EcdsaP256SigningProvider::from_bytes(&sk_bytes).unwrap();
-        let sig = restored.sign(b"roundtrip").unwrap();
-        assert!(restored.verify(b"roundtrip", &sig).unwrap());
-        assert_eq!(provider.public_key(), restored.public_key());
     }
 
     #[test]

@@ -582,7 +582,7 @@ fn google_quantum_ai_ecdsa_attack_estimates() {
 
     assert!(
         goya_ed25519_migrated,
-        "Goya must have Ed25519→ML-DSA-65 migration path (POST /identity/{{did}}/migrate)"
+        "Goya must have Ed25519→ML-DSA-65 migration path (POST /identity/{{did}}/rotate)"
     );
     assert!(
         goya_hybrid_deployed,

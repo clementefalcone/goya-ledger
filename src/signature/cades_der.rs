@@ -670,8 +670,6 @@ pub fn verify_cades_bes_der(
 pub struct VerifyContext<'a> {
     /// Trusted root CA public keys (hex). If provided, embedded cert is validated.
     pub trusted_roots: &'a [&'a str],
-    /// CRL store for revocation checking.
-    pub crl_store: Option<&'a dyn crate::msp::CrlStore>,
     /// Whether to verify the embedded TSA timestamp token.
     pub verify_timestamp: bool,
 }
@@ -693,16 +691,6 @@ pub fn verify_cades_with_context(
             return Err(invalid(
                 "SigningCertificateV2 hash does not match public key",
             ));
-        }
-    }
-
-    // Check revocation via CRL store if available
-    if let Some(crl_store) = ctx.crl_store {
-        let pk_short = &public_key_hex[..16.min(public_key_hex.len())];
-        if let Ok(revoked) = crl_store.read_crl("default") {
-            if revoked.iter().any(|s| s.contains(pk_short)) {
-                return Err(invalid("signer certificate is revoked"));
-            }
         }
     }
 
@@ -1291,7 +1279,6 @@ mod tests {
         let pk_hex = hex::encode(provider.public_key());
         let ctx = VerifyContext {
             trusted_roots: &[],
-            crl_store: None,
             verify_timestamp: false,
         };
         let fields = verify_cades_with_context(&der, b"ctx test", &pk_hex, &ctx).unwrap();
@@ -1305,7 +1292,6 @@ mod tests {
         let pk_hex = hex::encode(provider.public_key());
         let ctx = VerifyContext {
             trusted_roots: &[],
-            crl_store: None,
             verify_timestamp: false,
         };
         assert!(verify_cades_with_context(&der, b"cert hash", &pk_hex, &ctx).is_ok());
@@ -1319,7 +1305,6 @@ mod tests {
         let pk_hex = hex::encode(provider.public_key());
         let ctx = VerifyContext {
             trusted_roots: &[],
-            crl_store: None,
             verify_timestamp: true,
         };
         assert!(verify_cades_with_context(&der, b"ts verify", &pk_hex, &ctx).is_ok());

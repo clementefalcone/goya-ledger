@@ -4,6 +4,9 @@ use crate::tsa::{TimeStampRequest, TsaProvider};
 
 use super::store::LexChainStore;
 use super::types::*;
+use crate::identity::operations::Change;
+use crate::storage::errors::{StorageError, StorageResult};
+use crate::storage::traits::BlockStore;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,6 +26,10 @@ pub enum LexChainError {
     NotarizationFailed(String),
     #[error("contract requires at least one party")]
     NoParties,
+    #[error("invalid webhook: {0}")]
+    InvalidWebhook(String),
+    #[error("contract storage failed: {0}")]
+    Storage(#[from] crate::storage::errors::StorageError),
     #[error("DID not registered: {0}")]
     DidNotRegistered(String),
     #[error("signing key does not belong to DID: {0}")]
@@ -35,6 +42,8 @@ pub enum LexChainError {
     TemplateNotFound(String),
     #[error("missing role assignment: {0}")]
     MissingRole(String),
+    #[error("a different contract already uses id {0}")]
+    ContractExists(String),
 }
 
 fn now_secs() -> u64 {
@@ -44,90 +53,317 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn content_hash(def: &ContractDefinition) -> String {
-    let canonical = serde_json::to_string(def).unwrap_or_default();
-    hex::encode(hash(canonical.as_bytes()))
+fn content_hash(contract_id: &str, def: &ContractDefinition) -> String {
+    let public_definition = ContractDefinition {
+        payload: serde_json::Value::Null,
+        ..def.clone()
+    };
+    let canonical = serde_json::to_string(&public_definition).unwrap_or_default();
+    hex::encode(hash(format!("{contract_id}:{canonical}").as_bytes()))
 }
 
-pub fn deploy_request(
-    store: &LexChainStore,
-    req: DeployRequest,
-) -> Result<LexContract, LexChainError> {
-    match req {
-        DeployRequest::Full(def) => deploy(store, def),
-        DeployRequest::FromTemplate {
-            template,
-            parties,
-            payload,
-        } => deploy_from_template(store, &template, parties, payload),
+pub fn payload_commitment(salt_hex: &str, payload: &serde_json::Value) -> String {
+    let canonical = serde_json::to_string(payload).unwrap_or_default();
+    hex::encode(hash(format!("{salt_hex}:{canonical}").as_bytes()))
+}
+
+fn random_salt_hex() -> String {
+    use pqc_crypto_module::legacy::rng::OsRng;
+    use rand_core::RngCore;
+    let mut salt = [0u8; 32];
+    OsRng.fill_bytes(&mut salt);
+    hex::encode(salt)
+}
+
+fn is_payload_sealed(contract: &LexContract) -> bool {
+    let definition = &contract.definition;
+    let Some(commitment) = definition.payload_commitment.as_deref() else {
+        return false;
+    };
+    match (&definition.payload, &contract.payload_salt) {
+        (serde_json::Value::Null, None) => {
+            commitment.len() == 64 && commitment.bytes().all(|b| b.is_ascii_hexdigit())
+        }
+        (payload, Some(salt)) => payload_commitment(salt, payload) == commitment,
+        (_, None) => false,
     }
 }
 
-pub fn deploy_from_template(
+pub fn template_definition(
     store: &LexChainStore,
     template_name: &str,
     role_dids: std::collections::HashMap<String, String>,
     payload: serde_json::Value,
-) -> Result<LexContract, LexChainError> {
+) -> Result<ContractDefinition, LexChainError> {
     let template = store
         .get_template(template_name)
         .ok_or_else(|| LexChainError::TemplateNotFound(template_name.to_string()))?;
-
-    let mut parties = Vec::new();
-    for role in &template.roles {
-        let did = role_dids
-            .get(&role.role)
-            .ok_or_else(|| LexChainError::MissingRole(role.role.clone()))?;
-        parties.push(PartyDefinition {
-            role: role.role.clone(),
-            did: did.clone(),
-            signature_level: role.signature_level,
-        });
-    }
-
-    let definition = ContractDefinition {
+    let parties = template
+        .roles
+        .iter()
+        .map(|role| {
+            let did = role_dids
+                .get(&role.role)
+                .ok_or_else(|| LexChainError::MissingRole(role.role.clone()))?;
+            Ok(PartyDefinition {
+                role: role.role.clone(),
+                did: did.clone(),
+                signature_level: role.signature_level,
+            })
+        })
+        .collect::<Result<Vec<_>, LexChainError>>()?;
+    Ok(ContractDefinition {
         contract_type: template.contract_type.clone(),
         parties,
         payload,
+        payload_commitment: None,
         require_notarization: template.require_notarization,
         deadline_secs: template.deadline_secs,
         webhook_url: None,
-    };
+    })
+}
 
-    deploy(store, definition)
+fn draft_contract(
+    definition: ContractDefinition,
+    created_at: u64,
+) -> Result<LexContract, LexChainError> {
+    let id = format!("lxc-{}", uuid::Uuid::new_v4());
+    let salt = random_salt_hex();
+    let definition = ContractDefinition {
+        payload_commitment: Some(payload_commitment(&salt, &definition.payload)),
+        ..definition
+    };
+    let contract = LexContract {
+        payload_salt: Some(salt),
+        content_hash: content_hash(&id, &definition),
+        parties: definition
+            .parties
+            .iter()
+            .map(PartyState::from_definition)
+            .collect(),
+        id,
+        definition,
+        state: ContractState::PendingSignatures,
+        created_at,
+        tsa_token: None,
+        block_height: None,
+        delivery_receipts: Vec::new(),
+        preservation_records: Vec::new(),
+    };
+    require_fresh_contract(&contract)?;
+    Ok(contract)
+}
+
+pub fn draft_request(
+    store: &LexChainStore,
+    req: DeployRequest,
+) -> Result<LexContract, LexChainError> {
+    let definition = match req {
+        DeployRequest::Full(definition) => definition,
+        DeployRequest::FromTemplate {
+            template,
+            parties,
+            payload,
+        } => template_definition(store, &template, parties, payload)?,
+    };
+    draft_contract(definition, now_secs())
+}
+
+fn require_fresh_contract(contract: &LexContract) -> Result<(), LexChainError> {
+    let definition = &contract.definition;
+    if definition.parties.is_empty() {
+        return Err(LexChainError::NoParties);
+    }
+    if let Some(url) = &definition.webhook_url {
+        super::webhook::validate_webhook_url(url).map_err(LexChainError::InvalidWebhook)?;
+    }
+    let unsigned_parties: Vec<PartyState> = definition
+        .parties
+        .iter()
+        .map(PartyState::from_definition)
+        .collect();
+    let is_fresh = contract.id.starts_with("lxc-")
+        && contract.content_hash == content_hash(&contract.id, definition)
+        && is_payload_sealed(contract)
+        && contract.state == ContractState::PendingSignatures
+        && contract.parties == unsigned_parties
+        && contract.tsa_token.is_none()
+        && contract.block_height.is_none()
+        && contract.delivery_receipts.is_empty()
+        && contract.preservation_records.is_empty();
+    if !is_fresh {
+        return Err(LexChainError::InvalidState {
+            expected: format!(
+                "unsigned contract {} whose content_hash matches its definition",
+                contract.id
+            ),
+            got: "a contract with signatures, receipts, an unsealed payload or a mismatched hash"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+pub fn check_deploy(
+    store: &dyn BlockStore,
+    contract: &LexContract,
+) -> Result<Change, LexChainError> {
+    require_fresh_contract(contract)?;
+    match store.read_lexcontract(&contract.id) {
+        Ok(existing) if existing.public_view() == contract.public_view() => {
+            Ok(Change::AlreadyApplied)
+        }
+        Ok(_) => Err(LexChainError::ContractExists(contract.id.clone())),
+        Err(_) => Ok(Change::Write),
+    }
+}
+
+pub fn apply_deploy(store: &dyn BlockStore, contract: &LexContract) -> StorageResult<()> {
+    if check_deploy(store, contract).map_err(into_storage_error)? == Change::AlreadyApplied {
+        return Ok(());
+    }
+    store.write_lexcontract(contract)
 }
 
 pub fn deploy(
     store: &LexChainStore,
     definition: ContractDefinition,
 ) -> Result<LexContract, LexChainError> {
-    if definition.parties.is_empty() {
-        return Err(LexChainError::NoParties);
-    }
-
-    let id = format!("lxc-{}", uuid::Uuid::new_v4());
-    let parties = definition
-        .parties
-        .iter()
-        .map(PartyState::from_definition)
-        .collect();
-    let hash = content_hash(&definition);
-
-    let contract = LexContract {
-        id: id.clone(),
-        definition,
-        state: ContractState::PendingSignatures,
-        parties,
-        created_at: now_secs(),
-        content_hash: hash,
-        tsa_token: None,
-        block_height: None,
-        delivery_receipts: Vec::new(),
-        preservation_records: Vec::new(),
-    };
-
-    store.save(contract.clone());
+    let contract = draft_contract(definition, now_secs())?;
+    apply_deploy(store.backend(), &contract)?;
     Ok(contract)
+}
+
+pub fn prepare_signature(
+    store: &LexChainStore,
+    contract_id: &str,
+    req: &SignRequest,
+) -> Result<SignedEnvelope, LexChainError> {
+    let mut contract = store
+        .get(contract_id)
+        .ok_or_else(|| LexChainError::NotFound(contract_id.to_string()))?;
+    let now = now_secs();
+    if contract.state == ContractState::PendingSignatures && contract.is_expired(now) {
+        contract.state = ContractState::Expired;
+        store.save(contract)?;
+        return Err(LexChainError::Expired);
+    }
+    if contract.state != ContractState::PendingSignatures {
+        return Err(LexChainError::InvalidState {
+            expected: "pending_signatures".into(),
+            got: contract.state.to_string(),
+        });
+    }
+    let party = contract
+        .party_by_did(&req.did)
+        .ok_or_else(|| LexChainError::PartyNotFound(req.did.clone()))?;
+    if party.signed {
+        return Err(LexChainError::AlreadySigned(req.did.clone()));
+    }
+    let envelope = SignedEnvelope {
+        level: party.signature_level,
+        signer: req.did.clone(),
+        content_hash: contract.content_hash.clone(),
+        signature: req.signature.clone(),
+        public_key: req.public_key.clone(),
+        signature_algorithm: crate::signature::verify::infer_algorithm_from_key(&req.public_key)
+            .unwrap_or_default(),
+        biometric_evidence: req.biometric_evidence.clone(),
+        signed_at: now,
+        secondary_signature: None,
+        secondary_public_key: None,
+        secondary_algorithm: None,
+    };
+    check_signature(store.backend(), contract_id, &envelope)?;
+    Ok(envelope)
+}
+
+pub fn check_signature(
+    store: &dyn BlockStore,
+    contract_id: &str,
+    envelope: &SignedEnvelope,
+) -> Result<Change, LexChainError> {
+    let contract = store
+        .read_lexcontract(contract_id)
+        .map_err(|_| LexChainError::NotFound(contract_id.to_string()))?;
+    let signer = &envelope.signer;
+    let party = contract
+        .party_by_did(signer)
+        .ok_or_else(|| LexChainError::PartyNotFound(signer.clone()))?;
+    if party.envelope.as_ref() == Some(envelope) {
+        return Ok(Change::AlreadyApplied);
+    }
+    if contract.state != ContractState::PendingSignatures {
+        return Err(LexChainError::InvalidState {
+            expected: "pending_signatures".into(),
+            got: contract.state.to_string(),
+        });
+    }
+    if contract.is_expired(envelope.signed_at) {
+        return Err(LexChainError::Expired);
+    }
+    if store.read_identity(signer).is_err() {
+        return Err(LexChainError::DidNotRegistered(signer.clone()));
+    }
+    if party.signed {
+        return Err(LexChainError::AlreadySigned(signer.clone()));
+    }
+    if !crate::identity::operations::key_controls_identity(store, signer, &envelope.public_key) {
+        return Err(LexChainError::SignerMismatch(signer.clone()));
+    }
+    let algorithm = crate::signature::verify::infer_algorithm_from_key(&envelope.public_key)
+        .unwrap_or_default();
+    let is_bound_to_this_contract = envelope.level == party.signature_level
+        && envelope.content_hash == contract.content_hash
+        && envelope.signature_algorithm == algorithm
+        && envelope.secondary_signature.is_none();
+    if !is_bound_to_this_contract {
+        return Err(LexChainError::SignatureError(format!(
+            "envelope of {signer} does not match contract {contract_id}: level, content hash, algorithm or extra signature differ"
+        )));
+    }
+    validate_fes_fea(
+        envelope.level,
+        algorithm,
+        &envelope.biometric_evidence,
+        &envelope.public_key,
+    )
+    .map_err(|e| LexChainError::SignatureError(e.to_string()))?;
+    envelope
+        .validate_structure()
+        .map_err(|e| LexChainError::SignatureError(e.to_string()))?;
+    if !crate::signature::verify_signature(
+        algorithm,
+        &envelope.public_key,
+        envelope.signing_payload().as_bytes(),
+        &envelope.signature,
+    ) {
+        return Err(LexChainError::SignatureError(
+            "cryptographic signature verification failed".into(),
+        ));
+    }
+    Ok(Change::Write)
+}
+
+pub fn apply_signature(
+    store: &dyn BlockStore,
+    contract_id: &str,
+    envelope: &SignedEnvelope,
+) -> StorageResult<()> {
+    if check_signature(store, contract_id, envelope).map_err(into_storage_error)?
+        == Change::AlreadyApplied
+    {
+        return Ok(());
+    }
+    let mut contract = store.read_lexcontract(contract_id)?;
+    if let Some(party) = contract.party_by_did_mut(&envelope.signer) {
+        party.signed = true;
+        party.envelope = Some(envelope.clone());
+    }
+    if contract.all_signed() {
+        contract.state = ContractState::FullySigned;
+    }
+    store.write_lexcontract(&contract)
 }
 
 pub fn sign(
@@ -135,91 +371,18 @@ pub fn sign(
     contract_id: &str,
     req: &SignRequest,
 ) -> Result<LexContract, LexChainError> {
-    let mut contract = store
+    let envelope = prepare_signature(store, contract_id, req)?;
+    apply_signature(store.backend(), contract_id, &envelope)?;
+    store
         .get(contract_id)
-        .ok_or_else(|| LexChainError::NotFound(contract_id.to_string()))?;
+        .ok_or_else(|| LexChainError::NotFound(contract_id.to_string()))
+}
 
-    if contract.state != ContractState::PendingSignatures {
-        return Err(LexChainError::InvalidState {
-            expected: "pending_signatures".into(),
-            got: contract.state.to_string(),
-        });
+fn into_storage_error(error: LexChainError) -> StorageError {
+    match error {
+        LexChainError::Storage(storage_error) => storage_error,
+        other => StorageError::Other(other.to_string()),
     }
-
-    if contract.is_expired(now_secs()) {
-        contract.state = ContractState::Expired;
-        store.save(contract);
-        return Err(LexChainError::Expired);
-    }
-
-    if store.backend().read_identity(&req.did).is_err() {
-        return Err(LexChainError::DidNotRegistered(req.did.clone()));
-    }
-
-    let party = contract
-        .party_by_did(&req.did)
-        .ok_or_else(|| LexChainError::PartyNotFound(req.did.clone()))?;
-
-    if party.signed {
-        return Err(LexChainError::AlreadySigned(req.did.clone()));
-    }
-
-    if !crate::identity::did::did_matches_pubkey(&req.did, &req.public_key) {
-        return Err(LexChainError::SignerMismatch(req.did.clone()));
-    }
-
-    let sig_level = party.signature_level;
-    let algorithm =
-        crate::signature::verify::infer_algorithm_from_key(&req.public_key).unwrap_or_default();
-
-    validate_fes_fea(
-        sig_level,
-        algorithm,
-        &req.biometric_evidence,
-        &req.public_key,
-    )
-    .map_err(|e| LexChainError::SignatureError(e.to_string()))?;
-
-    let envelope = SignedEnvelope {
-        level: sig_level,
-        signer: req.did.clone(),
-        content_hash: contract.content_hash.clone(),
-        signature: req.signature.clone(),
-        public_key: req.public_key.clone(),
-        signature_algorithm: algorithm,
-        biometric_evidence: req.biometric_evidence.clone(),
-        signed_at: now_secs(),
-        secondary_signature: None,
-        secondary_public_key: None,
-        secondary_algorithm: None,
-    };
-
-    envelope
-        .validate_structure()
-        .map_err(|e| LexChainError::SignatureError(e.to_string()))?;
-
-    let payload = envelope.signing_payload();
-    if !crate::signature::verify_signature(
-        algorithm,
-        &req.public_key,
-        payload.as_bytes(),
-        &req.signature,
-    ) {
-        return Err(LexChainError::SignatureError(
-            "cryptographic signature verification failed".into(),
-        ));
-    }
-
-    let party_mut = contract.party_by_did_mut(&req.did).unwrap();
-    party_mut.signed = true;
-    party_mut.envelope = Some(envelope);
-
-    if contract.all_signed() {
-        contract.state = ContractState::FullySigned;
-    }
-
-    store.save(contract.clone());
-    Ok(contract)
 }
 
 pub fn notarize(
@@ -253,7 +416,7 @@ pub fn notarize(
     contract.tsa_token = resp.token;
     contract.state = ContractState::Notarized;
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -298,7 +461,7 @@ pub fn archive(store: &LexChainStore, contract_id: &str) -> Result<LexContract, 
     contract.block_height = Some(height);
     contract.state = ContractState::Archived;
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -354,7 +517,7 @@ pub fn deliver(
         contract.state = ContractState::Delivered;
     }
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -390,7 +553,7 @@ pub fn acknowledge_delivery(
     receipt.received_at = Some(now);
     receipt.receipt_tsa_token = if resp.status == 0 { resp.token } else { None };
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -449,7 +612,7 @@ pub fn preserve_contract(
         reason: reason.to_string(),
     });
 
-    store.save(contract.clone());
+    store.save(contract.clone())?;
     Ok(contract)
 }
 
@@ -504,8 +667,10 @@ pub fn expire_pending(store: &LexChainStore) -> Vec<String> {
     for mut contract in store.list() {
         if contract.is_expired(now) {
             contract.state = ContractState::Expired;
-            store.save(contract.clone());
-            expired.push(contract.id);
+            match store.save(contract.clone()) {
+                Ok(()) => expired.push(contract.id),
+                Err(e) => log::error!("expire contract {}: {e}", contract.id),
+            }
         }
     }
     expired
@@ -531,8 +696,10 @@ pub fn quarantine_classical_contracts(
         });
         if all_compromised {
             contract.state = ContractState::Quarantined;
-            store.save(contract.clone());
-            quarantined.push(contract.id);
+            match store.save(contract.clone()) {
+                Ok(()) => quarantined.push(contract.id),
+                Err(e) => log::error!("quarantine contract {}: {e}", contract.id),
+            }
         }
     }
     quarantined
@@ -551,18 +718,41 @@ mod tests {
         LexChainStore::new()
     }
 
-    fn register_did(store: &LexChainStore, did: &str) {
+    fn deploy_from_template(
+        store: &LexChainStore,
+        template_name: &str,
+        role_dids: std::collections::HashMap<String, String>,
+        payload: serde_json::Value,
+    ) -> Result<LexContract, LexChainError> {
+        deploy(
+            store,
+            template_definition(store, template_name, role_dids, payload)?,
+        )
+    }
+
+    fn deploy_request(
+        store: &LexChainStore,
+        req: DeployRequest,
+    ) -> Result<LexContract, LexChainError> {
+        let contract = draft_request(store, req)?;
+        apply_deploy(store.backend(), &contract)?;
+        Ok(contract)
+    }
+
+    fn register_key(store: &LexChainStore, provider: &dyn SigningProvider) {
         store
             .backend()
             .write_identity(&IdentityRecord {
-                did: did.to_string(),
-                public_key: "deadbeef".to_string(),
+                did: did_of(provider),
+                public_key: hex::encode(provider.public_key()),
                 created_at: 0,
                 updated_at: 0,
                 status: "active".to_string(),
                 migrated_from: None,
                 signature_algorithm: None,
-                civil_anchor: None,
+                civil_anchors: Vec::new(),
+                recovery_commitment: None,
+                vault_entries: Vec::new(),
             })
             .unwrap();
     }
@@ -576,6 +766,7 @@ mod tests {
                 signature_level: SignatureLevel::Simple,
             }],
             payload: serde_json::json!({"terms": "test"}),
+            payload_commitment: None,
             require_notarization: false,
             deadline_secs: None,
             webhook_url: None,
@@ -598,6 +789,7 @@ mod tests {
                 },
             ],
             payload: serde_json::json!({"terms": "mutual agreement"}),
+            payload_commitment: None,
             require_notarization: true,
             deadline_secs: None,
             webhook_url: None,
@@ -635,7 +827,7 @@ mod tests {
     #[test]
     fn sign_rejects_key_not_bound_to_party_did() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let forged = sign_as(&contract, &key("mallory"));
@@ -644,6 +836,22 @@ mod tests {
         assert!(matches!(
             sign(&store, &contract.id, &forged),
             Err(LexChainError::SignerMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn sign_rejects_a_signature_made_for_another_contract_with_the_same_terms() {
+        let store = test_store();
+        register_key(&store, &key("alice"));
+        let signed_contract = deploy(&store, fes_definition()).unwrap();
+        let lookalike = deploy(&store, fes_definition()).unwrap();
+
+        let replayed = sign_as(&signed_contract, &key("alice"));
+        sign(&store, &signed_contract.id, &replayed).unwrap();
+
+        assert!(matches!(
+            sign(&store, &lookalike.id, &replayed),
+            Err(LexChainError::SignatureError(_))
         ));
     }
 
@@ -657,6 +865,80 @@ mod tests {
         assert!(store.get(&contract.id).is_some());
     }
 
+    fn peer_with_alice() -> crate::storage::MemoryStore {
+        let peer = crate::storage::MemoryStore::new();
+        let alice = key("alice");
+        peer.write_identity(&IdentityRecord {
+            did: did_of(&alice),
+            public_key: hex::encode(alice.public_key()),
+            created_at: 0,
+            updated_at: 0,
+            status: "active".to_string(),
+            migrated_from: None,
+            signature_algorithm: None,
+            civil_anchors: Vec::new(),
+            recovery_commitment: None,
+            vault_entries: Vec::new(),
+        })
+        .unwrap();
+        peer
+    }
+
+    #[test]
+    fn peer_replays_deploy_and_signature_into_the_same_contract() {
+        let store = test_store();
+        register_key(&store, &key("alice"));
+        let deployed = deploy(&store, fes_definition()).unwrap();
+        let envelope =
+            prepare_signature(&store, &deployed.id, &sign_as(&deployed, &key("alice"))).unwrap();
+        apply_signature(store.backend(), &deployed.id, &envelope).unwrap();
+
+        let peer = peer_with_alice();
+        apply_deploy(&peer, &deployed).unwrap();
+        apply_signature(&peer, &deployed.id, &envelope).unwrap();
+        apply_signature(&peer, &deployed.id, &envelope).unwrap();
+
+        let replicated = peer.read_lexcontract(&deployed.id).unwrap();
+        assert_eq!(replicated, store.get(&deployed.id).unwrap());
+        assert_eq!(replicated.state, ContractState::FullySigned);
+    }
+
+    #[test]
+    fn peer_refuses_a_deployed_contract_whose_hash_does_not_match_its_terms() {
+        let mut deployed = deploy(&test_store(), fes_definition()).unwrap();
+        deployed.definition.payload = serde_json::json!({"terms": "swapped after hashing"});
+        assert!(apply_deploy(&peer_with_alice(), &deployed).is_err());
+    }
+
+    #[test]
+    fn peer_refuses_a_forged_signature_in_a_block() {
+        let store = test_store();
+        register_key(&store, &key("alice"));
+        let deployed = deploy(&store, fes_definition()).unwrap();
+        let mut envelope =
+            prepare_signature(&store, &deployed.id, &sign_as(&deployed, &key("alice"))).unwrap();
+        envelope.signature = "00".repeat(64);
+
+        let peer = peer_with_alice();
+        apply_deploy(&peer, &deployed).unwrap();
+        assert!(apply_signature(&peer, &deployed.id, &envelope).is_err());
+        assert_eq!(
+            peer.read_lexcontract(&deployed.id).unwrap().state,
+            ContractState::PendingSignatures
+        );
+    }
+
+    #[test]
+    fn deploy_rejects_a_webhook_aimed_at_cloud_metadata() {
+        let store = test_store();
+        let mut def = fes_definition();
+        def.webhook_url = Some("https://169.254.169.254/latest/meta-data".into());
+        assert!(matches!(
+            deploy(&store, def),
+            Err(LexChainError::InvalidWebhook(_))
+        ));
+    }
+
     #[test]
     fn deploy_rejects_no_parties() {
         let store = test_store();
@@ -668,7 +950,7 @@ mod tests {
     #[test]
     fn sign_advances_to_fully_signed() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&contract, &key("alice"));
         let updated = sign(&store, &contract.id, &req).unwrap();
@@ -691,7 +973,7 @@ mod tests {
     #[test]
     fn sign_rejects_unknown_party() {
         let store = test_store();
-        register_did(&store, &did("unknown"));
+        register_key(&store, &key("unknown"));
         let contract = deploy(&store, fes_definition()).unwrap();
         let provider = SoftwareSigningProvider::generate();
         let mut req = sign_as(&contract, &provider);
@@ -705,7 +987,7 @@ mod tests {
     #[test]
     fn sign_rejects_after_fully_signed() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&contract, &key("alice"));
         let signed = sign(&store, &contract.id, &req).unwrap();
@@ -719,8 +1001,8 @@ mod tests {
     #[test]
     fn two_party_flow_pending_until_both_sign() {
         let store = test_store();
-        register_did(&store, &did("alice"));
-        register_did(&store, &did("bob"));
+        register_key(&store, &key("alice"));
+        register_key(&store, &key("bob"));
         let contract = deploy(&store, two_party_definition()).unwrap();
 
         let req_a = sign_as(&contract, &key("alice"));
@@ -756,7 +1038,7 @@ mod tests {
     #[test]
     fn full_lifecycle_deploy_sign_notarize_archive() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -785,7 +1067,7 @@ mod tests {
         let store = test_store();
         let provider = MlDsaSigningProvider::generate();
         let notary_did = did_of(&provider);
-        register_did(&store, &notary_did);
+        register_key(&store, &provider);
         let def = ContractDefinition {
             contract_type: "notarial_deed".into(),
             parties: vec![PartyDefinition {
@@ -794,6 +1076,7 @@ mod tests {
                 signature_level: SignatureLevel::Advanced,
             }],
             payload: serde_json::json!({"document": "deed"}),
+            payload_commitment: None,
             require_notarization: true,
             deadline_secs: None,
             webhook_url: None,
@@ -834,7 +1117,7 @@ mod tests {
     #[test]
     fn archive_writes_transaction_to_store() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -862,7 +1145,7 @@ mod tests {
     #[test]
     fn persistence_roundtrip() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
         let id = contract.id.clone();
 
@@ -880,6 +1163,7 @@ mod tests {
                 signature_level: SignatureLevel::Simple,
             }],
             payload: serde_json::json!({"terms": "expires fast"}),
+            payload_commitment: None,
             require_notarization: false,
             deadline_secs: Some(1),
             webhook_url: None,
@@ -905,7 +1189,7 @@ mod tests {
     #[test]
     fn sign_rejects_expired_contract() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let mut def = fes_definition();
         def.deadline_secs = Some(0);
         let contract = deploy(&store, def).unwrap();
@@ -941,7 +1225,7 @@ mod tests {
     #[test]
     fn signed_contract_with_deadline_does_not_expire() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let mut def = fes_definition();
         def.deadline_secs = Some(3600);
         let contract = deploy(&store, def).unwrap();
@@ -962,6 +1246,7 @@ mod tests {
                 signature_level: SignatureLevel::Simple,
             }],
             payload: serde_json::json!({}),
+            payload_commitment: None,
             require_notarization: false,
             deadline_secs: Some(259200),
             webhook_url: None,
@@ -1107,7 +1392,7 @@ mod tests {
     #[test]
     fn deliver_creates_receipt_with_tsa() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1127,7 +1412,7 @@ mod tests {
     #[test]
     fn acknowledge_delivery_timestamps_receipt() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1145,7 +1430,7 @@ mod tests {
     #[test]
     fn deliver_rejects_unknown_party() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1171,8 +1456,8 @@ mod tests {
     #[test]
     fn two_party_delivery_transitions_on_last() {
         let store = test_store();
-        register_did(&store, &did("alice"));
-        register_did(&store, &did("bob"));
+        register_key(&store, &key("alice"));
+        register_key(&store, &key("bob"));
         let contract = deploy(&store, two_party_definition()).unwrap();
 
         let req_a = sign_as(&contract, &key("alice"));
@@ -1203,7 +1488,7 @@ mod tests {
     #[test]
     fn archive_accepts_delivered_state() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1220,7 +1505,7 @@ mod tests {
     #[test]
     fn full_erds_lifecycle() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1243,7 +1528,7 @@ mod tests {
     #[test]
     fn preserve_contract_re_signs_with_pqc() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
         let contract = deploy(&store, fes_definition()).unwrap();
 
         let req = sign_as(&contract, &key("alice"));
@@ -1279,7 +1564,7 @@ mod tests {
         use crate::crypto::algorithm_policy::AlgorithmPolicy;
 
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
 
         let contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&contract, &key("alice"));
@@ -1312,7 +1597,7 @@ mod tests {
         use crate::crypto::algorithm_policy::AlgorithmPolicy;
 
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
 
         let contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&contract, &key("alice"));
@@ -1342,7 +1627,7 @@ mod tests {
         use crate::crypto::algorithm_policy::AlgorithmPolicy;
 
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
 
         let contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&contract, &key("alice"));
@@ -1361,7 +1646,7 @@ mod tests {
     #[test]
     fn quarantine_classical_only_contracts() {
         let store = test_store();
-        register_did(&store, &did("alice"));
+        register_key(&store, &key("alice"));
 
         let ed_contract = deploy(&store, fes_definition()).unwrap();
         let req = sign_as(&ed_contract, &key("alice"));
@@ -1369,7 +1654,7 @@ mod tests {
 
         let pqc_signer = MlDsaSigningProvider::generate();
         let pqc_did = did_of(&pqc_signer);
-        register_did(&store, &pqc_did);
+        register_key(&store, &pqc_signer);
         let pqc_def = ContractDefinition {
             contract_type: "nda".into(),
             parties: vec![PartyDefinition {
@@ -1378,6 +1663,7 @@ mod tests {
                 signature_level: SignatureLevel::Simple,
             }],
             payload: serde_json::json!({"scope": "pqc"}),
+            payload_commitment: None,
             require_notarization: false,
             deadline_secs: None,
             webhook_url: None,

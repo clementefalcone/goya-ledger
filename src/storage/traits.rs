@@ -99,10 +99,77 @@ pub enum TxPayload {
     RegisterIdentity {
         record: IdentityRecord,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        civil_anchor: Option<String>,
+        owner_signature: Option<String>,
+    },
+    RevokeIdentity {
+        did: String,
+        revoked_at: u64,
+        owner_signature: String,
+    },
+    RotateIdentity {
+        did: String,
+        new_public_key: String,
+        recovery_public_key: String,
+        new_recovery_commitment: String,
+        rotated_at: u64,
+        recovery_signature: String,
+        new_key_signature: String,
+    },
+    AddVaultEntry {
+        did: String,
+        entry: VaultEntry,
+        owner_signature: String,
+    },
+    RevokeVaultEntry {
+        did: String,
+        entry_id: String,
+        revoked_at: u64,
+        owner_signature: String,
+    },
+    CommitRecoveryKey {
+        did: String,
+        recovery_commitment: String,
+        committed_at: u64,
+        owner_signature: String,
+    },
+    BindCivilAnchor {
+        did: String,
+        anchor: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaces: Option<String>,
+        bound_at: u64,
+        issuer_did: String,
+        issuer_signature: String,
+        owner_signature: String,
     },
     Notarize {
         entry: Box<NotarizationEntry>,
+    },
+    TransferOwnership {
+        transfer: Box<OwnershipTransfer>,
+    },
+    DeployContract {
+        contract: Box<crate::lexchain::types::LexContract>,
+    },
+    SignContract {
+        contract_id: String,
+        envelope: Box<crate::signature::SignedEnvelope>,
+    },
+    IssueCredential {
+        credential: Box<Credential>,
+        issuer_public_key: String,
+    },
+    RevokeCredential {
+        id: String,
+        revoked_at: u64,
+        issuer_public_key: String,
+        signature: String,
+    },
+    RegisterIssuerCredentialKey {
+        registration: Box<IssuerCredentialKey>,
+    },
+    PublishIssuerStatusList {
+        status_list: Box<IssuerStatusList>,
     },
     SignedTransfer {
         nonce: u64,
@@ -146,6 +213,12 @@ pub struct Transaction {
     pub payload: Option<TxPayload>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CivilAnchor {
+    pub issuer_did: String,
+    pub anchor: String,
+}
+
 /// Identity record structure
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IdentityRecord {
@@ -159,12 +232,35 @@ pub struct IdentityRecord {
     pub migrated_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature_algorithm: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub civil_anchors: Vec<CivilAnchor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub civil_anchor: Option<String>,
+    pub recovery_commitment: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vault_entries: Vec<VaultEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultEntryKind {
+    Device,
+    Recovery,
+    Reader,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VaultEntry {
+    pub entry_id: String,
+    pub kind: VaultEntryKind,
+    pub label: String,
+    pub sealed_key: String,
+    pub added_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<u64>,
 }
 
 /// Credential structure
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Credential {
     pub id: String,
     pub issuer_did: String,
@@ -187,6 +283,31 @@ pub struct Credential {
 
 fn default_credential_status() -> String {
     "active".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct P256PublicJwk {
+    pub kty: String,
+    pub crv: String,
+    pub x: String,
+    pub y: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssuerCredentialKey {
+    pub did: String,
+    pub jwk: P256PublicJwk,
+    pub registered_at: u64,
+    pub public_key: String,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssuerStatusList {
+    pub did: String,
+    pub list_id: String,
+    pub jwt: String,
 }
 
 impl Credential {
@@ -365,7 +486,7 @@ pub struct NotarizationEntry {
 ///
 /// Current owner = last `to_did` in the chain, or `signer` of the original
 /// notarization if no transfers exist.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OwnershipTransfer {
     /// Content hash of the notarized document.
     pub content_hash: String,
@@ -606,6 +727,14 @@ pub trait BlockStore: Send + Sync {
 
     /// List all credentials
     fn list_credentials(&self) -> StorageResult<Vec<Credential>>;
+
+    fn write_issuer_credential_key(&self, registration: &IssuerCredentialKey) -> StorageResult<()>;
+
+    fn read_issuer_credential_key(&self, did: &str) -> StorageResult<IssuerCredentialKey>;
+
+    fn write_issuer_status_list(&self, status_list: &IssuerStatusList) -> StorageResult<()>;
+
+    fn read_issuer_status_list(&self, did: &str, list_id: &str) -> StorageResult<IssuerStatusList>;
 
     /// Batch write operations (atomic)
     fn write_batch(&self, blocks: &[Block], txs: &[Transaction]) -> StorageResult<()>;
@@ -984,19 +1113,19 @@ pub trait BlockStore: Send + Sync {
     /// balance indexes should override for O(1) lookups.
     fn calculate_balance(&self, address: &str) -> StorageResult<u64> {
         let latest = self.get_latest_height().unwrap_or(0);
-        let mut balance: u64 = 0;
+        let mut balance: i128 = 0;
         for h in 0..=latest {
             let txs = self.transactions_by_block_height(h).unwrap_or_default();
             for tx in &txs {
                 if tx.output_recipient == address {
-                    balance = balance.saturating_add(tx.amount);
+                    balance += i128::from(tx.amount);
                 }
                 if tx.input_did == address {
-                    balance = balance.saturating_sub(tx.amount);
+                    balance -= i128::from(tx.amount);
                 }
             }
         }
-        Ok(balance)
+        Ok(u64::try_from(balance.max(0)).unwrap_or(u64::MAX))
     }
 
     /// Return all transactions where the given address is sender or recipient.
@@ -1132,6 +1261,18 @@ impl<T: BlockStore> BlockStore for Arc<T> {
     fn list_credentials(&self) -> StorageResult<Vec<Credential>> {
         (**self).list_credentials()
     }
+    fn write_issuer_credential_key(&self, registration: &IssuerCredentialKey) -> StorageResult<()> {
+        (**self).write_issuer_credential_key(registration)
+    }
+    fn read_issuer_credential_key(&self, did: &str) -> StorageResult<IssuerCredentialKey> {
+        (**self).read_issuer_credential_key(did)
+    }
+    fn write_issuer_status_list(&self, status_list: &IssuerStatusList) -> StorageResult<()> {
+        (**self).write_issuer_status_list(status_list)
+    }
+    fn read_issuer_status_list(&self, did: &str, list_id: &str) -> StorageResult<IssuerStatusList> {
+        (**self).read_issuer_status_list(did, list_id)
+    }
     fn write_batch(&self, blocks: &[Block], txs: &[Transaction]) -> StorageResult<()> {
         (**self).write_batch(blocks, txs)
     }
@@ -1245,6 +1386,34 @@ mod tests {
     use crate::storage::MemoryStore;
 
     use super::*;
+
+    #[test]
+    fn balance_ignores_the_order_of_transactions_within_a_block() {
+        let store = MemoryStore::new();
+        let movement = |id: String, from: &str, to: &str| Transaction {
+            id,
+            block_height: 0,
+            timestamp: 1_000,
+            input_did: from.to_string(),
+            output_recipient: to.to_string(),
+            amount: 30,
+            state: "confirmed".to_string(),
+            fee: 0,
+            payload: None,
+        };
+        let vaults: Vec<String> = (0..20).map(|i| format!("savings:lock-{i}")).collect();
+        for vault in &vaults {
+            store
+                .write_transaction(&movement(format!("{vault}-in"), "did:goya:alice", vault))
+                .unwrap();
+            store
+                .write_transaction(&movement(format!("{vault}-out"), vault, "did:goya:alice"))
+                .unwrap();
+        }
+        for vault in &vaults {
+            assert_eq!(store.calculate_balance(vault).unwrap(), 0, "{vault}");
+        }
+    }
 
     fn sample_block(height: u64) -> Block {
         Block {
@@ -1397,7 +1566,12 @@ mod tests {
             status: "active".into(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: Some("cafebabe".into()),
+            civil_anchors: vec![CivilAnchor {
+                issuer_did: "did:goya:issuer".into(),
+                anchor: "cafebabe".into(),
+            }],
+            recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         let tx = Transaction {
             id: "tx-id-1".into(),
@@ -1410,7 +1584,7 @@ mod tests {
             fee: 0,
             payload: Some(TxPayload::RegisterIdentity {
                 record: record.clone(),
-                civil_anchor: Some("cafebabe".into()),
+                owner_signature: Some("cafebabe".into()),
             }),
         };
         let json = serde_json::to_string(&tx).unwrap();
@@ -1418,10 +1592,10 @@ mod tests {
         match decoded.payload.unwrap() {
             TxPayload::RegisterIdentity {
                 record: r,
-                civil_anchor,
+                owner_signature,
             } => {
                 assert_eq!(r.did, record.did);
-                assert_eq!(civil_anchor, Some("cafebabe".into()));
+                assert_eq!(owner_signature, Some("cafebabe".into()));
             }
             _ => panic!("wrong payload variant"),
         }

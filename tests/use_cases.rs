@@ -9,17 +9,17 @@
 //! Each test exercises a complete user flow end-to-end via the HTTP API.
 
 use actix_web::{test, web, App};
-use rust_bc::api::handlers::{credentials, governance, notarize};
+use rust_bc::api::handlers::{governance, notarize};
 use rust_bc::app_state::AppState;
-use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider, SoftwareSigningProvider};
+use rust_bc::identity::signing::{MlDsaSigningProvider, SigningProvider};
 use std::sync::Arc;
 
 fn app_state() -> web::Data<AppState> {
-    web::Data::new(AppState::test_default())
+    web::Data::new(AppState::test_with_block_producer())
 }
 
 fn app_state_with_governance() -> web::Data<AppState> {
-    let mut state = AppState::test_default();
+    let mut state = AppState::test_with_block_producer();
     state.proposal_store = Some(Arc::new(
         rust_bc::governance::proposals::ProposalStore::new(),
     ));
@@ -28,13 +28,6 @@ fn app_state_with_governance() -> web::Data<AppState> {
         rust_bc::governance::params::ParamRegistry::with_defaults(),
     ));
     web::Data::new(state)
-}
-
-fn ed25519_identity() -> (String, String, SoftwareSigningProvider) {
-    let provider = SoftwareSigningProvider::generate();
-    let pk_hex = hex::encode(provider.public_key());
-    let did = rust_bc::identity::did::did_from_pubkey_hex(&pk_hex);
-    (did, pk_hex, provider)
 }
 
 fn mldsa65_identity() -> (String, String, MlDsaSigningProvider) {
@@ -67,7 +60,7 @@ async fn uc_notarize_document_fes_and_verify() {
     )
     .await;
 
-    let (did, pk, provider) = ed25519_identity();
+    let (did, pk, provider) = mldsa65_identity();
     let hash = sha256_hex(b"Contrato de arriendo - Av. Providencia 1234, Santiago");
     let payload = format!("notarize:{did}:{hash}");
     let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
@@ -79,6 +72,7 @@ async fn uc_notarize_document_fes_and_verify() {
             "content_hash": hash,
             "signer": did,
             "public_key": pk,
+            "signature_algorithm": "MlDsa65",
             "signature": sig,
         }))
         .to_request();
@@ -132,7 +126,7 @@ async fn uc_firma_electronica_simple_fes() {
     )
     .await;
 
-    let (did, pk, provider) = ed25519_identity();
+    let (did, pk, provider) = mldsa65_identity();
     let hash = sha256_hex(b"Declaracion jurada - RUT 12.345.678-9");
     let payload = format!("notarize:{did}:{hash}");
     let sig = hex::encode(provider.sign(payload.as_bytes()).unwrap());
@@ -145,14 +139,14 @@ async fn uc_firma_electronica_simple_fes() {
             "public_key": pk,
             "signature": sig,
             "signature_level": "simple",
-            "signature_algorithm": "Ed25519",
+            "signature_algorithm": "MlDsa65",
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 201);
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["data"]["signature_level"], "simple");
-    assert_eq!(body["data"]["signature_algorithm"], "Ed25519");
+    assert_eq!(body["data"]["signature_algorithm"], "MlDsa65");
 
     // Verify persisted
     let req = test::TestRequest::get()
@@ -325,104 +319,6 @@ async fn uc_governance_proposal_lifecycle() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 4. CREDENTIALS — Issue, verify, revoke
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[actix_web::test]
-async fn uc_credential_lifecycle() {
-    let state = app_state();
-    let app = test::init_service(
-        App::new().app_data(state.clone()).service(
-            web::scope("/api/v1")
-                .service(credentials::issue_credential)
-                .service(credentials::get_credential)
-                .service(credentials::verify_credential)
-                .service(credentials::revoke_credential),
-        ),
-    )
-    .await;
-
-    // Pre-requisite: register issuer identity
-    let (issuer_did, issuer_pk, _) = ed25519_identity();
-    {
-        let store_map = state.store.read().unwrap();
-        let store = store_map.get("default").unwrap();
-        store
-            .write_identity(&rust_bc::storage::traits::IdentityRecord {
-                did: issuer_did.clone(),
-                public_key: issuer_pk.clone(),
-                created_at: 1700000000,
-                updated_at: 1700000000,
-                status: "active".to_string(),
-                migrated_from: None,
-                signature_algorithm: None,
-                civil_anchor: None,
-            })
-            .unwrap();
-    }
-
-    // Step 1: Issue credential
-    let req = test::TestRequest::post()
-        .uri("/api/v1/credentials/issue")
-        .set_json(serde_json::json!({
-            "issuer_did": issuer_did,
-            "subject_did": "did:goya:estudiante_uchile_42",
-            "claims": {
-                "degree": "Ingenieria Civil Informatica",
-                "university": "Universidad de Chile",
-                "graduation_year": 2025,
-            },
-        }))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 201, "credential should be issued");
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    let cred_id = body["data"]["credential_id"].as_str().unwrap().to_string();
-
-    // Step 2: Get credential
-    let req = test::TestRequest::get()
-        .uri(&format!("/api/v1/credentials/{cred_id}"))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["data"]["issuer_did"], issuer_did);
-
-    // Step 3: Verify credential — should be valid
-    let req = test::TestRequest::post()
-        .uri(&format!("/api/v1/credentials/{cred_id}/verify"))
-        .set_json(serde_json::json!({}))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["data"]["valid"], true);
-
-    // Step 4: Revoke
-    let req = test::TestRequest::post()
-        .uri(&format!("/api/v1/credentials/{cred_id}/revoke"))
-        .set_json(serde_json::json!({"reason": "degree rescinded"}))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["data"]["revoked"], true);
-
-    // Step 5: Verify again — should be invalid
-    let req = test::TestRequest::post()
-        .uri(&format!("/api/v1/credentials/{cred_id}/verify"))
-        .set_json(serde_json::json!({}))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(
-        body["data"]["valid"], false,
-        "revoked credential must be invalid"
-    );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // 5. OWNERSHIP TRANSFER — Notarize then transfer with FES
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -441,7 +337,7 @@ async fn uc_document_ownership_transfer() {
     .await;
 
     // Alice notarizes
-    let (alice_did, alice_pk, alice_provider) = ed25519_identity();
+    let (alice_did, alice_pk, alice_provider) = mldsa65_identity();
     let hash = sha256_hex(b"Titulo de propiedad - Lote 7, Parcela 12, Rancagua");
     let payload = format!("notarize:{alice_did}:{hash}");
     let sig = hex::encode(alice_provider.sign(payload.as_bytes()).unwrap());
@@ -452,14 +348,15 @@ async fn uc_document_ownership_transfer() {
             "content_hash": hash,
             "signer": alice_did,
             "public_key": alice_pk,
+            "signature_algorithm": "MlDsa65",
             "signature": sig,
         }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 201);
 
     // Alice transfers to Bob
-    let (bob_did, _, _) = ed25519_identity();
-    let transfer_payload = format!("transfer_doc:{hash}:{alice_did}:{bob_did}");
+    let (bob_did, _, _) = mldsa65_identity();
+    let transfer_payload = format!("transfer_doc:{hash}:0:{alice_did}:{bob_did}");
     let transfer_sig = hex::encode(alice_provider.sign(transfer_payload.as_bytes()).unwrap());
 
     let req = test::TestRequest::post()
@@ -468,6 +365,7 @@ async fn uc_document_ownership_transfer() {
             "from_did": alice_did,
             "to_did": bob_did,
             "public_key": alice_pk,
+            "signature_algorithm": "MlDsa65",
             "signature": transfer_sig,
         }))
         .to_request();

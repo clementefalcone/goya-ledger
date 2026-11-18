@@ -52,12 +52,13 @@ Costs:
 
 - [x] OID4VCI v1 (62/62 conformance assertions)
 - [x] SD-JWT VC format (vc+sd-jwt, ES256)
-- [x] mdoc format (mso_mdoc, ISO 18013-5)
+- [ ] mdoc format (mso_mdoc, ISO 18013-5): not advertised until issuer delivery verifies it
 - [x] Nonce endpoint (OID4VCI 1.0 Final §8)
-- [x] PAR + PKCE S256 (RFC 9126 + RFC 7636)
+- [x] Deferred credential endpoint; credentials are signed by the offering issuer, not the node
+- [x] Issuer ES256 key registration (signed by the issuer DID, replicated on chain) and delivery endpoint
+- [ ] Issuer-hosted status lists
+- [x] Pre-authorized code grant only; each offer is signed by the issuer DID (authorization code, PAR and PKCE removed)
 - [x] OID4VP with DCQL (OID4VP 1.0 Final)
-- [x] Status list endpoint
-- [x] JWKS with matching kid
 - [x] Offer-by-reference (GET /credential_offer)
 - [x] Real wallet interop (HopaeEUDIWallet iOS)
 - [ ] Access certificate from EU Trusted List CA

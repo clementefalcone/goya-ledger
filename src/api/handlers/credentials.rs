@@ -2,250 +2,152 @@ use crate::api::errors::{ApiError, ApiResponse, ApiResult};
 use crate::api::handlers::channels::{
     channel_id_from_req, enforce_channel_membership, get_channel_store,
 };
-use crate::api::models::*;
+use crate::api::handlers::identity::{commit_ledger_op, identity_op_error};
 use crate::app_state::AppState;
+use crate::identity::credential_ops::{self, RevokeRequest};
+use crate::identity::operations::Change;
+use crate::storage::traits::{Credential, TxPayload};
 use actix_web::{get, post, web, HttpRequest, HttpResponse};
-use chrono::Utc;
 
-/// POST /credentials/issue - Issue a credential and persist to store.
-#[post("/credentials/issue")]
-async fn issue_credential(
-    state: web::Data<AppState>,
-    body: web::Json<IssueCredentialRequest>,
-    req: HttpRequest,
-) -> ApiResult<HttpResponse> {
-    let trace_id = uuid::Uuid::new_v4().to_string();
-    let credential_id = uuid::Uuid::new_v4().to_string();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+#[derive(Debug, serde::Deserialize)]
+pub struct IssueCredentialRequest {
+    #[serde(flatten)]
+    pub credential: Credential,
+    pub issuer_public_key: String,
+}
 
-    // Validate issuer DID exists
-    let _channel = channel_id_from_req(&req);
-    let store = get_channel_store(&state, _channel)?;
-    if store.read_identity(&body.issuer_did).is_err() {
-        return Err(ApiError::ValidationError {
-            field: "issuer_did".to_string(),
-            reason: format!(
-                "issuer DID '{}' not found — register identity before issuing credentials",
-                body.issuer_did
-            ),
-        });
-    }
+#[derive(Debug, serde::Deserialize)]
+pub struct RevokeCredentialRequest {
+    pub revoked_at: u64,
+    pub issuer_public_key: String,
+    pub signature: String,
+}
 
-    let (commitment, salt) = state.private_claims.store(&credential_id, &body.claims);
-
-    let record = crate::storage::traits::Credential {
-        id: credential_id.clone(),
-        issuer_did: body.issuer_did.clone(),
-        subject_did: body.subject_did.clone(),
-        cred_type: "VerifiableCredential".to_string(),
-        issued_at: now,
-        expires_at: body.expires_at.map(|dt| dt.timestamp() as u64).unwrap_or(0),
-        revoked_at: None,
-        claims: serde_json::json!({}),
-        signature: String::new(),
-        status: "active".to_string(),
-        claims_commitment: Some(commitment),
-        claims_salt: Some(salt),
-    };
-    store
-        .write_credential(&record)
-        .map_err(|e| ApiError::StorageError {
-            reason: e.to_string(),
-        })?;
-
+fn emit_credential_audit(
+    state: &AppState,
+    req: &HttpRequest,
+    action: crate::audit::AuditAction,
+    id: &str,
+) {
     crate::audit::emit_if_present(
         &state.audit_store,
-        crate::audit::AuditAction::CredentialStored,
-        req.headers()
-            .get("X-Org-Id")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("unknown"),
-        Some(format!("credential_id={credential_id}")),
-    );
-
-    let response = IssueCredentialResponse {
-        credential_id,
-        issuer_did: body.issuer_did.clone(),
-        subject_did: body.subject_did.clone(),
-        issued_at: Utc::now(),
-        proof: ProofResponse {
-            verification_method: format!("{}#key-0", body.issuer_did),
-            signature_value: String::new(),
-            created: Utc::now(),
-        },
-    };
-    Ok(HttpResponse::Created().json(ApiResponse::success(response, trace_id)))
-}
-
-/// GET /credentials/{id} - Fetch credential from store.
-#[get("/credentials/{id}")]
-async fn get_credential(
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-    req: HttpRequest,
-) -> ApiResult<HttpResponse> {
-    let id = path.into_inner();
-    let trace_id = uuid::Uuid::new_v4().to_string();
-    let _channel = channel_id_from_req(&req);
-    let store = get_channel_store(&state, _channel)?;
-
-    let cred = store.read_credential(&id).map_err(|_| ApiError::NotFound {
-        resource: format!("credential {id}"),
-    })?;
-
-    let claims = state
-        .private_claims
-        .retrieve(&cred.id)
-        .unwrap_or(cred.claims);
-
-    let response = CredentialResponse {
-        id: cred.id,
-        issuer_did: cred.issuer_did,
-        subject_did: cred.subject_did,
-        claims,
-        issued_at: chrono::DateTime::from_timestamp(cred.issued_at as i64, 0)
-            .unwrap_or_else(Utc::now),
-        expires_at: if cred.expires_at > 0 {
-            chrono::DateTime::from_timestamp(cred.expires_at as i64, 0)
-        } else {
-            None
-        },
-        proof: ProofResponse {
-            verification_method: String::new(),
-            signature_value: cred.signature,
-            created: Utc::now(),
-        },
-    };
-    Ok(HttpResponse::Ok().json(ApiResponse::success(response, trace_id)))
-}
-
-/// POST /credentials/{id}/verify - Verify credential (check status + expiry).
-#[post("/credentials/{id}/verify")]
-async fn verify_credential(
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-    _body: web::Json<VerifyCredentialRequest>,
-    req: HttpRequest,
-) -> ApiResult<HttpResponse> {
-    let id = path.into_inner();
-    let trace_id = uuid::Uuid::new_v4().to_string();
-    let _channel = channel_id_from_req(&req);
-    let store = get_channel_store(&state, _channel)?;
-
-    let cred = store.read_credential(&id).map_err(|_| ApiError::NotFound {
-        resource: format!("credential {id}"),
-    })?;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let valid = cred.status == "active"
-        && cred.revoked_at.is_none()
-        && (cred.expires_at == 0 || now <= cred.expires_at);
-
-    let response = VerifyCredentialResponse {
-        valid,
-        issuer_did: cred.issuer_did,
-        subject_did: cred.subject_did,
-        verified_at: Utc::now(),
-    };
-    Ok(HttpResponse::Ok().json(ApiResponse::success(response, trace_id)))
-}
-
-/// POST /credentials/{id}/revoke - Revoke credential in store.
-#[post("/credentials/{id}/revoke")]
-async fn revoke_credential(
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-    _body: web::Json<RevokeCredentialRequest>,
-    req: HttpRequest,
-) -> ApiResult<HttpResponse> {
-    let id = path.into_inner();
-    let trace_id = uuid::Uuid::new_v4().to_string();
-    let _channel = channel_id_from_req(&req);
-    let store = get_channel_store(&state, _channel)?;
-
-    let mut cred = store.read_credential(&id).map_err(|_| ApiError::NotFound {
-        resource: format!("credential {id}"),
-    })?;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    cred.revoked_at = Some(now);
-    cred.status = "revoked".to_string();
-    store
-        .write_credential(&cred)
-        .map_err(|e| ApiError::StorageError {
-            reason: e.to_string(),
-        })?;
-
-    crate::audit::emit_if_present(
-        &state.audit_store,
-        crate::audit::AuditAction::CredentialRevoked,
+        action,
         req.headers()
             .get("X-Org-Id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("unknown"),
         Some(format!("credential_id={id}")),
     );
-
-    let response = RevokeCredentialResponse {
-        credential_id: id,
-        revoked: true,
-        revoked_at: Utc::now(),
-    };
-    Ok(HttpResponse::Ok().json(ApiResponse::success(response, trace_id)))
 }
 
-// ── Store-backed credential endpoints ────────────────────────────────────────
-
-/// POST /api/v1/store/credentials — persiste un Credential en el store.
+/// POST /api/v1/store/credentials — records a credential signed by its issuer.
 #[post("/store/credentials")]
 pub async fn store_write_credential(
     state: web::Data<AppState>,
-    body: web::Json<crate::storage::traits::Credential>,
+    body: web::Json<IssueCredentialRequest>,
     req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
-    super::validation::validate_store_credential(&body)?;
+    let IssueCredentialRequest {
+        credential,
+        issuer_public_key,
+    } = body.into_inner();
+    super::validation::validate_store_credential(&credential)?;
+    super::validation::require_post_quantum_key("issuer_public_key", &issuer_public_key)?;
     let trace_id = uuid::Uuid::new_v4().to_string();
-    let _channel = channel_id_from_req(&req);
-    enforce_channel_membership(&state, _channel, &req)?;
-    let store = get_channel_store(&state, _channel)?;
+    let channel = channel_id_from_req(&req);
+    enforce_channel_membership(&state, channel, &req)?;
+    let store = get_channel_store(&state, channel)?;
 
-    // Validate issuer DID exists
-    if store.read_identity(&body.issuer_did).is_err() {
+    if store.read_identity(&credential.issuer_did).is_err() {
         return Err(ApiError::ValidationError {
             field: "issuer_did".to_string(),
             reason: format!(
                 "issuer DID '{}' not found — register identity before issuing credentials",
-                body.issuer_did
+                credential.issuer_did
             ),
         });
     }
-
-    store
-        .write_credential(&body)
-        .map_err(|e| ApiError::StorageError {
-            reason: e.to_string(),
-        })?;
-    crate::audit::emit_if_present(
-        &state.audit_store,
+    let change = credential_ops::check_issue(store.as_ref(), &credential, &issuer_public_key)
+        .map_err(identity_op_error)?;
+    if change == Change::AlreadyApplied {
+        return Err(ApiError::Conflict {
+            reason: format!("credential {} already recorded", credential.id),
+        });
+    }
+    commit_ledger_op(
+        &state,
+        store.as_ref(),
+        channel,
+        &credential.issuer_did,
+        TxPayload::IssueCredential {
+            credential: Box::new(credential.clone()),
+            issuer_public_key,
+        },
+    )
+    .await?;
+    emit_credential_audit(
+        &state,
+        &req,
         crate::audit::AuditAction::CredentialStored,
-        req.headers()
-            .get("X-Org-Id")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("unknown"),
-        Some(format!("credential_id={}", body.id)),
+        &credential.id,
     );
-    Ok(HttpResponse::Created().json(ApiResponse::success(body.into_inner(), trace_id)))
+    Ok(HttpResponse::Created().json(ApiResponse::success(credential, trace_id)))
+}
+
+/// POST /api/v1/store/credentials/{cred_id}/revoke — revokes a credential with its issuer's signature.
+#[post("/store/credentials/{cred_id}/revoke")]
+pub async fn store_revoke_credential(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<RevokeCredentialRequest>,
+    req: HttpRequest,
+) -> ApiResult<HttpResponse> {
+    let id = path.into_inner();
+    let trace_id = uuid::Uuid::new_v4().to_string();
+    let channel = channel_id_from_req(&req);
+    enforce_channel_membership(&state, channel, &req)?;
+    let store = get_channel_store(&state, channel)?;
+    let request = RevokeRequest {
+        id: &id,
+        revoked_at: body.revoked_at,
+        issuer_public_key: &body.issuer_public_key,
+        signature: &body.signature,
+    };
+    let change =
+        credential_ops::check_revoke(store.as_ref(), &request).map_err(identity_op_error)?;
+    if change == Change::Write {
+        let issuer_did = store
+            .read_credential(&id)
+            .map_err(|e| ApiError::StorageError {
+                reason: format!("credential {id} unreadable: {e}"),
+            })?
+            .issuer_did;
+        commit_ledger_op(
+            &state,
+            store.as_ref(),
+            channel,
+            &issuer_did,
+            TxPayload::RevokeCredential {
+                id: id.clone(),
+                revoked_at: body.revoked_at,
+                issuer_public_key: body.issuer_public_key.clone(),
+                signature: body.signature.clone(),
+            },
+        )
+        .await?;
+        emit_credential_audit(
+            &state,
+            &req,
+            crate::audit::AuditAction::CredentialRevoked,
+            &id,
+        );
+    }
+    let credential = store
+        .read_credential(&id)
+        .map_err(|e| ApiError::StorageError {
+            reason: format!("credential {id} unreadable: {e}"),
+        })?;
+    Ok(HttpResponse::Ok().json(ApiResponse::success(credential, trace_id)))
 }
 
 /// GET /api/v1/store/credentials/{cred_id} — lee un Credential del store.
@@ -337,145 +239,18 @@ pub async fn store_list_credentials(
     )))
 }
 
-#[derive(serde::Serialize)]
-struct ErasureResponse {
-    credential_id: String,
-    claims_erased: bool,
-    commitment_preserved: bool,
-}
-
-#[post("/credentials/{id}/erase-claims")]
-pub async fn erase_claims(
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-    req: HttpRequest,
-) -> ApiResult<HttpResponse> {
-    let id = path.into_inner();
-    let trace_id = uuid::Uuid::new_v4().to_string();
-    let _channel = channel_id_from_req(&req);
-    let store = get_channel_store(&state, _channel)?;
-
-    store.read_credential(&id).map_err(|_| ApiError::NotFound {
-        resource: format!("credential {id}"),
-    })?;
-
-    let erased = state.private_claims.erase(&id);
-
-    crate::audit::emit_if_present(
-        &state.audit_store,
-        crate::audit::AuditAction::CredentialRevoked,
-        req.headers()
-            .get("X-Org-Id")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("unknown"),
-        Some(format!("gdpr_erasure credential_id={id}")),
-    );
-
-    Ok(HttpResponse::Ok().json(ApiResponse::success(
-        ErasureResponse {
-            credential_id: id,
-            claims_erased: erased,
-            commitment_preserved: true,
-        },
-        trace_id,
-    )))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use actix_web::{test, App};
 
     fn make_app_data() -> web::Data<AppState> {
-        web::Data::new(AppState::test_default())
+        web::Data::new(AppState::test_with_block_producer())
     }
 
     #[actix_web::test]
     async fn store_credential_handlers_are_public() {
         let _ = (store_write_credential, store_get_credential);
-    }
-
-    // ── get_credential: not found ───────────────────────────────────
-
-    #[actix_web::test]
-    async fn get_credential_returns_404() {
-        let state = make_app_data();
-        let app = test::init_service(
-            App::new()
-                .app_data(state)
-                .service(web::scope("/api/v1").service(get_credential)),
-        )
-        .await;
-
-        let req = test::TestRequest::get()
-            .uri("/api/v1/credentials/nonexistent")
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    // ── verify_credential: not found ────────────────────────────────
-
-    #[actix_web::test]
-    async fn verify_credential_returns_404() {
-        let state = make_app_data();
-        let app = test::init_service(
-            App::new()
-                .app_data(state)
-                .service(web::scope("/api/v1").service(verify_credential)),
-        )
-        .await;
-
-        let req = test::TestRequest::post()
-            .uri("/api/v1/credentials/ghost/verify")
-            .set_json(serde_json::json!({}))
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    // ── revoke_credential: not found ────────────────────────────────
-
-    #[actix_web::test]
-    async fn revoke_credential_returns_404() {
-        let state = make_app_data();
-        let app = test::init_service(
-            App::new()
-                .app_data(state)
-                .service(web::scope("/api/v1").service(revoke_credential)),
-        )
-        .await;
-
-        let req = test::TestRequest::post()
-            .uri("/api/v1/credentials/ghost/revoke")
-            .set_json(serde_json::json!({"reason": "compromised"}))
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 404);
-    }
-
-    // ── issue_credential: issuer not found ──────────────────────────
-
-    #[actix_web::test]
-    async fn issue_rejects_unknown_issuer() {
-        let state = make_app_data();
-        let app = test::init_service(
-            App::new()
-                .app_data(state)
-                .service(web::scope("/api/v1").service(issue_credential)),
-        )
-        .await;
-
-        let req = test::TestRequest::post()
-            .uri("/api/v1/credentials/issue")
-            .set_json(serde_json::json!({
-                "issuer_did": "did:goya:unknown",
-                "subject_did": "did:goya:subject",
-                "claims": { "name": "Alice" },
-            }))
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        assert_eq!(resp.status(), 400);
     }
 
     // ── store_get_credential: not found ─────────────────────────────
@@ -495,5 +270,157 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 404);
+    }
+
+    use crate::identity::signing::{MlDsaSigningProvider, SigningProvider};
+
+    struct Issuer {
+        key: MlDsaSigningProvider,
+        public_key: String,
+        did: String,
+    }
+
+    fn registered_issuer(state: &AppState) -> Issuer {
+        let key = MlDsaSigningProvider::generate();
+        let public_key = hex::encode(key.public_key());
+        let did = crate::identity::did::did_from_pubkey_hex(&public_key);
+        get_channel_store(state, "default")
+            .unwrap()
+            .write_identity(&crate::storage::traits::IdentityRecord {
+                did: did.clone(),
+                public_key: public_key.clone(),
+                created_at: 1,
+                updated_at: 1,
+                status: "active".to_string(),
+                migrated_from: None,
+                signature_algorithm: None,
+                civil_anchors: Vec::new(),
+                recovery_commitment: None,
+                vault_entries: Vec::new(),
+            })
+            .unwrap();
+        Issuer {
+            key,
+            public_key,
+            did,
+        }
+    }
+
+    fn sign(issuer: &Issuer, message: &str) -> String {
+        hex::encode(issuer.key.sign(message.as_bytes()).unwrap())
+    }
+
+    fn issue_body(issuer: &Issuer) -> serde_json::Value {
+        let mut credential = Credential {
+            id: "cred-1".to_string(),
+            issuer_did: issuer.did.clone(),
+            subject_did: "did:goya:subject".to_string(),
+            cred_type: "consent".to_string(),
+            issued_at: 100,
+            expires_at: 0,
+            revoked_at: None,
+            claims: serde_json::Value::Null,
+            signature: String::new(),
+            status: "active".to_string(),
+            claims_commitment: Some("ab".repeat(32)),
+            claims_salt: None,
+        };
+        credential.signature = sign(issuer, &credential_ops::issue_message(&credential));
+        let mut body = serde_json::to_value(credential).unwrap();
+        body["issuer_public_key"] = issuer.public_key.clone().into();
+        body
+    }
+
+    macro_rules! post {
+        ($app:expr, $uri:expr, $body:expr) => {{
+            let req = test::TestRequest::post()
+                .uri($uri)
+                .set_json($body)
+                .to_request();
+            test::call_service($app, req).await.status().as_u16()
+        }};
+    }
+
+    #[actix_web::test]
+    async fn issuer_signed_credential_is_recorded_and_mined_into_the_chain() {
+        let state = make_app_data();
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(web::scope("/api/v1").service(store_write_credential)),
+        )
+        .await;
+        let issuer = registered_issuer(&state);
+        assert_eq!(
+            post!(&app, "/api/v1/store/credentials", issue_body(&issuer)),
+            201
+        );
+        assert!(state
+            .mined_transactions()
+            .iter()
+            .any(|tx| matches!(&tx.payload, Some(TxPayload::IssueCredential { credential, .. }) if credential.id == "cred-1")));
+    }
+
+    #[actix_web::test]
+    async fn credential_without_a_valid_issuer_signature_is_refused() {
+        let state = make_app_data();
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(web::scope("/api/v1").service(store_write_credential)),
+        )
+        .await;
+        let issuer = registered_issuer(&state);
+        let mut body = issue_body(&issuer);
+        body["subject_did"] = "did:goya:someone-else".into();
+        assert_eq!(post!(&app, "/api/v1/store/credentials", body), 401);
+        let store = get_channel_store(&state, "default").unwrap();
+        assert!(store.read_credential("cred-1").is_err());
+    }
+
+    #[actix_web::test]
+    async fn credential_with_personal_claims_is_refused() {
+        let state = make_app_data();
+        let app = test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(web::scope("/api/v1").service(store_write_credential)),
+        )
+        .await;
+        let issuer = registered_issuer(&state);
+        let mut body = issue_body(&issuer);
+        body["claims"] = serde_json::json!({ "rut": "11111111-1" });
+        assert_eq!(post!(&app, "/api/v1/store/credentials", body), 400);
+    }
+
+    #[actix_web::test]
+    async fn only_the_issuer_can_revoke_a_credential() {
+        let state = make_app_data();
+        let app = test::init_service(
+            App::new().app_data(state.clone()).service(
+                web::scope("/api/v1")
+                    .service(store_write_credential)
+                    .service(store_revoke_credential),
+            ),
+        )
+        .await;
+        let issuer = registered_issuer(&state);
+        assert_eq!(
+            post!(&app, "/api/v1/store/credentials", issue_body(&issuer)),
+            201
+        );
+        let stranger = registered_issuer(&state);
+        let revoke = |by: &Issuer| {
+            serde_json::json!({
+                "revoked_at": 200,
+                "issuer_public_key": by.public_key,
+                "signature": sign(by, &credential_ops::revoke_message("cred-1", 200)),
+            })
+        };
+        let uri = "/api/v1/store/credentials/cred-1/revoke";
+        assert_eq!(post!(&app, uri, revoke(&stranger)), 401);
+        assert_eq!(post!(&app, uri, revoke(&issuer)), 200);
+        let store = get_channel_store(&state, "default").unwrap();
+        assert_eq!(store.read_credential("cred-1").unwrap().status, "revoked");
     }
 }

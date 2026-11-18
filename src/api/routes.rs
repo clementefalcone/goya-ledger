@@ -3,13 +3,13 @@ use actix_web::{web, Scope};
 #[cfg(feature = "evm")]
 use crate::api::handlers::evm;
 use crate::api::handlers::{
-    acl, airdrop, alias, audit, billing, blocks, bridge, certificates, chain, chaincode, channels,
-    compliance, compliance_auto, contact, contracts, credentials, crl, discovery, events, forensic,
-    gateway, governance, governance_entities, identity, inference, intelligence, interop,
-    invitations, legal_oracle, lexchain, msp, network, notarize, ocsp, oid4vci, oid4vp, oracle,
-    organizations, pentest, pin, policy, private_data, proposals, ra, registry, regulatory,
-    savings, snapshots, staking, stats, stress, stripe, tokenization, tokenomics, transactions,
-    tsa, tsl, utilities, vault, wallets, zkp,
+    acl, airdrop, alias, audit, billing, blocks, bridge, chain, chaincode, channels, compliance,
+    compliance_auto, contact, contracts, credentials, crl, discovery, events, forensic, gateway,
+    governance, governance_entities, identity, identity_session, identity_vault, inference,
+    intelligence, interop, invitations, issuers, legal_oracle, lexchain, msp, network, notarize,
+    ocsp, oid4vci, oid4vp, oracle, organizations, pentest, pin, policy, private_data, proposals,
+    ra, registry, regulatory, savings, snapshots, staking, stats, stress, stripe, tokenization,
+    tokenomics, transactions, tsa, tsl, utilities, vault, wallets, zkp,
 };
 
 /// API routes configuration
@@ -50,16 +50,25 @@ impl ApiRoutes {
     fn register_store_handlers(cfg: &mut web::ServiceConfig) {
         cfg.service(transactions::store_write_transaction)
             .service(transactions::store_get_transaction)
-            .service(identity::create_identity)
-            .service(identity::resolve_by_document)
             .service(identity::revoke_identity)
+            .service(identity::verify_signature)
+            .service(identity::rotate_key)
+            .service(identity_vault::add_vault_entry)
+            .service(identity_vault::revoke_vault_entry)
+            .service(identity_vault::commit_recovery_key)
+            .service(identity_vault::bind_civil_anchor)
             .service(identity::get_identity_methods)
             .service(identity::store_write_identity)
             .service(identity::store_list_identities)
             .service(identity::store_get_identity)
             .service(identity::auth_challenge)
             .service(identity::auth_verify)
+            .service(identity::session_key)
+            .service(identity_session::redeem_session)
+            .service(identity_session::verify_subject_signature)
+            .service(identity_session::subject_status)
             .service(credentials::store_write_credential)
+            .service(credentials::store_revoke_credential)
             .service(credentials::store_list_credentials)
             .service(credentials::store_get_credential)
             .service(credentials::store_get_credentials_by_subject)
@@ -262,8 +271,7 @@ impl ApiRoutes {
             .service(notarize::transfer_document)
             .service(notarize::get_document_owner)
             .service(notarize::get_document_provenance)
-            .service(notarize::sign_fea)
-            .service(notarize::sign_fes_bulk)
+            .service(notarize::sign_seal)
             .service(notarize::verify_fes_bulk);
         // TSA (Time Stamping Authority — RFC 3161)
         cfg.service(tsa::request_timestamp)
@@ -294,23 +302,27 @@ impl ApiRoutes {
             .service(ocsp::ocsp_status);
         // CRL Distribution Point (RFC 5280 §5)
         cfg.service(crl::get_crl_der).service(crl::get_crl_pem);
-        // FEA Certificate Issuance & Revocation (Ley 19.799 / EA-103)
-        cfg.service(certificates::issue_fea_cert)
-            .service(certificates::revoke_fea_cert);
         // Trust Service List (ETSI TS 119 612)
         cfg.service(tsl::get_tsl);
         // OpenID4VCI (EUDI Wallet credential issuance)
         cfg.service(oid4vci::issuer_metadata)
             .service(oid4vci::oauth_as_metadata)
-            .service(oid4vci::jwt_vc_issuer_metadata)
-            .service(oid4vci::par_endpoint)
-            .service(oid4vci::authorize_endpoint)
             .service(oid4vci::token_endpoint)
             .service(oid4vci::credential_endpoint)
+            .service(oid4vci::deferred_credential_endpoint)
             .service(oid4vci::nonce_endpoint)
             .service(oid4vci::credential_offer_endpoint)
-            .service(oid4vci::credential_offer_get)
-            .service(oid4vci::status_list_endpoint);
+            .service(oid4vci::credential_offer_get);
+        cfg.service(issuers::register_credential_key)
+            .service(issuers::get_credential_key)
+            .service(issuers::list_pending_issuances)
+            .service(issuers::deliver_issuance)
+            .service(issuers::publish_status_list)
+            .service(issuers::get_status_list)
+            .route(
+                "/issuers/{did}/.well-known/jwt-vc-issuer",
+                web::get().to(issuers::jwt_vc_issuer_metadata),
+            );
         // OpenID4VP (EUDI Wallet credential presentation)
         cfg.service(oid4vp::register_rp)
             .service(oid4vp::list_rps)
@@ -425,20 +437,29 @@ impl LightRoutes {
         cfg.service(identity::store_write_identity)
             .service(identity::store_list_identities)
             .service(identity::store_get_identity)
-            .service(identity::migrate_did)
+            .service(identity::rotate_key)
+            .service(identity::verify_signature)
+            .service(identity_vault::add_vault_entry)
+            .service(identity_vault::revoke_vault_entry)
+            .service(identity_vault::commit_recovery_key)
+            .service(identity_vault::bind_civil_anchor)
             .service(identity::auth_challenge)
-            .service(identity::auth_verify);
+            .service(identity::auth_verify)
+            .service(identity::session_key)
+            .service(identity_session::redeem_session)
+            .service(identity_session::verify_subject_signature)
+            .service(identity_session::subject_status);
         // Tokenomics
         cfg.service(tokenomics::supply)
             .service(tokenomics::fee)
             .service(tokenomics::inflation);
         // Credentials (VCs)
         cfg.service(credentials::store_write_credential)
+            .service(credentials::store_revoke_credential)
             .service(credentials::store_list_credentials)
             .service(credentials::store_get_credential)
             .service(credentials::store_get_credentials_by_subject)
-            .service(credentials::store_get_credentials_by_issuer)
-            .service(credentials::erase_claims);
+            .service(credentials::store_get_credentials_by_issuer);
         // Notarization (Proof of Existence)
         cfg.service(notarize::notarize_pdf)
             .service(notarize::submit_notarization)
@@ -450,8 +471,7 @@ impl LightRoutes {
             .service(notarize::transfer_document)
             .service(notarize::get_document_owner)
             .service(notarize::get_document_provenance)
-            .service(notarize::sign_fea)
-            .service(notarize::sign_fes_bulk)
+            .service(notarize::sign_seal)
             .service(notarize::verify_fes_bulk);
         // Audit trail
         cfg.service(audit::list_audit_entries)

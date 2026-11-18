@@ -8,6 +8,7 @@ use crate::identity::signing::{SigningAlgorithm, SigningProvider};
 use crate::ordering::block_hash_for_signing;
 use crate::storage::traits::{Block, BlockStore, Transaction};
 use crate::tokenomics::economics::EconomicsState;
+use crate::transaction::mempool::TransactionPool;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -242,6 +243,50 @@ pub fn transactions_merkle_root(transactions: &[Transaction]) -> [u8; 32] {
     level[0]
 }
 
+pub struct BlockProducer {
+    pub pool: Arc<Mutex<TransactionPool>>,
+    pub mining: Arc<MiningService>,
+    pub wake: Arc<tokio::sync::Notify>,
+}
+
+pub async fn run_block_producer(
+    producer: BlockProducer,
+    interval: std::time::Duration,
+    on_block: impl Fn(u64),
+) {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = producer.wake.notified() => {}
+        }
+        while let Some(height) = produce_block(&producer) {
+            on_block(height);
+        }
+    }
+}
+
+fn produce_block(producer: &BlockProducer) -> Option<u64> {
+    let transactions = producer
+        .pool
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .drain_for_block(50);
+    if transactions.is_empty() {
+        return None;
+    }
+    let count = transactions.len();
+    match producer.mining.mine_block("auto-miner", transactions) {
+        Ok(height) => {
+            log::info!("mined block {height} with {count} tx(s)");
+            Some(height)
+        }
+        Err(e) => {
+            log::error!("block with {count} tx(s) not mined: {e}");
+            None
+        }
+    }
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -412,5 +457,39 @@ mod tests {
             Some(SigningAlgorithm::MlDsa65)
         );
         assert_eq!(block.secondary_signature.as_ref().unwrap().len(), 3309);
+    }
+
+    #[tokio::test]
+    async fn producer_mines_as_soon_as_woken() {
+        let store = Arc::new(MemoryStore::new());
+        let pool = Arc::new(Mutex::new(TransactionPool::new()));
+        let wake = Arc::new(tokio::sync::Notify::new());
+        tokio::spawn(run_block_producer(
+            BlockProducer {
+                pool: pool.clone(),
+                mining: Arc::new(MiningService::new(store.clone(), MiningConfig::default())),
+                wake: wake.clone(),
+            },
+            std::time::Duration::from_secs(3600),
+            |_| {},
+        ));
+
+        pool.lock()
+            .unwrap()
+            .add(notarization_tx(&"a".repeat(64)))
+            .unwrap();
+        wake.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !store.block_exists(0).unwrap() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("block mined well before the hour-long interval");
+        assert_eq!(
+            store.read_transaction("notarize:abc").unwrap().state,
+            "confirmed"
+        );
     }
 }

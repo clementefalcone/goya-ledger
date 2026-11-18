@@ -23,6 +23,7 @@
 pub mod cades;
 pub mod cades_der;
 pub mod iso19794;
+pub mod notarization;
 pub mod pades;
 pub mod pades_der;
 pub mod verify;
@@ -39,23 +40,30 @@ pub struct SignerProof {
     pub signature: String,
 }
 
-pub fn is_signer_proven(
-    signer: &str,
-    signing_public_key: &str,
-    proof: Option<&SignerProof>,
-    payload: &[u8],
-) -> bool {
-    if crate::identity::did::did_matches_pubkey(signer, signing_public_key) {
+pub struct SignerClaim<'a> {
+    pub signer: &'a str,
+    pub signing_public_key: &'a str,
+    pub proof: Option<&'a SignerProof>,
+    pub payload: &'a [u8],
+}
+
+pub fn is_signer_proven(claim: &SignerClaim, key_controls: &dyn Fn(&str, &str) -> bool) -> bool {
+    if key_controls(claim.signer, claim.signing_public_key) {
         return true;
     }
-    let Some(proof) = proof else {
+    let Some(proof) = claim.proof else {
         return false;
     };
     let Some(algorithm) = verify::infer_algorithm_from_key(&proof.public_key) else {
         return false;
     };
-    crate::identity::did::did_matches_pubkey(signer, &proof.public_key)
-        && verify_signature(algorithm, &proof.public_key, payload, &proof.signature)
+    key_controls(claim.signer, &proof.public_key)
+        && verify_signature(
+            algorithm,
+            &proof.public_key,
+            claim.payload,
+            &proof.signature,
+        )
 }
 
 // ── Signature level ──────────────────────────────────────────────────────────
@@ -241,7 +249,7 @@ impl BiometricEvidence {
 /// ```
 ///
 /// Where `biometrics_hash = SHA-256(sorted commitments joined by ':')`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedEnvelope {
     /// Signature level claimed by the signer.
     pub level: SignatureLevel,

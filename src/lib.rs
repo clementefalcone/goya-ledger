@@ -63,7 +63,6 @@ pub mod pki_ceremony;
 pub mod pki_chain;
 pub mod pki_lifecycle;
 pub mod pki_policy;
-pub mod privacy;
 pub mod private_data;
 pub mod registry;
 pub mod regulatory;

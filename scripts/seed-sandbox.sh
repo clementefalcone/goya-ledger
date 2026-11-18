@@ -34,7 +34,17 @@ post() {
     curl -sf -X POST $H1 "$@" 2>/dev/null || echo ""
 }
 
-NOW=$(date +%s)
+ACCOUNT_TOOL="$(cd "$(dirname "$0")" && pwd)/ledger-account/account.mjs"
+SEED_DIR="${SEED_DIR:-$HOME/.goya/sandbox-seeds}"
+mkdir -p "$SEED_DIR"
+[ -d "$(dirname "$ACCOUNT_TOOL")/node_modules" ] || npm ci --silent --prefix "$(dirname "$ACCOUNT_TOOL")"
+
+account() {
+    local name="$1"
+    shift
+    NODE_URL="$API" SEED_PATH="$SEED_DIR/$name.hex" node "$ACCOUNT_TOOL" "$@"
+}
+
 MINER_ADDR=""
 COUNTS_WALLETS=0
 COUNTS_IDS=0
@@ -107,13 +117,13 @@ fi
 # ── 5. Identities (DIDs) ────────────────────────────────────────────────────
 
 echo -e "${CYAN}6. Identities${NC}"
-for did_slug in universidad-chile registro-civil servicio-salud banco-central alice-persona bob-empresa carlos-auditor; do
-    resp=$(post "$API/store/identities" -d "{\"did\":\"did:goya:$did_slug\",\"created_at\":$NOW,\"updated_at\":$NOW,\"status\":\"active\"}")
-    if [ -n "$resp" ]; then
-        ok "did:goya:$did_slug"
+for name in universidad-chile registro-civil servicio-salud banco-central alice-persona bob-empresa carlos-auditor; do
+    [ -f "$SEED_DIR/$name.hex" ] || account "$name" keygen > /dev/null
+    if account "$name" register > /dev/null 2>&1; then
+        ok "$name ($(account "$name" did | cut -c1-24)…)"
         COUNTS_IDS=$((COUNTS_IDS + 1))
     else
-        skip "$did_slug"
+        skip "$name (already registered)"
     fi
 done
 
@@ -122,8 +132,9 @@ done
 echo -e "${CYAN}7. Documents & credentials${NC}"
 
 seed_cred() {
-    local id="$1" issuer="$2" subject="$3" ctype="$4" claims="$5" expires="${6:-0}"
-    resp=$(post "$API/store/credentials" -d "{\"id\":\"$id\",\"issuer_did\":\"did:goya:$issuer\",\"subject_did\":\"did:goya:$subject\",\"cred_type\":\"$ctype\",\"issued_at\":$NOW,\"expires_at\":$expires,\"claims\":$claims,\"status\":\"active\"}")
+    local id="$1" issuer="$2" subject="$3" ctype="$4" claims="$5" expires="${6:-0}" body
+    body=$(printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$(account "$subject" did)" "$ctype" "$claims" "$expires" | account "$issuer" credentials)
+    resp=$(post "$API/store/credentials" -d "$body")
     if [ -n "$resp" ]; then
         ok "$ctype ($id)"
         COUNTS_CREDS=$((COUNTS_CREDS + 1))

@@ -1329,7 +1329,7 @@ async fn e2e_document_transfer_flow() {
 
     // Step 3: Alice transfers to Bob
     println!("\n── Step 3: Transfer Alice → Bob ──");
-    let transfer_msg = format!("transfer_doc:{}:{}:{}", content_hash, alice.did, bob.did);
+    let transfer_msg = format!("transfer_doc:{}:0:{}:{}", content_hash, alice.did, bob.did);
     let transfer_sig = hex::encode(alice.signing_key.sign(transfer_msg.as_bytes()).to_bytes());
 
     let transfer_resp = post_json(
@@ -1359,7 +1359,10 @@ async fn e2e_document_transfer_flow() {
     // Step 5: Bob transfers to Charlie (brief pause to avoid rate limit)
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     println!("\n── Step 5: Transfer Bob → Charlie ──");
-    let transfer_msg2 = format!("transfer_doc:{}:{}:{}", content_hash, bob.did, charlie.did);
+    let transfer_msg2 = format!(
+        "transfer_doc:{}:1:{}:{}",
+        content_hash, bob.did, charlie.did
+    );
     let transfer_sig2 = hex::encode(bob.signing_key.sign(transfer_msg2.as_bytes()).to_bytes());
 
     let transfer_resp2 = post_json(
@@ -1397,7 +1400,10 @@ async fn e2e_document_transfer_flow() {
 
     // Step 7: Alice tries to transfer (no longer owner) — rejected
     println!("\n── Step 7: Unauthorized transfer (Alice no longer owner) ──");
-    let bad_msg = format!("transfer_doc:{}:{}:{}", content_hash, alice.did, alice.did);
+    let bad_msg = format!(
+        "transfer_doc:{}:2:{}:{}",
+        content_hash, alice.did, alice.did
+    );
     let bad_sig = hex::encode(alice.signing_key.sign(bad_msg.as_bytes()).to_bytes());
 
     let bad_resp = post_json(
@@ -1420,7 +1426,7 @@ async fn e2e_document_transfer_flow() {
     // Step 8: Transfer nonexistent document — rejected
     println!("\n── Step 8: Transfer nonexistent document ──");
     let fake_hash = "ff".repeat(32);
-    let fake_msg = format!("transfer_doc:{}:{}:{}", fake_hash, alice.did, bob.did);
+    let fake_msg = format!("transfer_doc:{}:0:{}:{}", fake_hash, alice.did, bob.did);
     let fake_sig = hex::encode(alice.signing_key.sign(fake_msg.as_bytes()).to_bytes());
 
     let fake_resp = post_json(

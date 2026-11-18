@@ -47,7 +47,6 @@ mod pki_ceremony;
 mod pki_chain;
 mod pki_lifecycle;
 mod pki_policy;
-mod privacy;
 mod private_data;
 mod registry;
 mod regulatory;
@@ -920,10 +919,15 @@ async fn async_main_inner() -> std::io::Result<()> {
         tx_pool: Arc::new(std::sync::Mutex::new(
             transaction::mempool::TransactionPool::new(),
         )),
+        block_wake: Arc::new(tokio::sync::Notify::new()),
         vault_recovery_secret: std::env::var("VAULT_RECOVERY_SECRET")
             .ok()
             .filter(|s| !s.is_empty())
             .map(|s| hex::decode(s.as_str()).unwrap_or_else(|_| s.into_bytes())),
+        pairwise_secret: std::env::var("PAIRWISE_SECRET")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| crate::identity::pairwise::parse_secret(&s).unwrap_or_else(|e| panic!("{e}"))),
         vault_rate_limiter: Arc::new(crate::api::handlers::vault::RecoveryRateLimiter::new()),
         bridge_engine: Arc::new(crate::bridge::protocol::BridgeEngine::new()),
         proof_verifier: Arc::new(inference::proof::MultiVerifier::new()),
@@ -980,7 +984,6 @@ async fn async_main_inner() -> std::io::Result<()> {
         deposit_ledger: std::sync::Arc::new(
             crate::tokenomics::storage_deposit::DepositLedger::new(),
         ),
-        private_claims: std::sync::Arc::new(crate::privacy::PrivateClaimsStore::new()),
     };
     log::info!("LexChain engine initialized");
 
@@ -1156,40 +1159,19 @@ async fn async_main_inner() -> std::io::Result<()> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(5);
         let mine_store = gateway_store.clone();
-        let mine_tx_pool = app_state.tx_pool.clone();
-        let mine_mining = app_state.mining_service.clone();
         let mine_node = node_arc.clone();
-        tokio::spawn(async move {
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(mine_interval_secs));
-            loop {
-                interval.tick().await;
-                let Some(ref mining_service) = mine_mining else {
-                    continue;
-                };
-                let txs = {
-                    let mut pool = mine_tx_pool.lock().unwrap_or_else(|e| e.into_inner());
-                    pool.drain_for_block(50)
-                };
-                if txs.is_empty() {
-                    continue;
+        app_state.spawn_block_producer(
+            tokio::time::Duration::from_secs(mine_interval_secs),
+            move |height| {
+                if let Ok(block) = mine_store.read_block(height) {
+                    let node = mine_node.clone();
+                    tokio::spawn(async move {
+                        node.broadcast_ordered_block(&block).await;
+                    });
                 }
-                let tx_count = txs.len();
-                match mining_service.mine_block("auto-miner", txs) {
-                    Ok(height) => {
-                        log::info!("⛏ Auto-mined block {height} with {tx_count} tx(s)");
-                        if let Ok(block) = mine_store.read_block(height) {
-                            let node = mine_node.clone();
-                            tokio::spawn(async move {
-                                node.broadcast_ordered_block(&block).await;
-                            });
-                        }
-                    }
-                    Err(e) => log::error!("Auto-mine failed: {e}"),
-                }
-            }
-        });
-        log::info!("Solo auto-mine loop started (interval=5s)");
+            },
+        );
+        log::info!("Solo block producer started (interval={mine_interval_secs}s, wakes on new tx)");
     }
 
     let rate_limit_config = middleware::RateLimitConfig {
@@ -1238,20 +1220,12 @@ async fn async_main_inner() -> std::io::Result<()> {
         .unwrap_or_else(|| Arc::new(crate::audit::MemoryAuditStore::new()));
 
     let nonce_store = web::Data::new(crate::api::handlers::oid4vci::NonceStore::new());
-    let status_list_store = web::Data::new(crate::api::handlers::oid4vci::StatusListStore::new());
-    {
-        let seed = crate::crypto::hasher::hash_with(
-            crate::crypto::hasher::HashAlgorithm::Sha256,
-            b"goya-oid4vci-es256-issuer-key-v1",
-        );
-        let provider = crate::identity::signing::EcdsaP256SigningProvider::from_bytes(&seed)
-            .expect("deterministic ES256 key");
-        status_list_store.set_signing_provider(std::sync::Arc::new(provider));
-    }
     let credential_offer_store =
         web::Data::new(crate::api::handlers::oid4vci::CredentialOfferStore::new());
     let vp_request_store = web::Data::new(crate::api::handlers::oid4vp::VpRequestStore::new());
-    let auth_store = web::Data::new(crate::api::handlers::oid4vci::AuthorizationStore::new());
+    let access_token_store = web::Data::new(crate::api::handlers::oid4vci::AccessTokenStore::new());
+    let pending_issuance_store =
+        web::Data::new(crate::api::handlers::oid4vci::PendingIssuanceStore::new());
 
     #[cfg(feature = "evm")]
     let evm_state = web::Data::new(crate::api::handlers::evm::EvmState::new());
@@ -1286,10 +1260,10 @@ async fn async_main_inner() -> std::io::Result<()> {
             .wrap(crate::api::middleware::InputValidationMiddleware::default())
             .app_data(web::Data::new(app_state.clone()))
             .app_data(nonce_store.clone())
-            .app_data(status_list_store.clone())
             .app_data(credential_offer_store.clone())
             .app_data(vp_request_store.clone())
-            .app_data(auth_store.clone());
+            .app_data(access_token_store.clone())
+            .app_data(pending_issuance_store.clone());
         #[cfg(feature = "evm")]
         let app = app.app_data(evm_state.clone());
         app.app_data(json_config.clone())

@@ -1,106 +1,118 @@
-use crate::api::errors::{enforce_acl, ApiError, ApiResponse, ApiResult, ErrorDto};
+use crate::api::errors::{ApiError, ApiResponse, ApiResult, ErrorDto};
 use crate::api::handlers::channels::{
     channel_id_from_req, enforce_channel_membership, get_channel_store,
 };
 use crate::api::models::*;
 use crate::app_state::AppState;
-use crate::identity::keys::KeyManager;
+use crate::identity::login_factors::{has_repeated_factor, login_message, DeviceFactor};
+use crate::identity::operations::{self, IdentityOpError};
+use crate::storage::traits::{BlockStore, Transaction, TxPayload};
 use actix_web::{get, post, web, HttpRequest, HttpResponse};
 use chrono::Utc;
 
-/// POST /identity/create - Create a new DID, generate Ed25519 keypair, persist to store.
-#[post("/identity/create")]
-pub async fn create_identity(
-    state: web::Data<AppState>,
-    body: web::Json<CreateIdentityRequest>,
-    req: HttpRequest,
-) -> ApiResult<HttpResponse> {
-    let trace_id = uuid::Uuid::new_v4().to_string();
+pub(crate) fn identity_op_error(error: IdentityOpError) -> ApiError {
+    match error {
+        IdentityOpError::NotFound(resource) => ApiError::NotFound { resource },
+        IdentityOpError::BadSignature(message) => ApiError::UnauthorizedWithMessage { message },
+        IdentityOpError::Conflict(reason) => ApiError::Conflict { reason },
+        IdentityOpError::Invalid(reason) => ApiError::ValidationError {
+            field: "identity".to_string(),
+            reason,
+        },
+    }
+}
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+const BLOCK_INCLUSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const BLOCK_INCLUSION_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
-    let algorithm = state
-        .signing_provider
-        .as_ref()
-        .map(|p| p.algorithm())
-        .unwrap_or_default();
-    let key_mgr = KeyManager::with_algorithm(algorithm, now);
-    let public_key_hex = hex::encode(key_mgr.public_key());
-    let did = crate::identity::did::did_from_pubkey_hex(&public_key_hex);
-
-    // Persist to store
-    let _channel = channel_id_from_req(&req);
-    let store = get_channel_store(&state, _channel)?;
-    let civil_anchor = match (&body.document_type, &body.document_number) {
-        (Some(doc_type), Some(doc_number)) => Some(crate::identity::did::civil_anchor_hash(
-            doc_type, doc_number,
-        )),
-        _ => None,
-    };
-
-    let record = crate::storage::traits::IdentityRecord {
-        did: did.clone(),
-        public_key: public_key_hex.clone(),
-        created_at: now,
-        updated_at: now,
-        status: "active".to_string(),
-        migrated_from: None,
-        signature_algorithm: Some(format!("{:?}", algorithm)),
-        civil_anchor: civil_anchor.clone(),
-    };
-
-    let tx = crate::storage::traits::Transaction {
-        id: format!("identity-{}", uuid::Uuid::new_v4()),
+pub(crate) async fn commit_ledger_op(
+    state: &AppState,
+    store: &dyn BlockStore,
+    channel: &str,
+    author: &str,
+    payload: TxPayload,
+) -> Result<(), ApiError> {
+    let tx = Transaction {
+        id: format!("ledger-{}", uuid::Uuid::new_v4()),
         block_height: 0,
-        timestamp: now,
-        input_did: did.clone(),
-        output_recipient: did.clone(),
+        timestamp: now_secs(),
+        input_did: author.to_string(),
+        output_recipient: author.to_string(),
         amount: 0,
         state: "pending".to_string(),
         fee: 0,
-        payload: Some(crate::storage::traits::TxPayload::RegisterIdentity {
-            record,
-            civil_anchor: civil_anchor.clone(),
-        }),
+        payload: Some(payload),
     };
+    commit_tx(state, store, channel, tx).await
+}
 
-    crate::transaction::apply_tx_payload(store.as_ref(), &tx).map_err(|e| {
-        if e.to_string().contains("civil anchor already registered") {
-            ApiError::Conflict {
-                reason: "identity with document already exists".to_string(),
-            }
-        } else {
-            ApiError::StorageError {
-                reason: e.to_string(),
-            }
-        }
-    })?;
-
+pub(crate) async fn commit_tx(
+    state: &AppState,
+    store: &dyn BlockStore,
+    channel: &str,
+    tx: Transaction,
+) -> Result<(), ApiError> {
+    if channel == "default" {
+        return queue_and_await_block(state, store, tx).await;
+    }
     store
         .write_transaction(&tx)
         .map_err(|e| ApiError::StorageError {
-            reason: e.to_string(),
+            reason: format!("transaction {} not recorded: {e}", tx.id),
         })?;
+    crate::transaction::apply_tx_payload(store, &tx).map_err(|e| ApiError::StorageError {
+        reason: format!("transaction {} not applied: {e}", tx.id),
+    })
+}
 
-    crate::audit::emit_if_present(
-        &state.audit_store,
-        crate::audit::AuditAction::DidRegistered,
-        req.headers()
-            .get("X-Org-Id")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("unknown"),
-        Some(format!("did={did}")),
-    );
+async fn queue_and_await_block(
+    state: &AppState,
+    store: &dyn BlockStore,
+    tx: Transaction,
+) -> Result<(), ApiError> {
+    let id = tx.id.clone();
+    state
+        .tx_pool
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .add(tx)
+        .map_err(|reason| ApiError::ConsensusError {
+            reason: format!("transaction {id} not queued: {reason}"),
+        })?;
+    state.block_wake.notify_one();
+    let mined = tokio::time::timeout(BLOCK_INCLUSION_TIMEOUT, read_mined(store, &id))
+        .await
+        .map_err(|_| ApiError::ConsensusError {
+            reason: format!(
+                "transaction {id} queued but not in a block after {}s",
+                BLOCK_INCLUSION_TIMEOUT.as_secs()
+            ),
+        })??;
+    if mined.state != "confirmed" {
+        return Err(ApiError::Conflict {
+            reason: format!(
+                "transaction {id} rejected by block {}: an earlier transaction changed the state it was checked against",
+                mined.block_height
+            ),
+        });
+    }
+    Ok(())
+}
 
-    let response = IdentityResponse {
-        did,
-        public_key: public_key_hex,
-        created_at: Utc::now(),
-    };
-    Ok(HttpResponse::Created().json(ApiResponse::success(response, trace_id)))
+async fn read_mined(store: &dyn BlockStore, id: &str) -> Result<Transaction, ApiError> {
+    loop {
+        match store.read_transaction(id) {
+            Ok(mined) => return Ok(mined),
+            Err(crate::storage::errors::StorageError::KeyNotFound(_)) => {
+                tokio::time::sleep(BLOCK_INCLUSION_POLL).await
+            }
+            Err(e) => {
+                return Err(ApiError::StorageError {
+                    reason: format!("transaction {id} unreadable while awaiting its block: {e}"),
+                })
+            }
+        }
+    }
 }
 
 /// GET /identity/{did} - Fetch DID document from store.
@@ -114,44 +126,6 @@ async fn get_identity(
     let trace_id = uuid::Uuid::new_v4().to_string();
     let _channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, _channel)?;
-
-    let record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
-        resource: format!("identity {did}"),
-    })?;
-
-    let response = IdentityResponse {
-        did: record.did,
-        public_key: record.public_key,
-        created_at: chrono::DateTime::from_timestamp(record.created_at as i64, 0)
-            .unwrap_or_else(Utc::now),
-    };
-    Ok(HttpResponse::Ok().json(ApiResponse::success(response, trace_id)))
-}
-
-#[get("/identity/resolve/{doc_type}/{doc_number}")]
-pub async fn resolve_by_document(
-    state: web::Data<AppState>,
-    path: web::Path<(String, String)>,
-    req: HttpRequest,
-) -> ApiResult<HttpResponse> {
-    let (doc_type, doc_number) = path.into_inner();
-    let trace_id = uuid::Uuid::new_v4().to_string();
-    let _channel = channel_id_from_req(&req);
-    let store = get_channel_store(&state, _channel)?;
-
-    enforce_acl(
-        state.acl_provider.as_deref(),
-        state.policy_store.as_deref(),
-        "peer/Identity",
-        &req,
-    )?;
-
-    let anchor = crate::identity::did::civil_anchor_hash(&doc_type, &doc_number);
-    let did = store
-        .resolve_by_civil_anchor(&anchor)
-        .map_err(|_| ApiError::NotFound {
-            resource: format!("identity for {doc_type}:{doc_number}"),
-        })?;
 
     let record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
         resource: format!("identity {did}"),
@@ -237,35 +211,32 @@ pub async fn revoke_identity(
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
 
-    let mut record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
-        resource: format!("identity {did}"),
-    })?;
-    verify_owner_signature(&record, &format!("identity:revoke:{did}"), &body.signature)?;
-
-    if record.status == "revoked" {
+    let change = operations::check_revoke(store.as_ref(), &did, &body.signature)
+        .map_err(identity_op_error)?;
+    if change == operations::Change::AlreadyApplied {
         return Ok(HttpResponse::Ok().json(ApiResponse::success(
             serde_json::json!({ "did": did, "status": "already_revoked" }),
             trace_id,
         )));
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    record.status = "revoked".to_string();
-    record.updated_at = now;
-
-    store
-        .write_identity(&record)
-        .map_err(|e| ApiError::StorageError {
-            reason: e.to_string(),
-        })?;
+    let now = now_secs();
+    commit_ledger_op(
+        &state,
+        store.as_ref(),
+        channel,
+        &did,
+        TxPayload::RevokeIdentity {
+            did: did.clone(),
+            revoked_at: now,
+            owner_signature: body.signature.clone(),
+        },
+    )
+    .await?;
 
     crate::audit::emit_if_present(
         &state.audit_store,
-        crate::audit::AuditAction::DidRegistered,
+        crate::audit::AuditAction::DidRevoked,
         req.headers()
             .get("X-Org-Id")
             .and_then(|v| v.to_str().ok())
@@ -279,46 +250,40 @@ pub async fn revoke_identity(
     )))
 }
 
-/// POST /identity/{did}/verify-signature - Verify Ed25519 signature.
+#[derive(Debug, serde::Deserialize)]
+pub struct VerifyMessageRequest {
+    pub message: String,
+    pub signature: String,
+}
+
 #[post("/identity/{did}/verify-signature")]
-async fn verify_signature(
+pub async fn verify_signature(
     state: web::Data<AppState>,
     path: web::Path<String>,
-    body: web::Json<VerifySignatureRequest>,
+    body: web::Json<VerifyMessageRequest>,
     req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let did = path.into_inner();
-    let trace_id = uuid::Uuid::new_v4().to_string();
-
-    // Verify DID exists
-    let _channel = channel_id_from_req(&req);
-    let store = get_channel_store(&state, _channel)?;
-    let _record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
+    let store = get_channel_store(&state, channel_id_from_req(&req))?;
+    let record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
         resource: format!("identity {did}"),
     })?;
-
-    // Verify signature using the declared algorithm
-    let valid = crate::signature::verify_signature(
-        body.signature_algorithm,
-        &body.public_key,
-        body.message.as_bytes(),
-        &body.signature,
-    );
-
-    let response = VerifySignatureResponse {
-        valid,
-        key_index: 0,
-        verified_at: Utc::now(),
-    };
-    Ok(HttpResponse::Ok().json(ApiResponse::success(response, trace_id)))
+    let valid = record.status == "active"
+        && operations::is_signed_by(&record.public_key, &body.message, &body.signature);
+    Ok(HttpResponse::Ok().json(ApiResponse::success(
+        serde_json::json!({ "did": did, "valid": valid, "status": record.status }),
+        uuid::Uuid::new_v4().to_string(),
+    )))
 }
 
-// ── PQC Migration ───────────────────────────────────────────────────────────
+// ── Key rotation ────────────────────────────────────────────────────────────
 
 #[derive(Debug, serde::Deserialize)]
-pub struct MigrateRequest {
+pub struct RotateKeyRequest {
     pub new_public_key: String,
-    pub signature: String,
+    pub recovery_public_key: String,
+    pub new_recovery_commitment: String,
+    pub recovery_signature: String,
     pub new_key_signature: String,
 }
 
@@ -327,111 +292,60 @@ pub struct OwnerActionRequest {
     pub signature: String,
 }
 
-fn verify_owner_signature(
-    record: &crate::storage::traits::IdentityRecord,
-    message: &str,
-    signature_hex: &str,
-) -> Result<(), ApiError> {
-    let is_owner = crate::signature::verify::infer_algorithm_from_key(&record.public_key)
-        .is_some_and(|algorithm| {
-            crate::signature::verify_signature(
-                algorithm,
-                &record.public_key,
-                message.as_bytes(),
-                signature_hex,
-            )
-        });
-    if !is_owner {
-        return Err(ApiError::UnauthorizedWithMessage {
-            message: format!(
-                "signature over {message:?} does not verify against the key registered for {}",
-                record.did
-            ),
-        });
-    }
-    Ok(())
-}
-
-#[derive(Debug, serde::Serialize)]
-struct MigrateResponse {
-    old_did: String,
-    new_did: String,
-    new_algorithm: String,
-    new_public_key_hex: String,
-    migrated_at: u64,
-}
-
-#[post("/identity/{did}/migrate")]
-pub async fn migrate_did(
+#[post("/identity/{did}/rotate")]
+pub async fn rotate_key(
     state: web::Data<AppState>,
     path: web::Path<String>,
-    body: web::Json<MigrateRequest>,
+    body: web::Json<RotateKeyRequest>,
     req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let did = path.into_inner();
     let trace_id = uuid::Uuid::new_v4().to_string();
-
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
+    super::validation::require_post_quantum_key("new_public_key", &body.new_public_key)?;
 
-    let record = store.read_identity(&did).map_err(|_| ApiError::NotFound {
-        resource: format!("identity {did}"),
-    })?;
-    let new_did = crate::identity::did::did_from_pubkey_hex(&body.new_public_key);
-    let message = format!("identity:migrate:{did}:{new_did}");
-    verify_owner_signature(&record, &message, &body.signature)?;
-    let controls_new_key = crate::signature::verify::infer_algorithm_from_key(&body.new_public_key)
-        .is_some_and(|algorithm| {
-            crate::signature::verify_signature(
-                algorithm,
-                &body.new_public_key,
-                message.as_bytes(),
-                &body.new_key_signature,
-            )
-        });
-    if !controls_new_key {
-        return Err(ApiError::UnauthorizedWithMessage {
-            message: format!(
-                "new_key_signature over {message:?} does not verify against new_public_key"
-            ),
-        });
-    }
-    if store.read_identity(&new_did).is_ok() {
-        return Err(ApiError::Conflict {
-            reason: format!("identity {new_did} already registered"),
-        });
-    }
-
-    if record.status == "migrated" {
-        return Ok(HttpResponse::Conflict().json(ApiResponse::<()>::error(
-            ErrorDto {
-                code: "ALREADY_MIGRATED".into(),
-                message: format!("DID {did} already migrated"),
-                field: None,
-            },
-            409,
+    let request = operations::RotateRequest {
+        did: &did,
+        new_public_key: &body.new_public_key,
+        recovery_public_key: &body.recovery_public_key,
+        new_recovery_commitment: &body.new_recovery_commitment,
+        recovery_signature: &body.recovery_signature,
+        new_key_signature: &body.new_key_signature,
+    };
+    let change = operations::check_rotate(store.as_ref(), &request).map_err(identity_op_error)?;
+    if change == operations::Change::AlreadyApplied {
+        return Ok(HttpResponse::Ok().json(ApiResponse::success(
+            serde_json::json!({ "did": did, "status": "already_rotated" }),
+            trace_id,
         )));
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let result =
-        crate::identity::keys::migrate_identity(store.as_ref(), &did, &body.new_public_key, now)
-            .map_err(|e| ApiError::StorageError {
-                reason: format!("migration failed: {e}"),
-            })?;
+    let now = now_secs();
+    commit_ledger_op(
+        &state,
+        store.as_ref(),
+        channel,
+        &did,
+        TxPayload::RotateIdentity {
+            did: did.clone(),
+            new_public_key: body.new_public_key.clone(),
+            recovery_public_key: body.recovery_public_key.clone(),
+            new_recovery_commitment: body.new_recovery_commitment.clone(),
+            rotated_at: now,
+            recovery_signature: body.recovery_signature.clone(),
+            new_key_signature: body.new_key_signature.clone(),
+        },
+    )
+    .await?;
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
-        MigrateResponse {
-            old_did: result.old_did,
-            new_did: result.new_did,
-            new_algorithm: format!("{}", result.new_algorithm),
-            new_public_key_hex: result.new_public_key_hex,
-            migrated_at: now,
-        },
+        serde_json::json!({
+            "did": did,
+            "public_key": body.new_public_key,
+            "recovery_commitment": body.new_recovery_commitment,
+            "rotated_at": now,
+        }),
         trace_id,
     )))
 }
@@ -454,21 +368,29 @@ pub async fn store_write_identity(
 ) -> ApiResult<HttpResponse> {
     let RegisterIdentityRequest { record, signature } = body.into_inner();
     super::validation::validate_store_identity(&record)?;
+    super::validation::require_post_quantum_key("public_key", &record.public_key)?;
     let trace_id = uuid::Uuid::new_v4().to_string();
     let _channel = channel_id_from_req(&req);
     enforce_channel_membership(&state, _channel, &req)?;
     let store = get_channel_store(&state, _channel)?;
-    validate_new_identity(store.as_ref(), &record)?;
-    verify_owner_signature(
-        &record,
-        &format!("identity:register:{}", record.did),
-        &signature,
-    )?;
-    store
-        .write_identity(&record)
-        .map_err(|e| ApiError::StorageError {
-            reason: e.to_string(),
-        })?;
+    let change = operations::check_register(store.as_ref(), &record, Some(&signature))
+        .map_err(identity_op_error)?;
+    if change == operations::Change::AlreadyApplied {
+        return Err(ApiError::Conflict {
+            reason: format!("identity {} already registered", record.did),
+        });
+    }
+    commit_ledger_op(
+        &state,
+        store.as_ref(),
+        _channel,
+        &record.did,
+        TxPayload::RegisterIdentity {
+            record: record.clone(),
+            owner_signature: Some(signature),
+        },
+    )
+    .await?;
     crate::audit::emit_if_present(
         &state.audit_store,
         crate::audit::AuditAction::DidRegistered,
@@ -479,30 +401,6 @@ pub async fn store_write_identity(
         Some(format!("did={}", record.did)),
     );
     Ok(HttpResponse::Created().json(ApiResponse::success(record, trace_id)))
-}
-
-fn validate_new_identity(
-    store: &dyn crate::storage::traits::BlockStore,
-    record: &crate::storage::traits::IdentityRecord,
-) -> Result<(), ApiError> {
-    if !crate::identity::did::did_matches_pubkey(&record.did, &record.public_key) {
-        return Err(ApiError::ValidationError {
-            field: "did".into(),
-            reason: "did must be derived from public_key".into(),
-        });
-    }
-    if record.status != "active" {
-        return Err(ApiError::ValidationError {
-            field: "status".into(),
-            reason: format!("new identities must be active, got {:?}", record.status),
-        });
-    }
-    if store.read_identity(&record.did).is_ok() {
-        return Err(ApiError::Conflict {
-            reason: format!("identity {} already registered", record.did),
-        });
-    }
-    Ok(())
 }
 
 /// GET /api/v1/store/identities/{did} — lee un IdentityRecord del store.
@@ -586,6 +484,12 @@ pub struct AuthenticateRequest {
     pub did: String,
     pub challenge: String,
     pub signature: String,
+    #[serde(default)]
+    pub device_factors: Vec<DeviceFactor>,
+    #[serde(default)]
+    pub reader_entry_id: Option<String>,
+    #[serde(default)]
+    pub audience: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -603,31 +507,88 @@ fn b64url_encode(data: &[u8]) -> String {
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, data)
 }
 
-fn mint_session_jwt(
-    did: &str,
+struct SessionClaims<'a> {
+    did: &'a str,
     exp: u64,
-    signer: Option<&dyn crate::identity::signing::SigningProvider>,
-) -> String {
+    device_factors: &'a [DeviceFactor],
+    reader_entry_id: Option<&'a str>,
+    audience: Option<crate::identity::pairwise::Audience>,
+}
+
+fn session_kind(reader_entry_id: Option<&str>) -> (&'static str, [&'static str; 1]) {
+    match reader_entry_id {
+        Some(_) => ("read_session", ["reader"]),
+        None => ("session", ["key"]),
+    }
+}
+
+pub(crate) fn jose_algorithm(
+    algorithm: crate::identity::signing::SigningAlgorithm,
+) -> Result<&'static str, String> {
+    match algorithm {
+        crate::identity::signing::SigningAlgorithm::Ed25519 => Ok("EdDSA"),
+        crate::identity::signing::SigningAlgorithm::MlDsa65 => Ok("ML-DSA-65"),
+        other => Err(format!("session tokens cannot be signed with {other:?}")),
+    }
+}
+
+fn mint_session_jwt(
+    claims: &SessionClaims,
+    signer: &dyn crate::identity::signing::SigningProvider,
+) -> Result<String, String> {
     let now = now_secs();
-    let header = serde_json::json!({"alg": "EdDSA", "typ": "JWT"});
-    let payload = serde_json::json!({
-        "sub": did,
+    let header = serde_json::json!({"alg": jose_algorithm(signer.algorithm())?, "typ": "JWT"});
+    let (session_type, verified_factors) = session_kind(claims.reader_entry_id);
+    let mut payload = serde_json::json!({
+        "sub": claims.did,
         "iat": now,
-        "exp": exp,
+        "exp": claims.exp,
         "iss": "goya-ledger",
-        "type": "session",
+        "type": session_type,
+        "verified_factors": verified_factors,
+        "device_factors": claims.device_factors,
     });
+    if let Some(entry_id) = claims.reader_entry_id {
+        payload["reader_entry_id"] = serde_json::json!(entry_id);
+    }
+    if let Some(audience) = claims.audience {
+        payload["aud"] = serde_json::json!(audience.name());
+    }
     let h = b64url_encode(&serde_json::to_vec(&header).unwrap_or_default());
     let p = b64url_encode(&serde_json::to_vec(&payload).unwrap_or_default());
     let signing_input = format!("{h}.{p}");
     let sig = signer
-        .and_then(|s| s.sign(signing_input.as_bytes()).ok())
-        .unwrap_or_default();
-    let s = b64url_encode(&sig);
-    format!("{signing_input}.{s}")
+        .sign(signing_input.as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(format!("{signing_input}.{}", b64url_encode(&sig)))
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn session_signer(
+    state: &AppState,
+) -> Result<&dyn crate::identity::signing::SigningProvider, ApiError> {
+    state
+        .signing_provider
+        .as_deref()
+        .ok_or_else(|| ApiError::InternalError {
+            reason: "this node has no session signing key".to_string(),
+        })
+}
+
+#[get("/identity/auth/session-key")]
+pub async fn session_key(state: web::Data<AppState>) -> ApiResult<HttpResponse> {
+    let signer = session_signer(&state)?;
+    Ok(HttpResponse::Ok().json(ApiResponse::success(
+        serde_json::json!({
+            "issuer": "goya-ledger",
+            "alg": jose_algorithm(signer.algorithm())
+                .map_err(|reason| ApiError::InternalError { reason })?,
+            "public_key": hex::encode(signer.public_key()),
+        }),
+        uuid::Uuid::new_v4().to_string(),
+    )))
+}
+
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -682,6 +643,28 @@ pub async fn auth_verify(
     req: HttpRequest,
 ) -> ApiResult<HttpResponse> {
     let trace_id = uuid::Uuid::new_v4().to_string();
+    if has_repeated_factor(&body.device_factors) {
+        return Err(ApiError::ValidationError {
+            field: "device_factors".into(),
+            reason: format!("repeated factor in {:?}", body.device_factors),
+        });
+    }
+    let audience =
+        match body.audience.as_deref() {
+            None => None,
+            Some(name) => Some(crate::identity::pairwise::Audience::parse(name).ok_or_else(
+                || ApiError::ValidationError {
+                    field: "audience".into(),
+                    reason: format!("unknown audience {name}"),
+                },
+            )?),
+        };
+    if body.reader_entry_id.is_some() && !body.device_factors.is_empty() {
+        return Err(ApiError::ValidationError {
+            field: "device_factors".into(),
+            reason: "a reader key signs in without device factors".into(),
+        });
+    }
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
 
@@ -709,6 +692,11 @@ pub async fn auth_verify(
         .map_err(|_| ApiError::NotFound {
             resource: format!("identity {}", body.did),
         })?;
+    if identity.status != "active" {
+        return Err(ApiError::Forbidden {
+            reason: format!("identity {} is {}", body.did, identity.status),
+        });
+    }
 
     let algorithm = identity
         .signature_algorithm
@@ -720,12 +708,20 @@ pub async fn auth_verify(
         })
         .unwrap_or(crate::identity::signing::SigningAlgorithm::Ed25519);
 
-    let valid = crate::signature::verify_signature(
-        algorithm,
-        &identity.public_key,
-        challenge.nonce.as_bytes(),
-        &body.signature,
-    );
+    let valid = match body.reader_entry_id.as_deref() {
+        Some(entry_id) => crate::identity::reader_login::is_signed_by_reader(
+            &identity,
+            entry_id,
+            &challenge.nonce,
+            &body.signature,
+        ),
+        None => crate::signature::verify_signature(
+            algorithm,
+            &identity.public_key,
+            login_message(&challenge.nonce, &body.device_factors).as_bytes(),
+            &body.signature,
+        ),
+    };
 
     if !valid {
         return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
@@ -740,7 +736,19 @@ pub async fn auth_verify(
 
     let session_ttl = 3600u64;
     let session_exp = now_secs() + session_ttl;
-    let session_token = mint_session_jwt(&body.did, session_exp, state.signing_provider.as_deref());
+    let session_token = mint_session_jwt(
+        &SessionClaims {
+            did: &body.did,
+            exp: session_exp,
+            device_factors: &body.device_factors,
+            reader_entry_id: body.reader_entry_id.as_deref(),
+            audience,
+        },
+        session_signer(&state)?,
+    )
+    .map_err(|e| ApiError::InternalError {
+        reason: format!("session token for {} not signed: {e}", body.did),
+    })?;
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(
         AuthenticateResponse {
@@ -776,61 +784,53 @@ mod tests {
             status: status.to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
+            recovery_commitment: None,
+            vault_entries: Vec::new(),
         }
     }
 
-    fn canonical_identity() -> (String, String) {
+    #[actix_web::test]
+    async fn ledger_op_changes_state_only_once_its_block_is_mined() {
         use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
-        let public_key = hex::encode(SoftwareSigningProvider::generate().public_key());
-        (
-            crate::identity::did::did_from_pubkey_hex(&public_key),
-            public_key,
-        )
-    }
-
-    #[test]
-    fn new_identity_accepts_did_derived_from_key() {
-        let store = crate::storage::MemoryStore::new();
-        let (did, public_key) = canonical_identity();
+        let state = std::sync::Arc::new(AppState::test_default());
+        let store = get_channel_store(&state, "default").unwrap();
+        let key = SoftwareSigningProvider::generate();
+        let public_key = hex::encode(key.public_key());
+        let did = crate::identity::did::did_from_pubkey_hex(&public_key);
+        let signature = hex::encode(
+            key.sign(operations::register_message(&did, None).as_bytes())
+                .unwrap(),
+        );
         let record = identity_record(&did, &public_key, "active");
-        assert!(validate_new_identity(&store, &record).is_ok());
-    }
 
-    #[test]
-    fn new_identity_rejects_did_not_derived_from_key() {
-        let store = crate::storage::MemoryStore::new();
-        let (victim_did, _) = canonical_identity();
-        let (_, attacker_key) = canonical_identity();
-        let record = identity_record(&victim_did, &attacker_key, "active");
-        assert!(matches!(
-            validate_new_identity(&store, &record),
-            Err(ApiError::ValidationError { .. })
-        ));
-    }
+        let pending = tokio::spawn({
+            let state = state.clone();
+            let store = store.clone();
+            async move {
+                commit_ledger_op(
+                    &state,
+                    store.as_ref(),
+                    "default",
+                    &record.did,
+                    TxPayload::RegisterIdentity {
+                        record: record.clone(),
+                        owner_signature: Some(signature),
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(store.read_identity(&did).is_err());
 
-    #[test]
-    fn new_identity_rejects_non_active_status() {
-        let store = crate::storage::MemoryStore::new();
-        let (did, public_key) = canonical_identity();
-        let record = identity_record(&did, &public_key, "revoked");
-        assert!(matches!(
-            validate_new_identity(&store, &record),
-            Err(ApiError::ValidationError { .. })
-        ));
-    }
-
-    #[test]
-    fn new_identity_rejects_existing_did() {
-        use crate::storage::traits::BlockStore;
-        let store = crate::storage::MemoryStore::new();
-        let (did, public_key) = canonical_identity();
-        let record = identity_record(&did, &public_key, "active");
-        store.write_identity(&record).unwrap();
-        assert!(matches!(
-            validate_new_identity(&store, &record),
-            Err(ApiError::Conflict { .. })
-        ));
+        state.spawn_block_producer(std::time::Duration::from_secs(3600), |_| {});
+        pending.await.unwrap().unwrap();
+        assert_eq!(store.read_identity(&did).unwrap().public_key, public_key);
+        assert!(state.mined_transactions().iter().any(|tx| matches!(
+            &tx.payload,
+            Some(TxPayload::RegisterIdentity { record, .. }) if record.did == did
+        )));
     }
 
     #[test]
@@ -869,7 +869,17 @@ mod tests {
     #[test]
     fn session_jwt_has_correct_structure() {
         let provider = crate::identity::signing::SoftwareSigningProvider::generate();
-        let token = mint_session_jwt("did:goya:test1234", now_secs() + 3600, Some(&provider));
+        let token = mint_session_jwt(
+            &SessionClaims {
+                did: "did:goya:test1234",
+                exp: now_secs() + 3600,
+                device_factors: &[],
+                reader_entry_id: None,
+                audience: None,
+            },
+            &provider,
+        )
+        .unwrap();
         let parts: Vec<&str> = token.split('.').collect();
         assert_eq!(parts.len(), 3);
 
@@ -895,9 +905,19 @@ mod tests {
         key: crate::identity::signing::SoftwareSigningProvider,
     }
 
+    fn state_with_session_key() -> AppState {
+        AppState {
+            signing_provider: Some(std::sync::Arc::new(
+                crate::identity::signing::MlDsaSigningProvider::generate(),
+            )),
+            pairwise_secret: Some(vec![9; 32]),
+            ..AppState::test_with_block_producer()
+        }
+    }
+
     fn registered_owner() -> RegisteredOwner {
         use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
-        let state = web::Data::new(AppState::test_default());
+        let state = web::Data::new(state_with_session_key());
         let key = SoftwareSigningProvider::generate();
         let public_key = hex::encode(key.public_key());
         let did = crate::identity::did::did_from_pubkey_hex(&public_key);
@@ -908,8 +928,7 @@ mod tests {
         RegisteredOwner { state, did, key }
     }
 
-    fn sign_hex(key: &crate::identity::signing::SoftwareSigningProvider, message: &str) -> String {
-        use crate::identity::signing::SigningProvider;
+    fn sign_hex(key: &dyn crate::identity::signing::SigningProvider, message: &str) -> String {
         hex::encode(key.sign(message.as_bytes()).unwrap())
     }
 
@@ -922,7 +941,7 @@ mod tests {
             actix_web::App::new().app_data(owner.state.clone()).service(
                 web::scope("/api/v1")
                     .service(revoke_identity)
-                    .service(migrate_did),
+                    .service(rotate_key),
             ),
         )
         .await;
@@ -943,10 +962,9 @@ mod tests {
 
     async fn post_registration(
         state: &web::Data<AppState>,
-        key: &crate::identity::signing::SoftwareSigningProvider,
-        signer: &crate::identity::signing::SoftwareSigningProvider,
+        key: &dyn crate::identity::signing::SigningProvider,
+        signer: &dyn crate::identity::signing::SigningProvider,
     ) -> (actix_web::http::StatusCode, String) {
-        use crate::identity::signing::SigningProvider;
         let public_key = hex::encode(key.public_key());
         let did = crate::identity::did::did_from_pubkey_hex(&public_key);
         let app = actix_web::test::init_service(
@@ -971,9 +989,9 @@ mod tests {
 
     #[actix_web::test]
     async fn register_rejects_signature_from_another_key() {
-        let state = web::Data::new(AppState::test_default());
-        let key = crate::identity::signing::SoftwareSigningProvider::generate();
-        let attacker = crate::identity::signing::SoftwareSigningProvider::generate();
+        let state = web::Data::new(AppState::test_with_block_producer());
+        let key = crate::identity::signing::MlDsaSigningProvider::generate();
+        let attacker = crate::identity::signing::MlDsaSigningProvider::generate();
         let (status, did) = post_registration(&state, &key, &attacker).await;
         assert_eq!(status, 401);
         assert!(get_channel_store(&state, "default")
@@ -983,9 +1001,21 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn register_with_key_holder_signature_stores_identity() {
-        let state = web::Data::new(AppState::test_default());
+    async fn register_refuses_a_classical_key() {
+        let state = web::Data::new(AppState::test_with_block_producer());
         let key = crate::identity::signing::SoftwareSigningProvider::generate();
+        let (status, did) = post_registration(&state, &key, &key).await;
+        assert_eq!(status, 400);
+        assert!(get_channel_store(&state, "default")
+            .unwrap()
+            .read_identity(&did)
+            .is_err());
+    }
+
+    #[actix_web::test]
+    async fn register_with_key_holder_signature_stores_identity() {
+        let state = web::Data::new(AppState::test_with_block_producer());
+        let key = crate::identity::signing::MlDsaSigningProvider::generate();
         let (status, did) = post_registration(&state, &key, &key).await;
         assert_eq!(status, 201);
         assert!(get_channel_store(&state, "default")
@@ -1013,61 +1043,867 @@ mod tests {
         assert_eq!(owner_status(&owner), "revoked");
     }
 
-    fn migration_body(
-        owner: &RegisteredOwner,
-        old_key: &crate::identity::signing::SoftwareSigningProvider,
-        new_key: &crate::identity::signing::MlDsaSigningProvider,
-    ) -> (serde_json::Value, String) {
-        use crate::identity::signing::SigningProvider;
-        let new_public_key = hex::encode(new_key.public_key());
-        let new_did = crate::identity::did::did_from_pubkey_hex(&new_public_key);
-        let message = format!("identity:migrate:{}:{new_did}", owner.did);
-        let body = serde_json::json!({
-            "new_public_key": new_public_key,
-            "signature": sign_hex(old_key, &message),
-            "new_key_signature": hex::encode(new_key.sign(message.as_bytes()).unwrap()),
-        });
-        (body, new_did)
-    }
-
-    #[actix_web::test]
-    async fn migrate_rejects_signature_from_another_key() {
-        let owner = registered_owner();
-        let attacker = crate::identity::signing::SoftwareSigningProvider::generate();
-        let new_key = crate::identity::signing::MlDsaSigningProvider::generate();
-        let (body, _) = migration_body(&owner, &attacker, &new_key);
-        assert_eq!(post_owner_action(&owner, "migrate", body).await, 401);
-        assert_eq!(owner_status(&owner), "active");
-    }
-
-    #[actix_web::test]
-    async fn migrate_rejects_new_key_without_its_signature() {
-        let owner = registered_owner();
-        let new_key = crate::identity::signing::MlDsaSigningProvider::generate();
-        let other_key = crate::identity::signing::MlDsaSigningProvider::generate();
-        let (mut body, _) = migration_body(&owner, &owner.key, &new_key);
-        let (other_body, _) = migration_body(&owner, &owner.key, &other_key);
-        body["new_key_signature"] = other_body["new_key_signature"].clone();
-        assert_eq!(post_owner_action(&owner, "migrate", body).await, 401);
-        assert_eq!(owner_status(&owner), "active");
-    }
-
-    #[actix_web::test]
-    async fn migrate_moves_identity_to_owner_supplied_key() {
+    fn owner_with_recovery() -> (
+        RegisteredOwner,
+        crate::identity::signing::MlDsaSigningProvider,
+    ) {
         use crate::identity::signing::SigningProvider;
         let owner = registered_owner();
-        let new_key = crate::identity::signing::MlDsaSigningProvider::generate();
-        let (body, new_did) = migration_body(&owner, &owner.key, &new_key);
-        assert_eq!(post_owner_action(&owner, "migrate", body).await, 200);
-        assert_eq!(owner_status(&owner), "migrated");
-        let new_record = get_channel_store(&owner.state, "default")
-            .unwrap()
-            .read_identity(&new_did)
+        let recovery = crate::identity::signing::MlDsaSigningProvider::generate();
+        let store = get_channel_store(&owner.state, "default").unwrap();
+        let record = store.read_identity(&owner.did).unwrap();
+        store
+            .write_identity(&crate::storage::traits::IdentityRecord {
+                recovery_commitment: Some(crate::identity::did::did_from_pubkey_hex(&hex::encode(
+                    recovery.public_key(),
+                ))),
+                ..record
+            })
             .unwrap();
-        assert_eq!(new_record.public_key, hex::encode(new_key.public_key()));
+        (owner, recovery)
+    }
+
+    fn rotation_body(
+        did: &str,
+        recovery_signer: &dyn crate::identity::signing::SigningProvider,
+        new_key: &crate::identity::signing::MlDsaSigningProvider,
+    ) -> serde_json::Value {
+        use crate::identity::signing::SigningProvider;
+        let next = crate::identity::signing::MlDsaSigningProvider::generate();
+        let new_public_key = hex::encode(new_key.public_key());
+        let next_commitment =
+            crate::identity::did::did_from_pubkey_hex(&hex::encode(next.public_key()));
+        let message = operations::rotate_message(did, &new_public_key, &next_commitment);
+        serde_json::json!({
+            "new_public_key": new_public_key,
+            "recovery_public_key": hex::encode(recovery_signer.public_key()),
+            "new_recovery_commitment": next_commitment,
+            "recovery_signature": hex::encode(recovery_signer.sign(message.as_bytes()).unwrap()),
+            "new_key_signature": hex::encode(new_key.sign(message.as_bytes()).unwrap()),
+        })
+    }
+
+    fn owner_public_key(owner: &RegisteredOwner) -> String {
+        get_channel_store(&owner.state, "default")
+            .unwrap()
+            .read_identity(&owner.did)
+            .unwrap()
+            .public_key
+    }
+
+    #[actix_web::test]
+    async fn rotate_rejects_classical_current_key_posing_as_recovery() {
+        let (owner, _recovery) = owner_with_recovery();
+        let thief_key = crate::identity::signing::MlDsaSigningProvider::generate();
+        let before = owner_public_key(&owner);
+        let body = rotation_body(&owner.did, &owner.key, &thief_key);
+        assert_eq!(post_owner_action(&owner, "rotate", body).await, 400);
+        assert_eq!(owner_public_key(&owner), before);
+    }
+
+    #[actix_web::test]
+    async fn rotate_with_recovery_key_replaces_key_and_keeps_did() {
+        use crate::identity::signing::SigningProvider;
+        let (owner, recovery) = owner_with_recovery();
+        let new_key = crate::identity::signing::MlDsaSigningProvider::generate();
+        let body = rotation_body(&owner.did, &recovery, &new_key);
+        assert_eq!(post_owner_action(&owner, "rotate", body).await, 200);
+        assert_eq!(owner_public_key(&owner), hex::encode(new_key.public_key()));
+        assert_eq!(owner_status(&owner), "active");
+    }
+
+    async fn did_login_status(owner: &RegisteredOwner) -> u16 {
+        did_login(
+            owner,
+            |nonce| serde_json::json!({ "signature": sign_hex(&owner.key, nonce) }),
+        )
+        .await
+        .0
+    }
+
+    async fn did_login(
+        owner: &RegisteredOwner,
+        proof: impl Fn(&str) -> serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let app = actix_web::test::init_service(
+            actix_web::App::new().app_data(owner.state.clone()).service(
+                web::scope("/api/v1")
+                    .service(auth_challenge)
+                    .service(auth_verify)
+                    .service(session_key)
+                    .service(crate::api::handlers::identity_session::redeem_session),
+            ),
+        )
+        .await;
+        let challenge_req = actix_web::test::TestRequest::post()
+            .uri("/api/v1/identity/auth/challenge")
+            .set_json(serde_json::json!({ "did": owner.did }))
+            .to_request();
+        let challenge: serde_json::Value =
+            actix_web::test::call_and_read_body_json(&app, challenge_req).await;
+        let nonce = challenge["data"]["challenge"].as_str().unwrap().to_string();
+        let mut body = proof(&nonce);
+        body["did"] = serde_json::json!(owner.did);
+        body["challenge"] = serde_json::json!(nonce);
+        let verify_req = actix_web::test::TestRequest::post()
+            .uri("/api/v1/identity/auth/verify")
+            .set_json(body)
+            .to_request();
+        let response = actix_web::test::call_service(&app, verify_req).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    fn session_claims(response: &serde_json::Value) -> serde_json::Value {
+        let token = response["data"]["session_token"].as_str().unwrap();
+        let payload = token.split('.').nth(1).unwrap();
+        let bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload)
+                .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn published_session_key(state: &web::Data<AppState>) -> (u16, serde_json::Value) {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(state.clone())
+                .service(web::scope("/api/v1").service(session_key)),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::get()
+            .uri("/api/v1/identity/auth/session-key")
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[actix_web::test]
+    async fn session_token_verifies_against_the_published_key() {
+        let owner = registered_owner();
+        let (status, response) = did_login(
+            &owner,
+            |nonce| serde_json::json!({ "signature": sign_hex(&owner.key, nonce) }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let token = response["data"]["session_token"].as_str().unwrap();
+        let (key_status, key) = published_session_key(&owner.state).await;
+        assert_eq!(key_status, 200);
+        assert_eq!(key["data"]["alg"], "ML-DSA-65");
+
+        let parts: Vec<&str> = token.split('.').collect();
+        let decode = |part: &str| {
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, part).unwrap()
+        };
+        let header: serde_json::Value = serde_json::from_slice(&decode(parts[0])).unwrap();
+        assert_eq!(header["alg"], "ML-DSA-65");
+        let signing_input = format!("{}.{}", parts[0], parts[1]);
+        let public_key = key["data"]["public_key"].as_str().unwrap();
+        assert!(crate::signature::verify_signature(
+            crate::identity::signing::SigningAlgorithm::MlDsa65,
+            public_key,
+            signing_input.as_bytes(),
+            &hex::encode(decode(parts[2])),
+        ));
+        let forged_input = signing_input.replacen('.', "x.", 1);
+        assert!(!crate::signature::verify_signature(
+            crate::identity::signing::SigningAlgorithm::MlDsa65,
+            public_key,
+            forged_input.as_bytes(),
+            &hex::encode(decode(parts[2])),
+        ));
+    }
+
+    async fn issued_token(owner: &RegisteredOwner) -> String {
+        let (status, response) = did_login(
+            owner,
+            |nonce| serde_json::json!({ "signature": sign_hex(&owner.key, nonce) }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        response["data"]["session_token"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn redeem(state: &web::Data<AppState>, token: &str) -> (u16, serde_json::Value) {
+        let app = actix_web::test::init_service(
+            actix_web::App::new().app_data(state.clone()).service(
+                web::scope("/api/v1")
+                    .service(crate::api::handlers::identity_session::redeem_session),
+            ),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/v1/identity/auth/session/redeem")
+            .set_json(serde_json::json!({ "session_token": token }))
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[actix_web::test]
+    async fn app_redeems_a_session_token_exactly_once() {
+        let owner = registered_owner();
+        let token = issued_token(&owner).await;
+        let (status, response) = redeem(&owner.state, &token).await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["data"]["did"], owner.did);
         assert_eq!(
-            new_record.migrated_from.as_deref(),
-            Some(owner.did.as_str())
+            response["data"]["verified_factors"],
+            serde_json::json!(["key"])
         );
+        let (replay_status, replay) = redeem(&owner.state, &token).await;
+        assert_eq!(replay_status, 401);
+        assert_eq!(replay["error"]["code"], "SESSION_ALREADY_REDEEMED");
+    }
+
+    #[actix_web::test]
+    async fn tampered_or_foreign_session_tokens_are_rejected() {
+        let owner = registered_owner();
+        let token = issued_token(&owner).await;
+        let parts: Vec<&str> = token.split('.').collect();
+        let forged_payload = b64url_encode(
+            &serde_json::to_vec(&serde_json::json!({
+                "sub": "did:goya:intruder", "iss": "goya-ledger", "type": "session", "exp": now_secs() + 3600,
+            }))
+            .unwrap(),
+        );
+        let tampered = format!("{}.{}.{}", parts[0], forged_payload, parts[2]);
+        let (status, response) = redeem(&owner.state, &tampered).await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("INVALID_SIGNATURE"))
+        );
+
+        let other_node = web::Data::new(state_with_session_key());
+        let (status, response) = redeem(&other_node, &token).await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("INVALID_SIGNATURE"))
+        );
+
+        let (status, _) = redeem(&owner.state, "not-a-jwt").await;
+        assert_eq!(status, 400);
+    }
+
+    #[actix_web::test]
+    async fn expired_session_token_is_rejected() {
+        let owner = registered_owner();
+        let signer = owner.state.signing_provider.clone().unwrap();
+        let expired = mint_session_jwt(
+            &SessionClaims {
+                did: &owner.did,
+                exp: now_secs() - 1,
+                device_factors: &[],
+                reader_entry_id: None,
+                audience: None,
+            },
+            signer.as_ref(),
+        )
+        .unwrap();
+        let (status, response) = redeem(&owner.state, &expired).await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("SESSION_EXPIRED"))
+        );
+    }
+
+    #[actix_web::test]
+    async fn session_of_a_revoked_identity_is_rejected() {
+        let owner = registered_owner();
+        let token = issued_token(&owner).await;
+        get_channel_store(&owner.state, "default")
+            .unwrap()
+            .write_identity(&identity_record(
+                &owner.did,
+                &hex::encode(crate::identity::signing::SigningProvider::public_key(
+                    &owner.key,
+                )),
+                "revoked",
+            ))
+            .unwrap();
+        let (status, response) = redeem(&owner.state, &token).await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("IDENTITY_INACTIVE"))
+        );
+    }
+
+    #[actix_web::test]
+    async fn node_without_session_key_refuses_to_issue_tokens() {
+        let owner = registered_owner();
+        let keyless = RegisteredOwner {
+            state: web::Data::new(AppState::test_with_block_producer()),
+            ..owner
+        };
+        get_channel_store(&keyless.state, "default")
+            .unwrap()
+            .write_identity(&identity_record(
+                &keyless.did,
+                &hex::encode(crate::identity::signing::SigningProvider::public_key(
+                    &keyless.key,
+                )),
+                "active",
+            ))
+            .unwrap();
+        let (status, response) = did_login(
+            &keyless,
+            |nonce| serde_json::json!({ "signature": sign_hex(&keyless.key, nonce) }),
+        )
+        .await;
+        assert_eq!(status, 500, "{response}");
+        assert!(response["data"]["session_token"].is_null());
+        assert_eq!(published_session_key(&keyless.state).await.0, 500);
+    }
+
+    #[actix_web::test]
+    async fn did_login_records_signed_device_factors() {
+        let owner = registered_owner();
+        let (status, response) = did_login(&owner, |nonce| {
+            let message = format!("identity:login:{nonce}:pin,biometric");
+            serde_json::json!({
+                "signature": sign_hex(&owner.key, &message),
+                "device_factors": ["pin", "biometric"],
+            })
+        })
+        .await;
+        assert_eq!(status, 200);
+        let claims = session_claims(&response);
+        assert_eq!(claims["verified_factors"], serde_json::json!(["key"]));
+        assert_eq!(
+            claims["device_factors"],
+            serde_json::json!(["pin", "biometric"])
+        );
+    }
+
+    #[actix_web::test]
+    async fn did_login_without_factors_records_key_only() {
+        let owner = registered_owner();
+        let (status, response) = did_login(
+            &owner,
+            |nonce| serde_json::json!({ "signature": sign_hex(&owner.key, nonce) }),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let claims = session_claims(&response);
+        assert_eq!(claims["verified_factors"], serde_json::json!(["key"]));
+        assert_eq!(claims["device_factors"], serde_json::json!([]));
+    }
+
+    #[actix_web::test]
+    async fn did_login_rejects_factors_not_covered_by_signature() {
+        let owner = registered_owner();
+        let (status, _) = did_login(&owner, |nonce| {
+            serde_json::json!({
+                "signature": sign_hex(&owner.key, nonce),
+                "device_factors": ["pin", "biometric"],
+            })
+        })
+        .await;
+        assert_eq!(status, 401);
+    }
+
+    #[actix_web::test]
+    async fn did_login_rejects_repeated_factor() {
+        let owner = registered_owner();
+        let (status, response) = did_login(&owner, |nonce| {
+            let message = format!("identity:login:{nonce}:pin,pin");
+            serde_json::json!({
+                "signature": sign_hex(&owner.key, &message),
+                "device_factors": ["pin", "pin"],
+            })
+        })
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(response["error"]["field"], "device_factors");
+    }
+
+    #[actix_web::test]
+    async fn did_login_rejects_unknown_factor() {
+        let owner = registered_owner();
+        let (status, _) = did_login(&owner, |nonce| {
+            serde_json::json!({
+                "signature": sign_hex(&owner.key, nonce),
+                "device_factors": ["retina"],
+            })
+        })
+        .await;
+        assert_eq!(status, 400);
+    }
+
+    fn owner_with_reader(
+        revoked_at: Option<u64>,
+    ) -> (
+        RegisteredOwner,
+        crate::identity::signing::SoftwareSigningProvider,
+    ) {
+        use crate::identity::signing::SigningProvider;
+        let owner = registered_owner();
+        let reader = crate::identity::signing::SoftwareSigningProvider::generate();
+        let store = get_channel_store(&owner.state, "default").unwrap();
+        let record = store.read_identity(&owner.did).unwrap();
+        store
+            .write_identity(&crate::storage::traits::IdentityRecord {
+                vault_entries: vec![crate::storage::traits::VaultEntry {
+                    entry_id: "aa01".to_string(),
+                    kind: crate::storage::traits::VaultEntryKind::Reader,
+                    label: "iPhone".to_string(),
+                    sealed_key: hex::encode(reader.public_key()),
+                    added_at: 1,
+                    revoked_at,
+                }],
+                ..record
+            })
+            .unwrap();
+        (owner, reader)
+    }
+
+    fn read_proof(
+        reader: &crate::identity::signing::SoftwareSigningProvider,
+        nonce: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "reader_entry_id": "aa01",
+            "signature": sign_hex(reader, &format!("identity:read:{nonce}")),
+        })
+    }
+
+    async fn redeem_with(
+        state: &web::Data<AppState>,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let app = actix_web::test::init_service(
+            actix_web::App::new().app_data(state.clone()).service(
+                web::scope("/api/v1")
+                    .service(crate::api::handlers::identity_session::redeem_session),
+            ),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/v1/identity/auth/session/redeem")
+            .set_json(body)
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[actix_web::test]
+    async fn reader_key_signs_in_to_a_read_only_session() {
+        let (owner, reader) = owner_with_reader(None);
+        let (status, response) = did_login(&owner, |nonce| read_proof(&reader, nonce)).await;
+        assert_eq!(status, 200, "{response}");
+        let claims = session_claims(&response);
+        assert_eq!(claims["type"], "read_session");
+        assert_eq!(claims["verified_factors"], serde_json::json!(["reader"]));
+        assert_eq!(claims["reader_entry_id"], "aa01");
+    }
+
+    #[actix_web::test]
+    async fn reader_login_rejects_foreign_revoked_or_confused_keys() {
+        let (owner, _reader) = owner_with_reader(None);
+        let thief = crate::identity::signing::SoftwareSigningProvider::generate();
+        assert_eq!(
+            did_login(&owner, |nonce| read_proof(&thief, nonce)).await.0,
+            401
+        );
+        let owner_key_as_reader = did_login(&owner, |nonce| {
+            serde_json::json!({ "reader_entry_id": "aa01", "signature": sign_hex(&owner.key, nonce) })
+        })
+        .await;
+        assert_eq!(owner_key_as_reader.0, 401);
+
+        let (revoked_owner, revoked_reader) = owner_with_reader(Some(5));
+        assert_eq!(
+            did_login(&revoked_owner, |nonce| read_proof(&revoked_reader, nonce))
+                .await
+                .0,
+            401
+        );
+    }
+
+    #[actix_web::test]
+    async fn reader_login_cannot_claim_device_factors() {
+        let (owner, reader) = owner_with_reader(None);
+        let (status, response) = did_login(&owner, |nonce| {
+            let mut proof = read_proof(&reader, nonce);
+            proof["device_factors"] = serde_json::json!(["biometric"]);
+            proof
+        })
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(response["error"]["field"], "device_factors");
+    }
+
+    #[actix_web::test]
+    async fn read_session_redeems_only_for_apps_that_accept_reading() {
+        let (owner, reader) = owner_with_reader(None);
+        let token = |response: serde_json::Value| {
+            response["data"]["session_token"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let first = token(
+            did_login(&owner, |nonce| read_proof(&reader, nonce))
+                .await
+                .1,
+        );
+        let (status, response) =
+            redeem_with(&owner.state, serde_json::json!({ "session_token": first })).await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("READ_ONLY_SESSION"))
+        );
+
+        let second = token(
+            did_login(&owner, |nonce| read_proof(&reader, nonce))
+                .await
+                .1,
+        );
+        let (status, response) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": second, "allow_read": true }),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["data"]["access"], "read");
+        assert_eq!(response["data"]["did"], owner.did);
+    }
+
+    #[actix_web::test]
+    async fn full_session_redeems_with_full_access() {
+        let owner = registered_owner();
+        let token = issued_token(&owner).await;
+        let (status, response) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": token, "allow_read": true }),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["data"]["access"], "full");
+    }
+
+    #[actix_web::test]
+    async fn read_session_dies_when_its_reader_is_revoked() {
+        let (owner, reader) = owner_with_reader(None);
+        let (_, response) = did_login(&owner, |nonce| read_proof(&reader, nonce)).await;
+        let token = response["data"]["session_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let store = get_channel_store(&owner.state, "default").unwrap();
+        let record = store.read_identity(&owner.did).unwrap();
+        let revoked = record
+            .vault_entries
+            .iter()
+            .map(|entry| crate::storage::traits::VaultEntry {
+                revoked_at: Some(9),
+                ..entry.clone()
+            })
+            .collect();
+        store
+            .write_identity(&crate::storage::traits::IdentityRecord {
+                vault_entries: revoked,
+                ..record
+            })
+            .unwrap();
+        let (status, response) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": token, "allow_read": true }),
+        )
+        .await;
+        assert_eq!(
+            (status, response["error"]["code"].clone()),
+            (401, serde_json::json!("READER_REVOKED"))
+        );
+    }
+
+    async fn verify_message(
+        owner: &RegisteredOwner,
+        did: &str,
+        message: &str,
+        signature: &str,
+    ) -> (u16, serde_json::Value) {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(owner.state.clone())
+                .service(web::scope("/api/v1").service(verify_signature)),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri(&format!("/api/v1/identity/{did}/verify-signature"))
+            .set_json(serde_json::json!({ "message": message, "signature": signature }))
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[actix_web::test]
+    async fn verify_signature_checks_the_current_key_of_the_did() {
+        let owner = registered_owner();
+        let stranger = crate::identity::signing::SoftwareSigningProvider::generate();
+        let message = "c0ffee\nPOST /api/releases/1/sign\n{\"pet\":\"Toby\"}";
+        let (status, response) =
+            verify_message(&owner, &owner.did, message, &sign_hex(&owner.key, message)).await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["data"]["valid"], true);
+        let (_, forged) =
+            verify_message(&owner, &owner.did, message, &sign_hex(&stranger, message)).await;
+        assert_eq!(forged["data"]["valid"], false);
+        let (_, other_message) =
+            verify_message(&owner, &owner.did, "other", &sign_hex(&owner.key, message)).await;
+        assert_eq!(other_message["data"]["valid"], false);
+    }
+
+    #[actix_web::test]
+    async fn verify_signature_refuses_revoked_and_unknown_identities() {
+        let owner = registered_owner();
+        let message = "hello";
+        let signature = sign_hex(&owner.key, message);
+        let revoke = serde_json::json!({ "signature": sign_hex(&owner.key, &format!("identity:revoke:{}", owner.did)) });
+        assert_eq!(post_owner_action(&owner, "revoke", revoke).await, 200);
+        let (_, revoked) = verify_message(&owner, &owner.did, message, &signature).await;
+        assert_eq!(revoked["data"]["valid"], false);
+        let (status, _) = verify_message(&owner, "did:goya:unknown", message, &signature).await;
+        assert_eq!(status, 404);
+    }
+
+    #[actix_web::test]
+    async fn did_login_succeeds_for_active_identity() {
+        let owner = registered_owner();
+        assert_eq!(did_login_status(&owner).await, 200);
+    }
+
+    #[actix_web::test]
+    async fn did_login_rejects_revoked_identity() {
+        let owner = registered_owner();
+        let message = format!("identity:revoke:{}", owner.did);
+        let body = serde_json::json!({ "signature": sign_hex(&owner.key, &message) });
+        assert_eq!(post_owner_action(&owner, "revoke", body).await, 200);
+        assert_eq!(did_login_status(&owner).await, 403);
+    }
+
+    async fn token_for(owner: &RegisteredOwner, audience: &str) -> String {
+        let (status, response) = did_login(owner, |nonce| {
+            serde_json::json!({ "signature": sign_hex(&owner.key, nonce), "audience": audience })
+        })
+        .await;
+        assert_eq!(status, 200, "{response}");
+        response["data"]["session_token"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn subject_of(
+        owner: &RegisteredOwner,
+        audience: crate::identity::pairwise::Audience,
+    ) -> String {
+        crate::identity::pairwise::subject_for(
+            owner.state.pairwise_secret.as_deref().unwrap(),
+            audience,
+            &owner.did,
+        )
+        .unwrap()
+    }
+
+    #[actix_web::test]
+    async fn pairwise_app_gets_its_subject_and_never_the_did() {
+        let owner = registered_owner();
+        let token = token_for(&owner, "pet").await;
+        let (status, response) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": token, "audience": "pet" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(
+            response["data"]["subject"],
+            subject_of(&owner, crate::identity::pairwise::Audience::Pet)
+        );
+        assert!(!response.to_string().contains(&owner.did));
+    }
+
+    #[actix_web::test]
+    async fn research_and_wallet_still_get_the_did() {
+        let owner = registered_owner();
+        for audience in ["research", "wallet"] {
+            let token = token_for(&owner, audience).await;
+            let (status, response) = redeem_with(
+                &owner.state,
+                serde_json::json!({ "session_token": token, "audience": audience }),
+            )
+            .await;
+            assert_eq!(status, 200, "{audience}: {response}");
+            assert_eq!(response["data"]["did"], owner.did);
+            assert!(response["data"]["subject"].is_null());
+        }
+    }
+
+    #[actix_web::test]
+    async fn session_redeems_only_for_the_app_it_was_issued_to() {
+        let owner = registered_owner();
+        let token = token_for(&owner, "pet").await;
+        for body in [
+            serde_json::json!({ "session_token": token, "audience": "salud" }),
+            serde_json::json!({ "session_token": token }),
+        ] {
+            let (status, response) = redeem_with(&owner.state, body).await;
+            assert_eq!(
+                (status, response["error"]["code"].clone()),
+                (401, serde_json::json!("WRONG_AUDIENCE"))
+            );
+        }
+        let legacy = issued_token(&owner).await;
+        let (status, _) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": legacy, "audience": "pet" }),
+        )
+        .await;
+        assert_eq!(status, 401);
+        let (status, _) = redeem_with(
+            &owner.state,
+            serde_json::json!({ "session_token": token, "audience": "pet" }),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+
+    #[actix_web::test]
+    async fn login_rejects_an_unknown_audience() {
+        let owner = registered_owner();
+        let (status, _) = did_login(&owner, |nonce| {
+            serde_json::json!({ "signature": sign_hex(&owner.key, nonce), "audience": "evil" })
+        })
+        .await;
+        assert_eq!(status, 400);
+    }
+
+    async fn verify_subject(
+        owner: &RegisteredOwner,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let app = actix_web::test::init_service(
+            actix_web::App::new().app_data(owner.state.clone()).service(
+                web::scope("/api/v1")
+                    .service(crate::api::handlers::identity_session::verify_subject_signature),
+            ),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/v1/pairwise/verify-signature")
+            .set_json(body)
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        let status = response.status().as_u16();
+        let bytes = actix_web::test::read_body(response).await;
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[actix_web::test]
+    async fn app_verifies_a_signature_by_subject_only_in_its_own_audience() {
+        use crate::identity::pairwise::Audience;
+        let owner = registered_owner();
+        let stranger = crate::identity::signing::SoftwareSigningProvider::generate();
+        let message = "c0ffee\nPOST /api/releases/1/sign\n{\"pet\":\"Toby\"}";
+        let check = |audience: &str, subject: String, signature: String| serde_json::json!({ "audience": audience, "subject": subject, "message": message, "signature": signature });
+        let pet = subject_of(&owner, Audience::Pet);
+        let (status, response) = verify_subject(
+            &owner,
+            check("pet", pet.clone(), sign_hex(&owner.key, message)),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(response["data"]["valid"], true);
+        let (_, forged) = verify_subject(
+            &owner,
+            check("pet", pet.clone(), sign_hex(&stranger, message)),
+        )
+        .await;
+        assert_eq!(forged["data"]["valid"], false);
+        let salud = subject_of(&owner, Audience::Salud);
+        let (_, crossed) =
+            verify_subject(&owner, check("pet", salud, sign_hex(&owner.key, message))).await;
+        assert_eq!(crossed["data"]["valid"], false);
+        let (status, _) = verify_subject(
+            &owner,
+            check("research", pet, sign_hex(&owner.key, message)),
+        )
+        .await;
+        assert_eq!(status, 400);
+    }
+
+    #[actix_web::test]
+    async fn pairwise_verify_is_reachable_through_the_real_route_table() {
+        let owner = registered_owner();
+        let message = "c0ffee";
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(owner.state.clone())
+                .configure(crate::api::routes::ApiRoutes::configure),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::post()
+            .uri("/api/v1/pairwise/verify-signature")
+            .set_json(serde_json::json!({
+                "audience": "pet",
+                "subject": subject_of(&owner, crate::identity::pairwise::Audience::Pet),
+                "message": message,
+                "signature": sign_hex(&owner.key, message),
+            }))
+            .to_request();
+        let response: serde_json::Value =
+            actix_web::test::call_and_read_body_json(&app, request).await;
+        assert_eq!(response["data"]["valid"], true, "{response}");
+    }
+
+    #[actix_web::test]
+    async fn app_learns_when_the_identity_behind_its_subject_is_revoked() {
+        use crate::identity::signing::SigningProvider;
+        let owner = registered_owner();
+        let subject = subject_of(&owner, crate::identity::pairwise::Audience::Salud);
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(owner.state.clone())
+                .configure(crate::api::routes::ApiRoutes::configure),
+        )
+        .await;
+        let status_of = |subject: String| {
+            actix_web::test::TestRequest::post()
+                .uri("/api/v1/pairwise/status")
+                .set_json(serde_json::json!({ "audience": "salud", "subject": subject }))
+                .to_request()
+        };
+        let active: serde_json::Value =
+            actix_web::test::call_and_read_body_json(&app, status_of(subject.clone())).await;
+        assert_eq!(active["data"]["active"], true, "{active}");
+        get_channel_store(&owner.state, "default")
+            .unwrap()
+            .write_identity(&identity_record(
+                &owner.did,
+                &hex::encode(owner.key.public_key()),
+                "revoked",
+            ))
+            .unwrap();
+        let revoked: serde_json::Value =
+            actix_web::test::call_and_read_body_json(&app, status_of(subject)).await;
+        assert_eq!(revoked["data"]["active"], false);
+        let unknown: serde_json::Value = actix_web::test::call_and_read_body_json(
+            &app,
+            status_of(format!("pid:{}", "0".repeat(64))),
+        )
+        .await;
+        assert_eq!(unknown["data"]["active"], false);
     }
 }

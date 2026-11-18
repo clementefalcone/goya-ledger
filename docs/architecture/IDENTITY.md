@@ -14,8 +14,6 @@ src/identity/
 ├── hsm.rs            PKCS#11 HSM provider (feature-gated)
 ├── sd_jwt.rs         SD-JWT VC (RFC 9901 + key binding)
 ├── mdoc.rs           ISO 18013-5 mDL/PID credentials
-├── status_list.rs    IETF Token Status List (revocation)
-├── attestation.rs    EUDI ARF v3.0 attestation types
 ├── ra.rs             Registration Authority (multi-jurisdiction)
 ├── pqc_policy.rs     PQC enforcement + tag forgery prevention
 ├── zkp.rs            Commitment proofs (not ZKP — documented)
@@ -49,16 +47,28 @@ FIPS 140-3 Known Answer Tests run at startup via `run_crypto_self_tests()`.
 ## Key Lifecycle
 
 ```
-generate → active → rotate_key (same algo)
-                  → rotate_algorithm (cross-algo, e.g. Ed25519 → ML-DSA-65)
-                  → migrate_identity (new DID, old DID marked "migrated")
-                  → split (Shamir SSS for backup)
+register (DID fixed by first key, commits SHA3-512 of an ML-DSA-65 recovery key)
+  → active ⇄ revoked (revoke: signed by current key)
+  → rotate (signed by the committed recovery key + the new key; same DID,
+            new signing key, fresh recovery commitment; restores revoked)
+  → split (Shamir SSS for backup)
 ```
 
 - `KeyManager` tracks active + retired keys with timestamps
-- `migrate_identity()` writes migration chain in store: old DID → "migrated", new DID → "active" with `migrated_from`
-- `resolve_identity()` follows migration chain to find current active DID
+- Register, revoke and rotate are `TxPayload` transactions: every node re-verifies signatures when it applies the block (`identity::operations`)
+- Rotation is the PQC migration path: an Ed25519 identity rotates to an ML-DSA-65 key and keeps its DID; the recovery key must be ML-DSA-65 so a broken classical algorithm cannot authorize it
+- A stolen device cannot rotate: it holds the current key, not the recovery key; after rotation the stolen key fails every identity operation on every node
+- An identity registered without a recovery commitment can commit one once (`POST /identity/{did}/recovery`, `TxPayload::CommitRecoveryKey`), signed by its current key over `identity:recovery:commit:{did}:{commitment}`; once set, only rotation by the recovery key replaces it (`identity::recovery_commitment`)
 - `key_recovery::split(secret, threshold, total)` produces N shares; any K reconstruct via Lagrange interpolation over GF(256)
+
+### Civil anchor (one person, one DID)
+
+- A civil anchor ties a DID to a verified civil document (e.g. a Chilean RUN) without putting the document on the chain. The anchor is a keyed digest (64 hex, e.g. HMAC-SHA3-256) computed by the issuer with a key only the issuer holds. A plain hash would not do: about 30 million RUNs can be hashed in seconds
+- `POST /identity/{did}/civil-anchor` (`TxPayload::BindCivilAnchor`, `identity::civil_anchor`) with `issuer_did`, `anchor`, `issuer_signature`, `signature`. The issuer DID and the DID's current key both sign `identity:civil-anchor:{issuer_did}:{did}:{anchor}`: the issuer vouches for the document, and the owner consents to that issuer
+- Any registered, active DID can issue anchors; the node keeps no list of issuers. Uniqueness holds per issuer: under one issuer each anchor maps to exactly one DID, and each DID holds at most one anchor per issuer. A verifier decides which issuers it believes. A rogue issuer can only fill its own namespace, so it cannot take a document another issuer bound
+- Two binds of the same issuer and anchor in one block: the first wins on every node, and the second is `invalid_payload`
+- Rebind after a lost DID: the signed message adds `:replaces:{previous_did}`, and `replaces` must name the current holder under that issuer. The anchor moves to the new DID. The previous DID stays active but loses that issuer's anchor, so an issuer cannot revoke anyone's DID
+- Registration rejects a record that already carries a civil anchor: an anchor enters only through a bind
 
 ### HSM Support
 
@@ -83,14 +93,6 @@ Behind `hsm` feature flag. `HsmSigningProvider` wraps PKCS#11:
 - Device authentication via `DeviceAuth` + `SessionTranscript`
 - Selective disclosure by namespace/element
 
-### Revocation
-
-IETF Token Status List (draft-ietf-oauth-status-list):
-- 2-bit per entry: Valid (0x00), Invalid (0x01), Suspended (0x02)
-- Random index allocation (prevents correlation)
-- JWT-signed status list with ZLIB compression
-- SHA-256 anchor hash for DLT anchoring
-
 ## Authentication
 
 ### DID Auth (challenge-response)
@@ -114,6 +116,29 @@ Client                          Server
 
 - Algorithm resolved from `IdentityRecord.signature_algorithm`
 - Supports Ed25519 and ML-DSA-65
+- Optional `device_factors` (`pin`, `passphrase`, `biometric`) are checked on the device. When present, the signature must cover `identity:login:{nonce}:{factors joined by ","}` in the order sent; otherwise it covers the bare nonce. A repeated factor returns 400.
+- The session JWT carries `verified_factors` (checked by the node, today `["key"]`) and `device_factors` (asserted by the device, bound by the signature). Apps requiring multiple factors read both.
+- The session JWT is signed by the node's signing key; its header `alg` names that key (`ML-DSA-65` or `EdDSA`). Apps fetch the key from `GET /identity/auth/session-key` (`{issuer, alg, public_key}`) and verify `{header}.{payload}` against it. A node without a signing key refuses to issue tokens (500).
+- Apps without ML-DSA redeem the token instead: `POST /identity/auth/session/redeem {session_token, allow_read?}` checks the node signature, `iss`, `type`, `exp` and that the identity is still active, then returns `{did, exp, access, verified_factors, device_factors}`. Each token redeems once (kept in memory until it expires, so a node restart forgets them).
+
+### Read-only sessions (reader keys)
+
+A device can read without Face ID and act only with it.
+
+- A reader key is a vault entry of `kind: reader` whose `sealed_key` carries the device's Ed25519 public key (64 hex; nothing is sealed). It is added and revoked like any vault entry, signed by the DID key, so the theft lockout that revokes every copy also kills every reader.
+- Sign-in: `POST /identity/auth/verify {did, challenge, reader_entry_id, signature}` with the reader's signature over `identity:read:{nonce}` and no `device_factors`. The token has `type: read_session`, `verified_factors: ["reader"]` and `reader_entry_id`.
+- Redeem is safe by default: a read session answers 401 `READ_ONLY_SESSION` unless the app sends `allow_read: true`, and 401 `READER_REVOKED` once its reader is revoked. `access` is `full` or `read`; apps refuse every change on a `read` session.
+- Reader keys are classical (Ed25519) because browsers only keep non-extractable keys for classical algorithms; they never authorize a change.
+
+### Identity vault (per-device sealed keys)
+
+`IdentityRecord.vault_entries` holds encrypted copies of the DID secret key, one per device passkey (`kind: device`, sealed with the passkey PRF secret) and one per recovery code (`kind: recovery`). The node never decrypts `sealed_key`; it only stores and replicates it.
+
+- `POST /identity/{did}/vault` adds a copy. The current key of the DID signs `identity:vault:add:{did}:{entry_id}:{kind}:{sha3_256(label)}:{sha3_256(sealed_key)}`. `added_at` is set by the node and is not signed; retrying the same content is idempotent.
+- `POST /identity/{did}/vault/{entry_id}/revoke` marks a copy revoked; signature over `identity:vault:revoke:{did}:{entry_id}`.
+- Both travel in blocks (`TxPayload::AddVaultEntry`, `TxPayload::RevokeVaultEntry`) and every node re-verifies the signature.
+- Read with `GET /store/identities/{did}`.
+- Revoking a copy does not change the DID key. After a device is stolen, rotate the key and reseal the remaining devices.
 
 ### ACL System
 
@@ -149,14 +174,6 @@ Multi-jurisdiction identity proofing in `ra.rs`:
 
 External verification via `IdentityVerificationProvider` trait. Smart-ID integration for Estonian e-ID.
 
-## EUDI Compliance
-
-`attestation.rs` implements ARF v3.0:
-- Attestation types: PID, EAA, QEAA, PuB-EAA
-- Issuer roles: PidProvider, TSP, QTSP, PublicBody
-- PID prerequisite enforcement (CIR 2024/2977)
-- Fail-closed 6-step authorization check
-
 ## Storage
 
 `IdentityRecord` in `storage/traits.rs`:
@@ -166,8 +183,10 @@ External verification via `IdentityVerificationProvider` trait. Smart-ID integra
 | did | String | `did:goya:{...}` |
 | public_key | String | Hex-encoded public key |
 | signature_algorithm | Option\<String\> | Ed25519, MlDsa65, etc. |
-| status | String | active, migrated, revoked |
-| migrated_from | Option\<String\> | Previous DID (migration chain) |
+| status | String | active, revoked, migrated (legacy DID format only) |
+| migrated_from | Option\<String\> | Previous legacy-format DID |
+| recovery_commitment | Option\<String\> | `did_from_pubkey_hex` of the committed recovery key |
+| civil_anchors | Vec\<CivilAnchor\> | `{issuer_did, anchor}`: keyed digests of civil documents, one per issuer |
 | created_at | u64 | Unix timestamp |
 | updated_at | u64 | Unix timestamp |
 
@@ -177,26 +196,28 @@ Light client: `LocalIdentityStore` persists identities as JSON in `~/.goya/ident
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | /identity/create | Create DID + keypair |
+| POST | /store/identities | Register a DID: the key holder signs `identity:register:{did}` |
 | GET | /identity/{did} | Fetch identity |
-| POST | /identity/{did}/rotate-key | Key rotation |
-| POST | /identity/{did}/verify-signature | Verify signature |
-| POST | /identity/{did}/migrate | PQC migration |
+| POST | /identity/{did}/verify-signature | `{message, signature}` → `valid` only if the DID is active and its current registry key signed `message` |
+| POST | /identity/{did}/revoke | Revoke (current key) |
+| POST | /identity/{did}/rotate | Rotate key with recovery key (same DID) |
+| POST | /identity/{did}/civil-anchor | Bind a civil document (issuer DID + current key) |
 | POST | /identity/auth/challenge | DID Auth: get nonce |
 | POST | /identity/auth/verify | DID Auth: verify signature |
+| GET | /identity/auth/session-key | Public key that signs session JWTs |
+| POST | /identity/auth/session/redeem | Verify and consume a session JWT once |
 | GET | /did/{did} | W3C DID Resolution |
-| POST | /credentials/issue | Issue credential |
-| GET | /credentials/{id} | Fetch credential |
+| POST | /store/credentials | Record a credential signed by its issuer (claims commitment only) |
+| POST | /store/credentials/{id}/revoke | Revoke with the issuer's signature |
+| GET | /store/credentials/{id} | Fetch credential |
 | GET | /credentials/{id}/vc | W3C VC export |
-| POST | /credentials/{id}/verify | Verify credential |
-| POST | /credentials/{id}/revoke | Revoke credential |
 
-OpenID4VCI and OpenID4VP endpoints in `oid4vci.rs` and `oid4vp.rs`.
+OpenID4VCI and OpenID4VP endpoints in `oid4vci.rs` and `oid4vp.rs`. The node never signs credentials: an OID4VCI offer must be signed by the issuer DID, the access token is bound to that issuer and configuration, and `/credential` answers with a deferred `transaction_id` that `/deferred_credential` resolves once the issuer delivers the credential. The issuer registers its own ES256 key, signed by its DID key and replicated on chain (`issuer_keys.rs`), lists its pending issuances with a DID signature and delivers SD-JWT VCs that the node checks against that key, the `iss` `https://{host}/api/v1/issuers/{did}`, the offered `vct` and the holder `cnf.jwk`. There is no node issuer key or status list.
 
 ## Stats
 
 - 14 source files, ~7000 lines
 - 285 unit tests in identity module
 - 5 cryptographic algorithms with FIPS KAT
-- 3 credential formats (SD-JWT VC, mdoc, status list)
+- 2 credential formats (SD-JWT VC, mdoc)
 - 3 jurisdictions (Chile, UAE, EU)

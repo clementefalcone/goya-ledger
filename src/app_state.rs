@@ -23,7 +23,6 @@ use crate::msp::CrlStore;
 use crate::network::Node;
 use crate::ordering::OrderingBackend;
 use crate::pin::store::PinStore;
-use crate::privacy::PrivateClaimsStore;
 use crate::private_data::{CollectionRegistry, PrivateDataStore};
 use crate::smart_contracts::ContractManager;
 use crate::staking::StakingManager;
@@ -101,9 +100,11 @@ pub struct AppState {
     pub signing_provider: Option<Arc<dyn crate::identity::signing::SigningProvider>>,
     /// New transaction pool backed by storage::Transaction.
     pub tx_pool: Arc<Mutex<crate::transaction::mempool::TransactionPool>>,
+    pub block_wake: Arc<tokio::sync::Notify>,
     /// HMAC secret for vault recovery blind indexing (NIST SP 800-185).
     /// Recovery is disabled when this is `None`.
     pub vault_recovery_secret: Option<Vec<u8>>,
+    pub pairwise_secret: Option<Vec<u8>>,
     /// Per-IP rate limiter for vault recovery attempts.
     pub vault_rate_limiter: Arc<crate::api::handlers::vault::RecoveryRateLimiter>,
     /// Cross-chain bridge engine.
@@ -124,10 +125,48 @@ pub struct AppState {
     pub lexchain_store: crate::lexchain::store::LexChainStore,
     pub economics_state: Arc<Mutex<EconomicsState>>,
     pub deposit_ledger: Arc<DepositLedger>,
-    pub private_claims: Arc<PrivateClaimsStore>,
 }
 
 impl AppState {
+    pub fn test_with_block_producer() -> Self {
+        let state = Self::test_default();
+        state.spawn_block_producer(std::time::Duration::from_secs(3600), |_| {});
+        state
+    }
+
+    pub fn mined_transactions(&self) -> Vec<crate::storage::traits::Transaction> {
+        let store = self
+            .store
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("default")
+            .cloned()
+            .expect("default channel store");
+        let latest = store.get_latest_height().unwrap_or(0);
+        (0..=latest)
+            .filter_map(|height| store.read_block(height).ok())
+            .flat_map(|block| block.transaction_data)
+            .collect()
+    }
+
+    pub fn spawn_block_producer(
+        &self,
+        interval: std::time::Duration,
+        on_block: impl Fn(u64) + Send + 'static,
+    ) {
+        let producer = crate::mining::BlockProducer {
+            pool: self.tx_pool.clone(),
+            mining: self
+                .mining_service
+                .clone()
+                .expect("MiningService required for block production"),
+            wake: self.block_wake.clone(),
+        };
+        tokio::spawn(crate::mining::run_block_producer(
+            producer, interval, on_block,
+        ));
+    }
+
     /// Create an AppState with all memory-backed defaults for testing.
     ///
     /// All `Option` fields are `None`, all stores use in-memory implementations.
@@ -137,7 +176,7 @@ impl AppState {
 
         let default_store: Arc<dyn BlockStore> = Arc::new(MemoryStore::new());
         let mut store_map = HashMap::new();
-        store_map.insert("default".to_string(), default_store);
+        store_map.insert("default".to_string(), default_store.clone());
 
         Self {
             node: None,
@@ -180,12 +219,17 @@ impl AppState {
             legal_oracle: Arc::new(std::sync::Mutex::new(
                 crate::legal_oracle::legal::LegalOracle::new(300),
             )),
-            mining_service: None,
+            mining_service: Some(Arc::new(crate::mining::MiningService::new(
+                default_store.clone(),
+                crate::mining::MiningConfig::default(),
+            ))),
             signing_provider: None,
             tx_pool: Arc::new(Mutex::new(
                 crate::transaction::mempool::TransactionPool::new(),
             )),
+            block_wake: Arc::new(tokio::sync::Notify::new()),
             vault_recovery_secret: None,
+            pairwise_secret: None,
             vault_rate_limiter: Arc::new(crate::api::handlers::vault::RecoveryRateLimiter::new()),
             bridge_engine: Arc::new(crate::bridge::protocol::BridgeEngine::new()),
             proof_verifier: Arc::new(crate::inference::proof::MultiVerifier::new()),
@@ -194,10 +238,11 @@ impl AppState {
             identity_verifier: None,
             ocsp_responder: None,
             lifecycle_manager: None,
-            lexchain_store: crate::lexchain::store::LexChainStore::new(),
+            lexchain_store: crate::lexchain::store::LexChainStore::with_backend(
+                default_store.clone(),
+            ),
             economics_state: Arc::new(Mutex::new(EconomicsState::default())),
             deposit_ledger: Arc::new(DepositLedger::new()),
-            private_claims: Arc::new(PrivateClaimsStore::new()),
         }
     }
 }

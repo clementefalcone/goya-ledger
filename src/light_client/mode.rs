@@ -3,7 +3,7 @@
 //! **FEA limitation:** Light clients cannot create FEA (Firma Electrónica
 //! Avanzada) signatures locally — they have no signing provider, no HSM
 //! access, and no TSA. FEA signing must be delegated to a full node via
-//! `POST /api/v1/sign/fea` on the seed node.
+//! `POST /api/v1/sign/seal` on the seed node.
 
 use std::fmt;
 

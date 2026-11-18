@@ -10,12 +10,6 @@ pub fn did_matches_pubkey(did: &str, pubkey_hex: &str) -> bool {
     !pubkey_hex.is_empty() && did == did_from_pubkey_hex(pubkey_hex)
 }
 
-pub fn civil_anchor_hash(doc_type: &str, doc_number: &str) -> String {
-    let preimage = format!("{doc_type}:{doc_number}");
-    let digest = hash_sha3_512(preimage.as_bytes());
-    hex::encode(digest)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54,32 +48,5 @@ mod tests {
     fn canonical_did_deterministic() {
         let key = "606024501eda68c20bd7b65841d0c580aaaaaa";
         assert_eq!(did_from_pubkey_hex(key), did_from_pubkey_hex(key));
-    }
-
-    #[test]
-    fn civil_anchor_uses_sha3_512() {
-        let h = civil_anchor_hash("RUT", "12345678-9");
-        assert_eq!(h.len(), 128);
-    }
-
-    #[test]
-    fn civil_anchor_deterministic() {
-        let h1 = civil_anchor_hash("RUT", "12345678-9");
-        let h2 = civil_anchor_hash("RUT", "12345678-9");
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
-    fn civil_anchor_differs_by_type() {
-        let rut = civil_anchor_hash("RUT", "12345678-9");
-        let dni = civil_anchor_hash("DNI", "12345678-9");
-        assert_ne!(rut, dni);
-    }
-
-    #[test]
-    fn civil_anchor_differs_by_number() {
-        let a = civil_anchor_hash("RUT", "12345678-9");
-        let b = civil_anchor_hash("RUT", "98765432-1");
-        assert_ne!(a, b);
     }
 }

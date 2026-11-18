@@ -613,7 +613,10 @@ pub async fn transfer_document(
             }
         })?);
 
-    let sign_msg = format!("transfer_doc:{content_hash}:{did}:{to_did}");
+    let sequence = get_document_owner(proxy, content_hash)
+        .await?
+        .transfer_count;
+    let sign_msg = format!("transfer_doc:{content_hash}:{sequence}:{did}:{to_did}");
     use ed25519_dalek::Signer;
     let signature = hex::encode(signing_key.sign(sign_msg.as_bytes()).to_bytes());
 
@@ -1029,7 +1032,7 @@ mod tests {
 
         let hash = hash_document(b"my-contract.pdf");
         let to = "did:goya:recipient0000000";
-        let sign_msg = format!("transfer_doc:{hash}:{}:{to}", info.did);
+        let sign_msg = format!("transfer_doc:{hash}:0:{}:{to}", info.did);
 
         use ed25519_dalek::{Signer, Verifier};
         let sig = signing_key.sign(sign_msg.as_bytes());

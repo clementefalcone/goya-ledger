@@ -4,8 +4,6 @@
 //! Validates: OID4VCI issuance, OID4VP presentation, SD-JWT VC structure,
 //! mdoc DeviceResponse, and DCQL queries with real payloads.
 
-use rust_bc::api::handlers::oid4vci::verify_pkce;
-use rust_bc::crypto::hasher::{hash_with, HashAlgorithm};
 use rust_bc::identity::mdoc::{
     issue_mdoc, sign_device_auth, verify_device_auth, verify_mdoc, DeviceResponse, Document,
     MdocParams,
@@ -131,20 +129,6 @@ fn eudi_mdoc_device_response_flow() {
 
     // 3c. Wrong session transcript fails
     assert!(verify_device_auth(da, &holder_pk, b"wrong-session").is_err());
-}
-
-// ── PKCE (RFC 7636) ────────────────────────────────────────────────────
-
-#[test]
-fn pkce_s256_rfc_example() {
-    // Simulates a wallet generating code_verifier, computing challenge,
-    // then the issuer verifying it at token exchange
-    let code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-    let hash = hash_with(HashAlgorithm::Sha256, code_verifier.as_bytes());
-    let code_challenge =
-        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, hash);
-    assert!(verify_pkce(code_verifier, &code_challenge));
-    assert!(!verify_pkce("tampered-verifier", &code_challenge));
 }
 
 // ── Cross-jurisdiction credential ──────────────────────────────────────

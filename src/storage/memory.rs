@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use super::errors::{StorageError, StorageResult};
 use super::traits::{
     Acta, AliasEntry, Assembly, Block, BlockStore, ClaimStatus, Credential, IdentityRecord,
-    InferenceChallenge, InferenceClaim, Invitation, NotarizationEntry, OwnershipTransfer, Scope,
-    Session, Transaction,
+    InferenceChallenge, InferenceClaim, Invitation, IssuerCredentialKey, IssuerStatusList,
+    NotarizationEntry, OwnershipTransfer, Scope, Session, Transaction,
 };
 use crate::registry::compliance::{ComplianceResult, ComplianceRule};
 use crate::registry::tokenization::AssetToken;
@@ -20,6 +20,8 @@ pub struct MemoryStore {
     identities: Mutex<HashMap<String, IdentityRecord>>,
     civil_anchors: Mutex<HashMap<String, String>>,
     credentials: Mutex<HashMap<String, Credential>>,
+    issuer_credential_keys: Mutex<HashMap<String, IssuerCredentialKey>>,
+    issuer_status_lists: Mutex<HashMap<(String, String), IssuerStatusList>>,
     latest_height: Mutex<u64>,
     /// Governance proposals: id → Proposal
     proposals: Mutex<HashMap<u64, crate::governance::proposals::Proposal>>,
@@ -71,6 +73,8 @@ impl MemoryStore {
             identities: Mutex::new(HashMap::new()),
             civil_anchors: Mutex::new(HashMap::new()),
             credentials: Mutex::new(HashMap::new()),
+            issuer_credential_keys: Mutex::new(HashMap::new()),
+            issuer_status_lists: Mutex::new(HashMap::new()),
             latest_height: Mutex::new(0),
             proposals: Mutex::new(HashMap::new()),
             votes: Mutex::new(HashMap::new()),
@@ -205,6 +209,43 @@ impl BlockStore for MemoryStore {
             .get(cred_id)
             .cloned()
             .ok_or_else(|| StorageError::CredentialNotFound(cred_id.to_string()))
+    }
+
+    fn write_issuer_credential_key(&self, registration: &IssuerCredentialKey) -> StorageResult<()> {
+        self.issuer_credential_keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(registration.did.clone(), registration.clone());
+        Ok(())
+    }
+
+    fn read_issuer_credential_key(&self, did: &str) -> StorageResult<IssuerCredentialKey> {
+        self.issuer_credential_keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(did)
+            .cloned()
+            .ok_or_else(|| StorageError::KeyNotFound(format!("issuer_credential_key:{did}")))
+    }
+
+    fn write_issuer_status_list(&self, status_list: &IssuerStatusList) -> StorageResult<()> {
+        self.issuer_status_lists
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                (status_list.did.clone(), status_list.list_id.clone()),
+                status_list.clone(),
+            );
+        Ok(())
+    }
+
+    fn read_issuer_status_list(&self, did: &str, list_id: &str) -> StorageResult<IssuerStatusList> {
+        self.issuer_status_lists
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(did.to_string(), list_id.to_string()))
+            .cloned()
+            .ok_or_else(|| StorageError::KeyNotFound(format!("issuer_status_list:{did}/{list_id}")))
     }
 
     fn list_credentials(&self) -> StorageResult<Vec<Credential>> {
@@ -993,7 +1034,9 @@ mod tests {
             status: "active".to_string(),
             migrated_from: None,
             signature_algorithm: None,
-            civil_anchor: None,
+            civil_anchors: Vec::new(),
+            recovery_commitment: None,
+            vault_entries: Vec::new(),
         };
         store.write_identity(&id).unwrap();
         let fetched = store.read_identity("did:goya:alice").unwrap();

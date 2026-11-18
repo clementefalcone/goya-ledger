@@ -12,8 +12,8 @@ El problema central de Hoktus aquí es **confianza**: ¿este certificado es aut�
 
 rust-bc resuelve esto con:
 
-- **Credenciales verificables** (`POST /credentials/issue`, `POST /credentials/{id}/verify`) — un empleador emite una credencial, cualquier tercero la verifica criptográficamente sin contactar al emisor.
-- **Identidad DID** (`POST /identity/create`) — cada trabajador, empresa y entidad validadora tiene una identidad descentralizada. No depende de un servidor central para verificar quién firmó qué.
+- **Credenciales verificables** (`POST /store/credentials`, `POST /store/credentials/{id}/revoke`) — un empleador emite una credencial firmada con su clave, la cadena la replica y cualquier tercero verifica la firma y su estado sin contactar al emisor.
+- **Identidad DID** (`POST /store/identities`) — cada trabajador, empresa y entidad validadora tiene una identidad descentralizada. No depende de un servidor central para verificar quién firmó qué.
 - **Inmutabilidad** — un documento validado y registrado on-chain no puede ser alterado retroactivamente. Auditoría perfecta.
 
 **Caso concreto:** una universidad emite un título como credencial verificable → Hoktus lo verifica en milisegundos sin llamar a la universidad → el resultado queda registrado con timestamp inmutable.

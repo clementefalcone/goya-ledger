@@ -1,19 +1,21 @@
 use crate::signature::{BiometricEvidence, SignatureLevel, SignedEnvelope};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartyDefinition {
     pub role: String,
     pub did: String,
     pub signature_level: SignatureLevel,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContractDefinition {
     #[serde(rename = "type")]
     pub contract_type: String,
     pub parties: Vec<PartyDefinition>,
     pub payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_commitment: Option<String>,
     #[serde(default)]
     pub require_notarization: bool,
     /// Seconds from deploy until the contract expires if not fully signed.
@@ -51,7 +53,7 @@ impl std::fmt::Display for ContractState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartyState {
     pub role: String,
     pub did: String,
@@ -72,7 +74,7 @@ impl PartyState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeliveryReceipt {
     pub recipient_did: String,
     pub sent_at: u64,
@@ -83,7 +85,7 @@ pub struct DeliveryReceipt {
     pub receipt_tsa_token: Option<crate::tsa::TimeStampToken>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LexContract {
     pub id: String,
     pub definition: ContractDefinition,
@@ -99,9 +101,18 @@ pub struct LexContract {
     pub delivery_receipts: Vec<DeliveryReceipt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preservation_records: Vec<PreservationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_salt: Option<String>,
 }
 
 impl LexContract {
+    pub fn public_view(&self) -> LexContract {
+        let mut public = self.clone();
+        public.definition.payload = serde_json::Value::Null;
+        public.payload_salt = None;
+        public
+    }
+
     pub fn all_signed(&self) -> bool {
         self.parties.iter().all(|p| p.signed)
     }
@@ -156,7 +167,7 @@ pub enum DeployRequest {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreservationRecord {
     pub preserved_at: u64,
     pub original_algorithm: crate::identity::signing::SigningAlgorithm,

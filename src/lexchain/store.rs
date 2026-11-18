@@ -101,8 +101,8 @@ impl LexChainStore {
         self.templates.lock().unwrap().values().cloned().collect()
     }
 
-    pub fn save(&self, contract: LexContract) {
-        let _ = self.backend.write_lexcontract(&contract);
+    pub fn save(&self, contract: LexContract) -> crate::storage::errors::StorageResult<()> {
+        self.backend.write_lexcontract(&contract)
     }
 
     pub fn get(&self, id: &str) -> Option<LexContract> {

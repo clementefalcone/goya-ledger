@@ -66,6 +66,8 @@ pub struct VerifiedSdJwt {
     pub algorithm: SigningAlgorithm,
     /// True when a valid Key Binding JWT was present and verified.
     pub kb_verified: bool,
+    pub cnf: Option<serde_json::Value>,
+    pub status: Option<serde_json::Value>,
 }
 
 fn base64url_encode(data: &[u8]) -> String {
@@ -132,6 +134,23 @@ pub fn jwt_to_alg_pub(s: &str) -> Option<SigningAlgorithm> {
 /// Compute kid from public key (first 8 bytes of SHA-256, base64url).
 pub fn compute_kid(provider: &dyn SigningProvider) -> String {
     base64url_encode(&hash_with(HashAlgorithm::Sha256, &provider.public_key())[..8])
+}
+
+pub fn sign_compact_jwt(
+    signer: &dyn SigningProvider,
+    header: &serde_json::Value,
+    payload: &serde_json::Value,
+) -> Result<String, String> {
+    let encode = |segment: &serde_json::Value| {
+        serde_json::to_vec(segment)
+            .map(|bytes| base64url_encode(&bytes))
+            .map_err(|e| e.to_string())
+    };
+    let signing_input = format!("{}.{}", encode(header)?, encode(payload)?);
+    let signature = signer
+        .sign(signing_input.as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(format!("{signing_input}.{}", base64url_encode(&signature)))
 }
 
 /// Issue an SD-JWT VC.
@@ -575,6 +594,8 @@ fn verify_sd_jwt_vc_full(
         disclosed_claims,
         algorithm,
         kb_verified,
+        cnf: payload.get("cnf").cloned(),
+        status: payload.get("status").cloned(),
     })
 }
 

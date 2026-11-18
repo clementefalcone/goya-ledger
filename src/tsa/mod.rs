@@ -69,7 +69,7 @@ pub struct TstInfo {
 }
 
 /// Complete signed timestamp token.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeStampToken {
     /// Unique token ID.
     pub id: String,

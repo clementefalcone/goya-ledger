@@ -123,7 +123,7 @@ pub async fn alias_register(
         )));
     }
 
-    if !crate::identity::did::did_matches_pubkey(&body.did, &body.public_key) {
+    if !crate::identity::operations::key_controls_did(store.as_ref(), &body.did, &body.public_key) {
         return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
             err_dto("SIGNER_MISMATCH", "public_key does not derive the DID"),
             401,
@@ -365,7 +365,7 @@ pub async fn alias_revoke(
             400,
         )));
     }
-    if !crate::identity::did::did_matches_pubkey(&body.did, &body.public_key) {
+    if !crate::identity::operations::key_controls_did(store.as_ref(), &body.did, &body.public_key) {
         return Ok(HttpResponse::Unauthorized().json(ApiResponse::<()>::error(
             err_dto("SIGNER_MISMATCH", "public_key does not derive the DID"),
             401,

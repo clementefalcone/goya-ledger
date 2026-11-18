@@ -99,7 +99,7 @@ pub async fn create_wallet(
     let (address, public_key_hex) = {
         use crate::identity::signing::SigningProvider;
         use pqc_crypto_module::legacy::sha256::{Digest, Sha256};
-        let provider = crate::identity::signing::SoftwareSigningProvider::generate();
+        let provider = crate::identity::signing::MlDsaSigningProvider::generate();
         let pub_bytes = provider.public_key();
         let hex_key = hex::encode(&pub_bytes);
         let addr = hex::encode(&Sha256::digest(&pub_bytes)[..20]);

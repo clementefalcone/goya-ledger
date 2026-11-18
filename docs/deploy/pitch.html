@@ -444,9 +444,9 @@ document.head.appendChild(s);
     <h1>Goya Ledger</h1>
     <p class="cover-sub">En el mundo digital, no distingues el real del falso. Goya agrega la prueba matem&aacute;tica que viaja con el documento.</p>
     <div class="cover-meta">
-      <span>Agosto 2026</span>
-      <span>SpA constituida en Chile</span>
-      <span>3+ cofounders</span>
+      <span>Noviembre 2026</span>
+      <span>Saturnus SpA, constituida en Chile</span>
+      <span>CTO + [segundo fundador por definir]</span>
       <span>Pre-revenue</span>
     </div>
   </div>
@@ -496,15 +496,16 @@ document.head.appendChild(s);
       <li><strong>Verificaci&oacute;n independiente:</strong> Cada documento lleva su prueba criptogr&aacute;fica. Si alguien altera un byte, la prueba se invalida. Si alguien dice que firm&oacute; en otra fecha, el sello de tiempo lo contradice. Cualquier tercero &mdash; un juez, un banco, un regulador &mdash; verifica en segundos sin depender de Goya.</li>
       <li><strong>Firma sin fricci&oacute;n:</strong> La contraparte firma desde un link, sin certificado propio, sin e-Token, sin cuenta. El costo lo absorbe la empresa.</li>
       <li><strong>Gesti&oacute;n de contratos:</strong> Flujos completos &mdash; qui&eacute;n firma, en qu&eacute; orden, con qu&eacute; plazo, notarizaci&oacute;n autom&aacute;tica, archivo con trazabilidad. Sin planillas ni seguimiento manual.</li>
-      <li><strong>FES y FEA:</strong> Firma electr&oacute;nica simple disponible hoy. Firma avanzada (criptograf&iacute;a post-cu&aacute;ntica) disponible tras certificaci&oacute;n PSC, actualmente en tr&aacute;mite.</li>
-      <li><strong>API para desarrolladores:</strong> 280 endpoints. SDK TypeScript. Integrable en cualquier sistema &mdash; un ERP, un portal de clientes, una app.</li>
+      <li><strong>FES y FEA:</strong> Firma electr&oacute;nica simple y avanzada alineadas con la Ley 19.799 (Chile) y eIDAS (UE). Documentaci&oacute;n para acreditaci&oacute;n como PSC lista (17 documentos); la acreditaci&oacute;n a&uacute;n no se ha solicitado.</li>
+      <li><strong>Identidad y credenciales:</strong> Identidad digital controlada por el usuario desde su tel&eacute;fono. Credenciales digitales compatibles con la billetera digital europea.</li>
+      <li><strong>API para desarrolladores:</strong> Cerca de 300 servicios API. SDK TypeScript. Integrable en cualquier sistema &mdash; un ERP, un portal de clientes, una app.</li>
     </ul>
 
     <h3>C&oacute;mo se ve para el cliente</h3>
     <p>Un estudio jur&iacute;dico sube un contrato. Asigna las partes con RUT y correo. Cada parte recibe un link y firma desde el celular &mdash; sin FEA propia, sin ir a ninguna parte. El contrato queda sellado con sello de tiempo y prueba criptogr&aacute;fica. El estudio ve todo en su panel: pendientes, firmados, expirados. Tres a&ntilde;os despu&eacute;s, en una disputa, el juez verifica el documento en 5 segundos desde la web p&uacute;blica. Sin llamar al estudio. Sin llamar a Goya. La prueba est&aacute; en el documento.</p>
 
     <div class="callout">
-      <strong>El producto est&aacute; construido y funcional.</strong> No es un mockup ni un pitch deck. 13 versiones publicadas desde junio 2026. App web (goya-explorer.fly.dev), API desplegada (goya-node.fly.dev), app de escritorio macOS, SDK TypeScript. Lo que falta es certificaci&oacute;n PSC y primeros clientes. Eso es exactamente lo que Build financia.
+      <strong>El producto est&aacute; construido y funcional.</strong> No es un mockup ni un pitch deck. Plataforma en producci&oacute;n con apps piloto propias de salud y previsi&oacute;n que ya registran identidades de usuarios; app minera construida, pendiente de despliegue. Credenciales emitidas y verificadas con una billetera digital europea (Hopae EUDI Wallet) en iPhone. A&uacute;n no hay clientes pagadores. Lo que falta es solicitar la acreditaci&oacute;n como PSC y conseguir los primeros clientes. Eso es exactamente lo que Build financia.
     </div>
   </div>
 
@@ -519,35 +520,38 @@ document.head.appendChild(s);
     </div>
 
     <h3>Estado del producto</h3>
-    <p>Goya Ledger lleva 13 versiones publicadas en 2 meses. Est&aacute; desplegado y funcional en <a href="https://goya-explorer.fly.dev" style="color:var(--accent);font-weight:600;">goya-explorer.fly.dev</a> (app web) y <a href="https://goya-node.fly.dev/api/v1/health" style="color:var(--accent);">goya-node.fly.dev</a> (API).</p>
+    <p>Goya Ledger est&aacute; construido y funcionando en producci&oacute;n, con apps piloto propias de salud y previsi&oacute;n. A&uacute;n no tiene clientes pagadores.</p>
 
     <div class="metrics-grid">
       <div class="metric-card">
         <div class="metric-value">$99</div>
-        <div class="metric-label">Precio mensual target</div>
+        <div class="metric-label">Desde, USD/mes (SaaS pymes)</div>
       </div>
       <div class="metric-card">
-        <div class="metric-value">280</div>
-        <div class="metric-label">Endpoints de API</div>
+        <div class="metric-value">~300</div>
+        <div class="metric-label">Servicios API</div>
       </div>
       <div class="metric-card">
-        <div class="metric-value">v0.13</div>
-        <div class="metric-label">13 releases en 2 meses</div>
+        <div class="metric-value">3.007</div>
+        <div class="metric-label">Tests autom&aacute;ticos (oct 2026)</div>
       </div>
     </div>
 
     <h3>Modelo de negocio</h3>
+    <p>Precios de lista en USD, borrador a validar con pilotos. El primer piloto con cada instituci&oacute;n ancla es gratuito por 4&ndash;6 semanas.</p>
     <div class="overflow-x">
     <table>
       <tr><th>Plan</th><th>Precio</th><th>Para qui&eacute;n</th></tr>
-      <tr><td>Starter</td><td>$99/mes</td><td>Pymes, profesionales &mdash; hasta 500 firmas/mes</td></tr>
-      <tr><td>Profesional</td><td>$299/mes</td><td>Estudios jur&iacute;dicos, consultoras &mdash; firmas ilimitadas + soporte</td></tr>
-      <tr><td>Institucional</td><td>Cotizaci&oacute;n</td><td>Notar&iacute;as, gobierno, empresas grandes &mdash; deploy dedicado + SLA</td></tr>
+      <tr><td>SaaS</td><td>Desde $99/mes</td><td>Pymes y cl&iacute;nicas</td></tr>
+      <tr><td>Profesional</td><td>$299&ndash;$499/mes</td><td>&mdash;</td></tr>
+      <tr><td>Consorcio</td><td>$500/org/mes</td><td>M&iacute;nimo 3 organizaciones</td></tr>
+      <tr><td>On-premise</td><td>Desde $2.000/mes</td><td>Despliegue en infraestructura propia</td></tr>
+      <tr><td>Integraci&oacute;n</td><td>Desde $3.000</td><td>Pago &uacute;nico</td></tr>
     </table>
     </div>
 
     <h3>Diferenciador t&eacute;cnico</h3>
-    <p>Debajo del producto hay una infraestructura que ning&uacute;n competidor en LATAM puede replicar en menos de 2 a&ntilde;os. Goya implementa los 3 est&aacute;ndares criptogr&aacute;ficos post-cu&aacute;nticos que NIST public&oacute; en 2024 (FIPS 203, 204, 205). Es la &uacute;nica plataforma de firma y verificaci&oacute;n en la regi&oacute;n que ya los tiene en producci&oacute;n. La Ley 21.663 exige est&aacute;ndares actualizados &mdash; Goya ya los tiene.</p>
+    <p>Goya implementa los 3 est&aacute;ndares criptogr&aacute;ficos post-cu&aacute;nticos que NIST public&oacute; en 2024 (FIPS 203, 204, 205). Ninguno de los 10 PSC acreditados en Chile es post-cu&aacute;ntico. Nadie m&aacute;s ofrece firma con validez legal, identidad controlada por el usuario, credenciales europeas y criptograf&iacute;a post-cu&aacute;ntica juntas. La ventaja: llegar primero a la migraci&oacute;n post-cu&aacute;ntica que todo proveedor de firma deber&aacute; hacer.</p>
   </div>
 
   <div class="section">
@@ -557,11 +561,11 @@ document.head.appendChild(s);
 
     <div class="score-bar-container">
       <div class="score-bar-track"><div class="score-bar-fill" style="width:85%"></div></div>
-      <span class="score-bar-label">Mercado validado</span>
+      <span class="score-bar-label">Demanda regulatoria</span>
     </div>
 
     <h3>Demanda regulatoria real</h3>
-    <p>No es un mercado especulativo. Son leyes vigentes con plazos y multas:</p>
+    <p>No es un mercado especulativo. Son leyes vigentes con plazos y multas (cifras a agosto 2026):</p>
 
     <div class="metrics-grid">
       <div class="metric-card">
@@ -574,32 +578,35 @@ document.head.appendChild(s);
       </div>
       <div class="metric-card">
         <div class="metric-value">42</div>
-        <div class="metric-label">Fintechs reguladas por CMF</div>
+        <div class="metric-label">Fintechs registradas en CMF (37 autorizadas)</div>
       </div>
     </div>
 
     <p>La Ley 21.663 de Ciberseguridad design&oacute; 1.154 instituciones como Operadores de Importancia Vital (ANCI, Res. 87/2025 y Res. 187/2026). Tienen 6 meses para demostrar SGSI y planes de continuidad. Multas de hasta 40.000 UTM (~$2.640M CLP). La Ley 21.772 obliga a las 468 notar&iacute;as a operar con repositorio digital y copias electr&oacute;nicas con FEA antes de octubre 2026. La Ley 21.180 obliga a todo el Estado a tramitar electr&oacute;nicamente al 2027.</p>
 
     <h3>Nuestro cliente</h3>
+    <p>Partimos en Chile con sectores regulados. Primer cliente objetivo: una cl&iacute;nica o centro de salud que hoy firma consentimientos en papel.</p>
     <ul>
-      <li><strong>Instituciones OIV</strong> &mdash; 1.154 organizaciones que necesitan trazabilidad auditable y verificable para cumplir Ley 21.663. Bancos, hospitales, el&eacute;ctricas, empresas de tecnolog&iacute;a.</li>
-      <li><strong>Notar&iacute;as</strong> &mdash; 468 oficios que deben digitalizarse antes de octubre 2026. Necesitan gestionar flujos de firma, no solo certificados individuales.</li>
-      <li><strong>Fintechs</strong> &mdash; 42 reguladas por CMF. Necesitan documentaci&oacute;n verificable ante el regulador con una sola integraci&oacute;n.</li>
-      <li><strong>Estudios jur&iacute;dicos</strong> &mdash; gestionan decenas de contratos al mes. Necesitan que su contraparte firme sin ir a comprar FEA.</li>
+      <li><strong>Salud</strong> &mdash; piloto propio: Saturnus Salud.</li>
+      <li><strong>Previsi&oacute;n y finanzas</strong> &mdash; piloto propio: Saturnus AFP.</li>
+      <li><strong>Miner&iacute;a</strong> &mdash; Pasaporte Minero, construido, a&uacute;n no desplegado.</li>
+      <li><strong>Notar&iacute;as y legal</strong> &mdash; 468 notar&iacute;as obligadas a digitalizarse (Ley 21.772).</li>
+      <li><strong>Recursos humanos</strong></li>
     </ul>
 
-    <h3>Competidores en Chile</h3>
+    <h3>Competencia</h3>
     <div class="overflow-x">
     <table>
-      <tr><th>Competidor</th><th>Qu&eacute; ofrece</th><th>Lo que no resuelve</th></tr>
-      <tr><td>E-certchile / Acepta</td><td>Certificados FEA ($15K&ndash;$45K/a&ntilde;o por persona). Servicio probado, a&ntilde;os de trayectoria</td><td>Verificaci&oacute;n depende del PSC. No gestiona flujos. La contraparte necesita su propia FEA. Criptograf&iacute;a cl&aacute;sica</td></tr>
-      <tr><td>DocuSign</td><td>Firma desde link, gesti&oacute;n de contratos</td><td>No cumple Ley 19.799 como FEA. Verificaci&oacute;n depende de DocuSign. $10&ndash;$45 USD por sobre</td></tr>
-      <tr><td>TOC</td><td>Firma simple digital</td><td>Solo FES. Sin contratos, sin FEA, sin verificaci&oacute;n independiente</td></tr>
+      <tr><th>Competidor</th><th>Firma legal</th><th>Identidad del usuario</th><th>Credenciales UE</th><th>Post-cu&aacute;ntica</th><th>Multi-pa&iacute;s</th></tr>
+      <tr><td>Goya Ledger</td><td>S&iacute;</td><td>S&iacute;</td><td>S&iacute;</td><td>S&iacute;</td><td>Chile + UE</td></tr>
+      <tr><td>DocuSign</td><td>S&iacute;</td><td>No</td><td>No</td><td>No</td><td>Parcial</td></tr>
+      <tr><td>Proveedores de firma chilenos</td><td>S&iacute;</td><td>No</td><td>No</td><td>No</td><td>No</td></tr>
+      <tr><td>Blockchains p&uacute;blicas</td><td>No</td><td>Parcial</td><td>No</td><td>No</td><td>S&iacute;</td></tr>
     </table>
     </div>
 
     <h3>Expansi&oacute;n</h3>
-    <p>Chile tiene tratados de libre comercio con 65 pa&iacute;ses. Goya est&aacute; dise&ntilde;ado para cumplir regulaciones de m&uacute;ltiples jurisdicciones (Chile, EU/eIDAS, US/ESIGN, UAE). Un cliente chileno que exporta servicios puede usar la misma plataforma en destino.</p>
+    <p>Goya tiene entidad legal en Estonia para entrar a la Uni&oacute;n Europea. La firma est&aacute; alineada con eIDAS y las credenciales son compatibles con la billetera digital europea.</p>
   </div>
 
   <div class="section">
@@ -616,16 +623,13 @@ document.head.appendChild(s);
       <strong>Completar con datos reales.</strong> Este criterio tiene piso m&iacute;nimo de 3.0/5 &mdash; debajo de ese puntaje la postulaci&oacute;n se rechaza.
     </div>
 
-    <h3>Cofundador 1 &mdash; [Nombre] &mdash; CTO</h3>
-    <p><strong>Rol:</strong> Dise&ntilde;o del producto, arquitectura, desarrollo.</p>
+    <h3>Clemente Falcone &mdash; CTO</h3>
+    <p><strong>Rol:</strong> Producto y tecnolog&iacute;a.</p>
     <p><strong>Background:</strong> Ingenier&iacute;a en Computaci&oacute;n. [Completar]</p>
-    <p><strong>Evidencia:</strong> 13 releases en 2 meses. Producto funcional construido de cero.</p>
+    <p><strong>Evidencia:</strong> Construy&oacute; la plataforma completa: cerca de 300 servicios API y 3.007 tests autom&aacute;ticos pasando (oct 2026).</p>
 
-    <h3>Cofundador 2 &mdash; [Nombre] &mdash; [Rol]</h3>
-    <p>[Completar]</p>
-
-    <h3>Cofundador 3 &mdash; [Nombre] &mdash; [Rol]</h3>
-    <p>[Completar]</p>
+    <h3>Segundo fundador &mdash; [Por definir]</h3>
+    <p>[Por definir]</p>
 
     <h3>Por qu&eacute; este equipo</h3>
     <p>[Completar]</p>
@@ -647,7 +651,7 @@ document.head.appendChild(s);
 
     <h3>Decisiones que demuestran criterio</h3>
     <ul>
-      <li><strong>Construir verificaci&oacute;n independiente, no otro PSC:</strong> Los proveedores actuales venden certificados &mdash; la verificaci&oacute;n depende de ellos. Decidimos que la prueba criptogr&aacute;fica viaje con el documento. Eso es una decisi&oacute;n de arquitectura que define el producto.</li>
+      <li><strong>Goya no act&uacute;a como autoridad:</strong> Goya entrega identidad y seguridad. Cualquier DID emite y firma, y el verificador decide en qui&eacute;n confiar. La prueba criptogr&aacute;fica viaja con el documento. Eso es una decisi&oacute;n de arquitectura que define el producto.</li>
       <li><strong>Adoptar est&aacute;ndares NIST PQC antes que el mercado:</strong> Construimos sobre los est&aacute;ndares criptogr&aacute;ficos publicados por NIST en 2024, antes de que cualquier competidor en Chile los adoptara. Eso nos da una ventana de ventaja t&eacute;cnica mientras la regulaci&oacute;n los hace obligatorios.</li>
       <li><strong>Cumplimiento regulatorio desde el dise&ntilde;o:</strong> En vez de adaptar un producto extranjero a la ley chilena, construimos con Ley 19.799 y DS 181 como requisitos de dise&ntilde;o.</li>
     </ul>
@@ -673,42 +677,36 @@ document.head.appendChild(s);
     <ul>
       <li><strong>Cumplimiento regulatorio:</strong> 1.154 instituciones OIV necesitan actualizar su seguridad digital con plazos activos. Goya les da trazabilidad y verificaci&oacute;n con una integraci&oacute;n.</li>
       <li><strong>Modernizaci&oacute;n notarial:</strong> 468 notar&iacute;as enfrentan plazo de octubre 2026 (Ley 21.772). Goya ofrece repositorio digital, firma y verificaci&oacute;n en una plataforma.</li>
-      <li><strong>Ciberseguridad:</strong> Cumplimiento directo con Ley 21.663. &Uacute;nica plataforma en Chile con criptograf&iacute;a post-cu&aacute;ntica (NIST FIPS 203/204/205).</li>
+      <li><strong>Ciberseguridad:</strong> Cumplimiento directo con Ley 21.663. Criptograf&iacute;a post-cu&aacute;ntica (NIST FIPS 203/204/205); ninguno de los 10 PSC acreditados en Chile la tiene.</li>
       <li><strong>Soberan&iacute;a tecnol&oacute;gica:</strong> Infraestructura construida en Chile, sin dependencia de proveedores extranjeros.</li>
     </ul>
 
     <h3>Empresa y empleo en Chile</h3>
     <ul>
-      <li>SpA constituida en Chile. Todo el desarrollo hecho desde Chile.</li>
-      <li>Plan de contratar 2-3 ingenieros chilenos durante el programa.</li>
-      <li>Certificaci&oacute;n PSC se tramita ante la Subsecretar&iacute;a de Econom&iacute;a de Chile.</li>
-      <li>Primeros clientes: notar&iacute;as y estudios jur&iacute;dicos en Santiago.</li>
+      <li>Saturnus SpA, due&ntilde;a de Goya Ledger, constituida en Chile. Todo el desarrollo hecho desde Chile.</li>
+      <li>Solicitud de acreditaci&oacute;n como PSC ante la Subsecretar&iacute;a de Econom&iacute;a de Chile en el mes 3 del programa (documentaci&oacute;n lista, 17 documentos).</li>
+      <li>Primer cliente objetivo: una cl&iacute;nica o centro de salud que hoy firma consentimientos en papel.</li>
     </ul>
 
     <h3>Chile como plataforma de exportaci&oacute;n</h3>
-    <p>Los 65 TLC de Chile son la mejor plataforma para exportar servicios digitales a LATAM. Un producto de verificaci&oacute;n digital certificado en Chile tiene credibilidad regulatoria en Per&uacute;, Colombia y M&eacute;xico &mdash; mercados con los mismos problemas y sin soluciones locales.</p>
+    <p>Goya parte en Chile con sectores regulados y usa su entidad legal en Estonia para entrar a la Uni&oacute;n Europea, con firma alineada a eIDAS y credenciales compatibles con la billetera digital europea.</p>
   </div>
 
   <div class="divider"></div>
 
   <div class="section">
-    <h2>Plan de Uso del Fondo ($15M CLP)</h2>
+    <h2>Plan de Uso del Fondo ([monto BUILD])</h2>
 
-    <p>El producto ya est&aacute; construido. El fondo se destina 100% a <strong>llegar al mercado</strong>: certificaci&oacute;n, primeros clientes, y validaci&oacute;n comercial.</p>
+    <p>El producto ya est&aacute; construido. El objetivo del fondo es pasar de <strong>producto funcionando a primeros ingresos</strong>.</p>
 
     <div class="overflow-x">
     <table>
-      <tr><th>Destino</th><th>Monto</th><th>%</th><th>Para qu&eacute;</th></tr>
-      <tr><td>Certificaci&oacute;n PSC</td><td>$5.000.000</td><td>33%</td><td>Consultor regulatorio + auditor&iacute;a para certificaci&oacute;n ante Subsecretar&iacute;a de Econom&iacute;a</td></tr>
-      <tr><td>Pilotos con clientes</td><td>$4.000.000</td><td>27%</td><td>Integraci&oacute;n con 5 notar&iacute;as/estudios piloto. Soporte dedicado, iteraci&oacute;n</td></tr>
-      <tr><td>Infraestructura</td><td>$2.500.000</td><td>17%</td><td>Servidores de producci&oacute;n en Chile, dominio .cl, monitoreo</td></tr>
-      <tr><td>Legal</td><td>$1.500.000</td><td>10%</td><td>Asesor&iacute;a para cumplimiento DS 181 y contratos piloto</td></tr>
-      <tr><td>Go-to-market</td><td>$2.000.000</td><td>13%</td><td>Sitio web, material comercial, eventos del gremio notarial</td></tr>
+      <tr><th>Destino</th><th>%</th><th>Para qu&eacute;</th></tr>
+      <tr><td>Ventas y desarrollo de negocio</td><td>40%</td><td>Reuniones, pilotos y cierre de primeros clientes</td></tr>
+      <tr><td>Infraestructura y seguridad</td><td>25%</td><td>Servidores, auditor&iacute;a</td></tr>
+      <tr><td>Acreditaci&oacute;n y asesor&iacute;a legal</td><td>20%</td><td>Solicitud de acreditaci&oacute;n como PSC en Chile</td></tr>
+      <tr><td>Producto</td><td>15%</td><td>UX, app m&oacute;vil</td></tr>
     </table>
-    </div>
-
-    <div class="callout">
-      <strong>Co-financiamiento:</strong> CORFO financia hasta 90% ($13.5M). El equipo aporta el 10% restante ($1.5M CLP) en tiempo de desarrollo y recursos propios.
     </div>
   </div>
 
@@ -717,20 +715,20 @@ document.head.appendChild(s);
 
     <div class="timeline">
       <div class="timeline-item">
-        <div class="timeline-month">Mes 1 &mdash; Certificaci&oacute;n y primeros contactos</div>
-        <div class="timeline-text">Iniciar certificaci&oacute;n PSC. Contactar 10 notar&iacute;as en Santiago. Contratar asesor regulatorio. Demos del producto.</div>
+        <div class="timeline-month">Mes 1 &mdash; Reuniones y cartas de intenci&oacute;n</div>
+        <div class="timeline-text">10 reuniones con cl&iacute;nicas, notar&iacute;as y mineras. 3 cartas de intenci&oacute;n firmadas.</div>
       </div>
       <div class="timeline-item">
-        <div class="timeline-month">Mes 2 &mdash; Primeros pilotos</div>
-        <div class="timeline-text">3 notar&iacute;as o estudios firmando contratos reales. Panel de administraci&oacute;n para clientes. M&eacute;tricas de uso.</div>
+        <div class="timeline-month">Mes 2 &mdash; Primer piloto</div>
+        <div class="timeline-text">Primer piloto en marcha con una instituci&oacute;n ancla.</div>
       </div>
       <div class="timeline-item">
-        <div class="timeline-month">Mes 3 &mdash; Validaci&oacute;n comercial</div>
-        <div class="timeline-text">Pricing validado con pilotos. Sitio web de producto. Primeros ingresos. M&eacute;tricas de retenci&oacute;n.</div>
+        <div class="timeline-month">Mes 3 &mdash; Primer cliente pagador</div>
+        <div class="timeline-text">Primer cliente pagador. Presentar la solicitud de acreditaci&oacute;n como proveedor de firma electr&oacute;nica en Chile.</div>
       </div>
       <div class="timeline-item">
-        <div class="timeline-month">Mes 4 &mdash; Demo Day y siguiente paso</div>
-        <div class="timeline-text">5 clientes activos. Pitch para pre-seed. Postulaci&oacute;n a Ignite.</div>
+        <div class="timeline-month">Mes 4 &mdash; Caso de &eacute;xito</div>
+        <div class="timeline-text">Caso de &eacute;xito publicado y 3 clientes en cierre.</div>
       </div>
     </div>
 
@@ -738,11 +736,13 @@ document.head.appendChild(s);
     <div class="overflow-x">
     <table>
       <tr><th>KPI</th><th>Meta</th></tr>
-      <tr><td>Clientes piloto activos</td><td>5</td></tr>
-      <tr><td>Contratos firmados en la plataforma</td><td>50+</td></tr>
-      <tr><td>Revenue mensual</td><td>$500K CLP</td></tr>
-      <tr><td>Certificaci&oacute;n PSC</td><td>En tr&aacute;mite</td></tr>
-      <tr><td>NPS de pilotos</td><td>&gt;7</td></tr>
+      <tr><td>Reuniones con cl&iacute;nicas, notar&iacute;as y mineras</td><td>10</td></tr>
+      <tr><td>Cartas de intenci&oacute;n firmadas</td><td>3</td></tr>
+      <tr><td>Piloto con instituci&oacute;n ancla</td><td>1 en marcha (mes 2)</td></tr>
+      <tr><td>Clientes pagadores</td><td>Primero (mes 3)</td></tr>
+      <tr><td>Solicitud de acreditaci&oacute;n PSC</td><td>Presentada (mes 3)</td></tr>
+      <tr><td>Caso de &eacute;xito publicado</td><td>1 (mes 4)</td></tr>
+      <tr><td>Clientes en cierre</td><td>3 (mes 4)</td></tr>
     </table>
     </div>
   </div>
@@ -756,19 +756,19 @@ document.head.appendChild(s);
     <table>
       <tr><th>Seg.</th><th>Qu&eacute; decir</th></tr>
       <tr><td>0&ndash;15</td><td><strong>Problema:</strong> &ldquo;En el mundo f&iacute;sico, distingues un documento real de uno falso. En el mundo digital, no. Un PDF alterado se ve igual que el original. Una firma escaneada se ve igual que una leg&iacute;tima. Hoy, verificar que un documento digital es aut&eacute;ntico depende de que un proveedor est&eacute; en l&iacute;nea. Si falla, no tienes c&oacute;mo verificar.&rdquo;</td></tr>
-      <tr><td>15&ndash;35</td><td><strong>Soluci&oacute;n:</strong> &ldquo;Goya Ledger hace que cada documento lleve su propia prueba de autenticidad. Qui&eacute;n lo firm&oacute;, cu&aacute;ndo, y que no fue alterado &mdash; verificable por cualquier persona en 5 segundos, sin depender de nadie. Tu contraparte firma desde un link, sin comprarse nada. $99 al mes.&rdquo;</td></tr>
-      <tr><td>35&ndash;50</td><td><strong>Producto:</strong> &ldquo;El producto ya existe. 13 versiones publicadas, una app web, una API con 280 funcionalidades, un SDK para desarrolladores. Lo que necesitamos es certificarnos y llegar a nuestros primeros clientes.&rdquo;</td></tr>
-      <tr><td>50&ndash;65</td><td><strong>Equipo:</strong> [Cada cofundador 5 segundos: nombre, rol, un logro]</td></tr>
-      <tr><td>65&ndash;80</td><td><strong>Mercado:</strong> &ldquo;1.154 instituciones en Chile est&aacute;n obligadas por ley a actualizar su seguridad digital. 468 notar&iacute;as deben digitalizarse antes de octubre. 42 fintechs reguladas necesitan documentaci&oacute;n verificable. La demanda es regulatoria &mdash; no es especulativa.&rdquo;</td></tr>
-      <tr><td>80&ndash;90</td><td><strong>Ask:</strong> &ldquo;Build nos da lo que nos falta: certificarnos como PSC ante la Subsecretar&iacute;a de Econom&iacute;a y validar con 5 pilotos. Goya Ledger &mdash; verificaci&oacute;n digital hecha en Chile.&rdquo;</td></tr>
+      <tr><td>15&ndash;35</td><td><strong>Soluci&oacute;n:</strong> &ldquo;Goya Ledger hace que cada documento lleve su propia prueba de autenticidad. Qui&eacute;n lo firm&oacute;, cu&aacute;ndo, y que no fue alterado &mdash; verificable por cualquier persona en 5 segundos, sin depender de nadie. Tu contraparte firma desde un link, sin comprarse nada. Desde $99 al mes.&rdquo;</td></tr>
+      <tr><td>35&ndash;50</td><td><strong>Producto:</strong> &ldquo;El producto ya existe y funciona en producci&oacute;n: cerca de 300 servicios API, 3.007 tests autom&aacute;ticos, apps piloto de salud y previsi&oacute;n, y credenciales verificadas con la billetera digital europea. Lo que necesitamos es llegar a nuestros primeros clientes pagadores.&rdquo;</td></tr>
+      <tr><td>50&ndash;65</td><td><strong>Equipo:</strong> Clemente Falcone, CTO: construy&oacute; la plataforma completa. [Segundo fundador por definir]</td></tr>
+      <tr><td>65&ndash;80</td><td><strong>Mercado:</strong> &ldquo;1.154 instituciones en Chile est&aacute;n obligadas por ley a actualizar su seguridad digital. 468 notar&iacute;as deben digitalizarse. 42 fintechs registradas en la CMF necesitan documentaci&oacute;n verificable. La demanda es regulatoria &mdash; no es especulativa.&rdquo;</td></tr>
+      <tr><td>80&ndash;90</td><td><strong>Ask:</strong> &ldquo;Build nos da lo que nos falta: un primer piloto con una instituci&oacute;n ancla, nuestro primer cliente pagador y presentar la solicitud de acreditaci&oacute;n como PSC. Goya Ledger &mdash; verificaci&oacute;n digital hecha en Chile.&rdquo;</td></tr>
     </table>
     </div>
   </div>
 
   <div class="footer-note">
-    Documento de trabajo &mdash; Postulaci&oacute;n Startup Chile Build &mdash; Goya Ledger SpA &mdash; Agosto 2026<br>
-    Secciones marcadas con [Completar] requieren datos del equipo fundador.<br>
-    Datos de mercado verificados: SII, ANCI (Res. 87/2025, Res. 187/2026), BCN, Entidad Acreditadora, Grand View Research.
+    Documento de trabajo &mdash; Postulaci&oacute;n Startup Chile Build &mdash; Saturnus SpA &mdash; Noviembre 2026<br>
+    Secciones marcadas con [Completar] o [Por definir] requieren datos del equipo fundador.<br>
+    Datos regulatorios verificados a agosto 2026: SII, ANCI (Res. 87/2025, Res. 187/2026), BCN, CMF, Entidad Acreditadora.
   </div>
 
 </div>

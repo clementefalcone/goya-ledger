@@ -319,10 +319,6 @@ Get MSP info (CRL size).
 
 ## Identity & Credentials
 
-### POST /identity/create
-
-Create a DID + Ed25519 keypair. Body: `{ "name": "Alice" }`.
-
 ### GET /identity/{did}
 
 Fetch DID document.
@@ -335,17 +331,13 @@ Persist identity record. `did` must be derived from `public_key`, and `signature
 
 Read identity record.
 
-### POST /credentials/issue
-
-Issue a verifiable credential.
-
-### POST /credentials/{id}/verify
-
-Verify credential signature and expiry.
-
 ### POST /store/credentials
 
-Persist credential to store.
+Record a credential signed by its issuer. Body: `id`, `issuer_did` (registered), `subject_did`, `cred_type`, `issued_at`, `expires_at`, `claims_commitment` (64 hex), `signature`, `issuer_public_key`. `signature` is the issuer's signature over `credential:issue:{id}:{issuer_did}:{subject_did}:{cred_type}:{issued_at}:{expires_at}:{claims_commitment}`. Claims and their salt stay with the issuer; a body with `claims` or `claims_salt` returns 400. Wrong signature returns 401, an existing id 409. The credential is replicated on chain.
+
+### POST /store/credentials/{cred_id}/revoke
+
+Revoke a credential. Body: `revoked_at`, `issuer_public_key`, `signature` over `credential:revoke:{cred_id}:{revoked_at}`. Only the issuer's key is accepted (401 otherwise). Replicated on chain.
 
 ### GET /store/credentials/{cred_id}
 
@@ -354,6 +346,64 @@ Read credential.
 ### GET /store/credentials/by-subject/{subject_did}
 
 List credentials by subject DID.
+
+---
+
+## OpenID4VCI (credential delivery)
+
+The node does not sign credentials. It brokers delivery from the issuer that signed the offer to the wallet, using the pre-authorized code grant and the deferred flow. Endpoints are served under `/api/v1` and at the root. Only SD-JWT VC configurations (`vc+sd-jwt`, ES256) are advertised, since issuer delivery verifies only that format; offers for any other configuration return 400. Issuer walkthrough and CLI: [ISSUER-GUIDE.md](ISSUER-GUIDE.md).
+
+### POST /credential_offer
+
+Body: `issuer_did`, `issuer_public_key`, `credential_configuration_id`, `issued_at`, `signature`. `signature` is the issuer's signature over `oid4vci:offer:{issuer_did}:{credential_configuration_id}:{issued_at}`; the key must control `issuer_did`. Unknown configuration or `issued_at` more than 300 s from now returns 400; a bad key or signature returns 401. Returns the offer (one configuration id, pre-authorized code valid 600 s), `credential_offer_uri` and `session_id`.
+
+### GET /credential_offer/{session_id}
+
+Offer by reference.
+
+### POST /token
+
+Form: `grant_type=urn:ietf:params:oauth:grant-type:pre-authorized_code`, `pre-authorized_code`. Optional DPoP header, `wallet_instance_attestation`, `wallet_trust_evidence`. The access token is bound to the offer's issuer and configuration. No `c_nonce` is returned.
+
+### POST /nonce
+
+Returns a single-use `c_nonce` (300 s).
+
+### POST /credential
+
+Bearer or DPoP token. The requested `credential_configuration_id` (or legacy `format` + `vct`) must be the offered one, else 400 `invalid_credential_request`. Requires a JWT proof (`proofs.jwt[0]` or `proof.jwt`) whose header carries the holder `jwk`, signed by that key over a `c_nonce` from `/nonce`, with `aud` equal to the metadata `credential_issuer` (`https://{host}`); otherwise 400 `invalid_proof`. Returns 202 `{transaction_id, interval}`.
+
+### POST /deferred_credential
+
+Bearer or DPoP token of the same transaction. Body: `transaction_id`. Returns 400 `{"error":"issuance_pending","interval":5}` until the issuer delivers, then 200 `{"credentials":[{"credential":...}]}` once. Unknown or already retrieved transactions return 400 `invalid_transaction_id`.
+
+### POST /issuers/{did}/credential-key
+
+Registers the ES256 key with which `{did}` signs SD-JWT VCs. Body: `jwk` (public P-256 JWK with exactly `kty` `EC`, `crv` `P-256`, `x`, `y`; any other member such as `d` returns 400), `registered_at`, `public_key`, `signature`. `signature` is by `public_key`, which must control `{did}`, over `oid4vci:issuer-key:{did}:{x}:{y}:{registered_at}`; otherwise 401. The registration is replicated on chain. The same `jwk` again returns 409; a different `jwk` replaces the current one only with a later `registered_at`, else 409. Returns 201 with the registration.
+
+### GET /issuers/{did}/credential-key
+
+The registered key with the DID signature that binds it, or 404.
+
+### GET /.well-known/jwt-vc-issuer/api/v1/issuers/{did}
+
+JWT VC Issuer Metadata `{issuer, jwks:{keys:[jwk]}}` for the SD-JWT `iss` `https://{host}/api/v1/issuers/{did}`. Also served at `/api/v1/issuers/{did}/.well-known/jwt-vc-issuer`. 404 until a key is registered.
+
+### GET /issuers/{did}/issuances
+
+Query: `public_key`, `issued_at`, `signature` over `oid4vci:pending:{did}:{issued_at}` by a key that controls `{did}`. `issued_at` more than 300 s from now or a bad key or signature returns 401. Returns the issuer's undelivered issuances: `transaction_id`, `configuration_id`, `vct`, `holder_jwk`, `created_at`.
+
+### POST /issuers/{did}/issuances/{transaction_id}
+
+Body: `credential`, an SD-JWT VC (`<jwt>~<disclosure>~...`). The SD-JWT is the issuer's authorization. Unknown transaction or one of another issuer, or no registered key, returns 404; already delivered returns 409. The issuer JWT must be ES256 and verify with the registered key, else 401. Its `iss` must have the path `/api/v1/issuers/{did}` over https (the host is not compared, so proxies with another Host still match), `vct` must be the offered configuration's and `cnf.jwk` the holder key from the credential request (`kty`, `crv`, `x`, `y`), else 400. A `status` claim is optional; when present, `status.status_list.uri` must have the path `/api/v1/issuers/{did}/status-lists/{list_id}` of the same issuer over https, else 400. On success the wallet receives it from `/deferred_credential`.
+
+### PUT /issuers/{did}/status-lists/{list_id}
+
+Publishes a Token Status List (IETF draft, `statuslist+jwt`) that the issuer built and signed; the node never builds or signs one. Body: `status_list_jwt`, the compact JWT, at most 64 KiB. `list_id` is 1-64 characters of `A-Z a-z 0-9 _ -`. No registered credential key returns 404. The header must have `typ` `statuslist+jwt` and `alg` `ES256`, else 400, and the signature must verify with the registered key, else 401. The payload `iss` path must be `/api/v1/issuers/{did}` and `sub` path `/api/v1/issuers/{did}/status-lists/{list_id}` over https (host not compared), `iat` must be present, `status_list.bits` one of 1, 2, 4, 8 and `status_list.lst` non-empty base64url, else 400. The list is replicated on chain and every peer re-verifies it against the replicated key. The same JWT again returns 409; a new JWT replaces the stored one only with a later `iat`, else 409. Returns 200.
+
+### GET /issuers/{did}/status-lists/{list_id}
+
+The stored JWT as `application/statuslist+jwt`, or 404.
 
 ---
 

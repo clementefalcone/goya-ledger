@@ -278,9 +278,6 @@
     "/msp/{msp_id}": {
       "get": { "tags": ["MSP"], "summary": "Get MSP info", "parameters": [{ "name": "msp_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "MSP info" } } }
     },
-    "/identity/create": {
-      "post": { "tags": ["Identity"], "summary": "Create DID + keypair", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "name": { "type": "string" } } } } } }, "responses": { "200": { "description": "DID created" } } }
-    },
     "/identity/{did}": {
       "get": { "tags": ["Identity"], "summary": "Get DID document", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "DID document" } } }
     },
@@ -290,20 +287,43 @@
     "/store/identities/{did}": {
       "get": { "tags": ["Identity"], "summary": "Read identity record", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Identity record" } } }
     },
-    "/credentials/issue": {
-      "post": { "tags": ["Credentials"], "summary": "Issue verifiable credential", "responses": { "200": { "description": "Credential issued" } } }
-    },
-    "/credentials/{id}/verify": {
-      "post": { "tags": ["Credentials"], "summary": "Verify credential", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Verification result" } } }
-    },
     "/store/credentials": {
-      "post": { "tags": ["Credentials"], "summary": "Persist credential", "responses": { "201": { "description": "Credential stored" } } }
+      "post": { "tags": ["Credentials"], "summary": "Record credential signed by its issuer", "responses": { "201": { "description": "Credential recorded" }, "400": { "description": "Claims sent instead of a commitment" }, "401": { "description": "Not signed by the issuer" } } }
+    },
+    "/store/credentials/{cred_id}/revoke": {
+      "post": { "tags": ["Credentials"], "summary": "Revoke credential with the issuer's signature", "parameters": [{ "name": "cred_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Credential revoked" }, "401": { "description": "Not signed by the issuer" } } }
     },
     "/store/credentials/{cred_id}": {
       "get": { "tags": ["Credentials"], "summary": "Read credential", "parameters": [{ "name": "cred_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Credential" } } }
     },
     "/store/credentials/by-subject/{subject_did}": {
       "get": { "tags": ["Credentials"], "summary": "List credentials by subject", "parameters": [{ "name": "subject_did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Credential list" } } }
+    },
+    "/credential_offer": {
+      "post": { "tags": ["Credentials"], "summary": "OID4VCI offer signed by the issuer DID over oid4vci:offer:{issuer_did}:{credential_configuration_id}:{issued_at}", "responses": { "201": { "description": "Offer with pre-authorized code for one configuration" }, "400": { "description": "Unknown configuration or issued_at more than 300 s from now" }, "401": { "description": "Key does not control issuer_did or signature does not verify" } } }
+    },
+    "/credential": {
+      "post": { "tags": ["Credentials"], "summary": "OID4VCI credential request; the node does not sign, it opens a deferred transaction for the offering issuer", "responses": { "202": { "description": "transaction_id and interval" }, "400": { "description": "invalid_credential_request, or invalid_proof (bad signature, unknown c_nonce, or aud not the credential_issuer)" }, "401": { "description": "Unknown or expired access token" } } }
+    },
+    "/deferred_credential": {
+      "post": { "tags": ["Credentials"], "summary": "OID4VCI deferred credential retrieval by transaction_id", "responses": { "200": { "description": "Credential delivered by the issuer, returned once" }, "400": { "description": "issuance_pending or invalid_transaction_id" }, "401": { "description": "Unknown or expired access token" } } }
+    },
+    "/issuers/{did}/credential-key": {
+      "post": { "tags": ["Credentials"], "summary": "Register the issuer ES256 key (public P-256 JWK) signed by the DID key over oid4vci:issuer-key:{did}:{x}:{y}:{registered_at}", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "201": { "description": "Key registered and replicated on chain" }, "400": { "description": "jwk is not a public P-256 key" }, "401": { "description": "Key does not control the DID or signature does not verify" }, "409": { "description": "Same key already registered, or registered_at not later than the current key" } } },
+      "get": { "tags": ["Credentials"], "summary": "Registered issuer ES256 key with its DID signature", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Registration" }, "404": { "description": "No key registered" } } }
+    },
+    "/issuers/{did}/.well-known/jwt-vc-issuer": {
+      "get": { "tags": ["Credentials"], "summary": "JWT VC Issuer Metadata {issuer, jwks} for iss https://{host}/api/v1/issuers/{did}; also at /.well-known/jwt-vc-issuer/api/v1/issuers/{did}", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Issuer metadata with the registered ES256 key" }, "404": { "description": "No key registered" } } }
+    },
+    "/issuers/{did}/issuances": {
+      "get": { "tags": ["Credentials"], "summary": "Undelivered OID4VCI issuances of the issuer; signature by the DID key over oid4vci:pending:{did}:{issued_at}", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "public_key", "in": "query", "required": true, "schema": { "type": "string" } }, { "name": "issued_at", "in": "query", "required": true, "schema": { "type": "integer" } }, { "name": "signature", "in": "query", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "transaction_id, configuration_id, vct, holder_jwk, created_at" }, "401": { "description": "Stale issued_at, key does not control the DID or signature does not verify" } } }
+    },
+    "/issuers/{did}/issuances/{transaction_id}": {
+      "post": { "tags": ["Credentials"], "summary": "Deliver the SD-JWT VC of a pending issuance, signed with the registered ES256 key", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "transaction_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "Delivered; the wallet gets it from /deferred_credential" }, "400": { "description": "iss, vct or cnf.jwk does not match the issuance, or status.status_list.uri is not a status list of the same issuer" }, "401": { "description": "Not ES256 or not signed by the registered key" }, "404": { "description": "Unknown transaction, another issuer's transaction or no registered key" }, "409": { "description": "Already delivered" } } }
+    },
+    "/issuers/{did}/status-lists/{list_id}": {
+      "put": { "tags": ["Credentials"], "summary": "Publish an issuer-signed Token Status List (statuslist+jwt, ES256 by the registered key); the node verifies, replicates and serves it", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "list_id", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" } }], "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["status_list_jwt"], "properties": { "status_list_jwt": { "type": "string", "maxLength": 65536 } } } } } }, "responses": { "200": { "description": "Published and replicated on chain" }, "400": { "description": "Bad list_id, over 64 KiB, malformed JWT, typ or alg, iss or sub path, missing iat, or bad status_list" }, "401": { "description": "Not signed by the registered credential key" }, "404": { "description": "No credential key registered" }, "409": { "description": "Same JWT already published, or iat not later than the stored list" } } },
+      "get": { "tags": ["Credentials"], "summary": "Issuer-signed Token Status List as application/statuslist+jwt", "parameters": [{ "name": "did", "in": "path", "required": true, "schema": { "type": "string" } }, { "name": "list_id", "in": "path", "required": true, "schema": { "type": "string" } }], "responses": { "200": { "description": "The stored status list JWT", "content": { "application/statuslist+jwt": { "schema": { "type": "string" } } } }, "404": { "description": "No status list published" } } }
     },
     "/events/blocks": {
       "get": { "tags": ["Events"], "summary": "Block event stream (WebSocket or long-poll)", "parameters": [{ "name": "from_height", "in": "query", "schema": { "type": "integer" } }], "responses": { "200": { "description": "Block events" } } }

@@ -136,6 +136,13 @@ new_account() {
     account "$1" keygen > /dev/null && account "$1" register
 }
 
+RUN_ID=$(date +%s)
+
+signed_credential() {
+    local issuer="$1" id="$2" subject="$3" cred_type="$4"
+    printf '%s\t%s\t%s\t{"cred_type":"%s"}\t0\n' "$id" "$subject" "$cred_type" "$cred_type" | account "$issuer" credentials
+}
+
 http_code() {
     local method="$1" url="$2"
     shift 2
@@ -484,31 +491,17 @@ fi
 echo ""
 echo "$(bold '12. Store-backed CRUD')"
 
-# Write identity (fields: did, created_at, updated_at, status)
-resp=$(api POST "$NODE1/api/v1/store/identities" -d '{
-    "did": "did:bc:test1",
-    "created_at": 1000,
-    "updated_at": 1000,
-    "status": "active"
-}')
-assert_status "$resp" 200 "Store identity"
+STORE_DID=$(new_account store-issuer)
+assert_not_empty "$STORE_DID" "Store identity"
 
-resp=$(api GET "$NODE1/api/v1/store/identities/did:bc:test1")
+resp=$(api GET "$NODE1/api/v1/store/identities/$STORE_DID")
 assert_status "$resp" 200 "Read identity back"
 
-# Write credential (fields: id, issuer_did, subject_did, cred_type, issued_at, expires_at)
-resp=$(api POST "$NODE1/api/v1/store/credentials" -d '{
-    "id": "cred-001",
-    "issuer_did": "did:bc:admin1",
-    "subject_did": "did:bc:test1",
-    "cred_type": "membership",
-    "issued_at": 1000,
-    "expires_at": 99999999,
-    "revoked_at": null
-}')
+STORE_CRED="cred-store-$RUN_ID"
+resp=$(api POST "$NODE1/api/v1/store/credentials" -d "$(signed_credential store-issuer "$STORE_CRED" "$STORE_DID" membership)")
 assert_status "$resp" 200 "Store credential"
 
-resp=$(api GET "$NODE1/api/v1/store/credentials/cred-001")
+resp=$(api GET "$NODE1/api/v1/store/credentials/$STORE_CRED")
 assert_status "$resp" 200 "Read credential back"
 
 # ── Test 13: Chaincode Lifecycle (Fabric core) ──────────────────────────────
@@ -937,48 +930,26 @@ fi
 # ── Test 24: DID + Credential Lifecycle ─────────────────────────────────────
 section "24. DID + credential lifecycle"
 
-# Create DID (timestamps are u64 epoch seconds)
-did_resp=$(api POST "$NODE1/api/v1/store/identities" -d '{
-    "did": "did:bc:e2etest",
-    "created_at": 1700000000,
-    "updated_at": 1700000000,
-    "status": "active"
-}')
-assert_status "$did_resp" 200 "Create DID did:bc:e2etest"
+LIFECYCLE_DID=$(new_account lifecycle)
+assert_not_empty "$LIFECYCLE_DID" "Create DID"
 
-# Read DID back
-did_read=$(api GET "$NODE1/api/v1/store/identities/did:bc:e2etest")
+did_read=$(api GET "$NODE1/api/v1/store/identities/$LIFECYCLE_DID")
 did_status=$(echo "$did_read" | jq -r '.data.status // empty' 2>/dev/null)
 assert_eq "$did_status" "active" "DID status is active"
 
-# Issue credential
-cred_resp=$(api POST "$NODE1/api/v1/store/credentials" -d '{
-    "id": "cred-e2e-001",
-    "issuer_did": "did:bc:e2etest",
-    "subject_did": "did:bc:e2etest",
-    "cred_type": "VerifiableCredential",
-    "issued_at": 1700000000,
-    "expires_at": 1800000000,
-    "revoked_at": null
-}')
-assert_status "$cred_resp" 200 "Issue credential cred-e2e-001"
+LIFECYCLE_CRED="cred-e2e-$RUN_ID"
+cred_resp=$(api POST "$NODE1/api/v1/store/credentials" -d "$(signed_credential lifecycle "$LIFECYCLE_CRED" "$LIFECYCLE_DID" VerifiableCredential)")
+assert_status "$cred_resp" 200 "Issue credential $LIFECYCLE_CRED"
 
-# Read credential back
-cred_read=$(api GET "$NODE1/api/v1/store/credentials/cred-e2e-001")
+cred_read=$(api GET "$NODE1/api/v1/store/credentials/$LIFECYCLE_CRED")
 cred_type=$(echo "$cred_read" | jq -r '.data.cred_type // empty' 2>/dev/null)
 assert_eq "$cred_type" "VerifiableCredential" "Credential readable"
 
-# Revoke credential (overwrite with revoked_at set)
-revoke_resp=$(api POST "$NODE1/api/v1/store/credentials" -d '{
-    "id": "cred-e2e-001",
-    "issuer_did": "did:bc:e2etest",
-    "subject_did": "did:bc:e2etest",
-    "cred_type": "VerifiableCredential",
-    "issued_at": 1700000000,
-    "expires_at": 1800000000,
-    "revoked_at": 1750000000
-}')
+revoke_resp=$(api POST "$NODE1/api/v1/store/credentials/$LIFECYCLE_CRED/revoke" -d "$(account lifecycle revocation "$LIFECYCLE_CRED" "$(date +%s)")")
 assert_status "$revoke_resp" 200 "Revoke credential"
+
+intruder_revoke=$(http_code POST "$NODE1/api/v1/store/credentials/$LIFECYCLE_CRED/revoke" -d "$(account store-issuer revocation "$LIFECYCLE_CRED" "$(date +%s)")")
+assert_eq "$intruder_revoke" "401" "Revocation by a non-issuer is rejected"
 
 # ── Test 25: Airdrop Flow ──────────────────────────────────────────────────
 section "25. Airdrop flow"
