@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Goya Ledger — Firma y evidencia post-cuántica para plataformas de software</title>
-<meta name="description" content="Con una API, tus clientes firman dentro de tu producto y cada contrato se puede probar hoy y en 30 años, sin depender de Goya.">
+<title>Goya — Tus documentos, a prueba de cambios</title>
+<meta name="description" content="Un asistente te explica en dos minutos, sin tecnicismos, si necesitas sellar tus contratos, cotizaciones y finiquitos para que nadie pueda cambiarlos.">
 <meta name="theme-color" content="#060708">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -98,82 +98,23 @@ h1 { font-size: clamp(28px, min(4.6vw, 7.2svh), 66px); max-width: 24ch; margin: 
 h1 .h1-quiet { display: block; color: var(--muted); }
 .lede { font-size: clamp(15px, min(2vw, 2.6svh), 21px); color: var(--muted); max-width: 54ch; }
 .lede strong { color: var(--text); font-weight: 500; }
-.hero-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: min(36px, 4svh); }
+.assistant {
+  max-width: 680px; padding: clamp(16px, 2.4vw, 24px);
+  border: 1px solid var(--line-strong); border-radius: 20px; background: var(--ink-2);
+  display: flex; flex-direction: column; gap: 16px;
+}
+.chat-log { display: flex; flex-direction: column; gap: 10px; max-height: 48svh; overflow-y: auto; }
+.bubble { max-width: 88%; padding: 12px 16px; border-radius: 16px; font-size: 16px; line-height: 1.5; animation: rise .4s ease both; }
+.bubble-bot { align-self: flex-start; background: rgba(255, 255, 255, 0.05); border-bottom-left-radius: 4px; }
+.bubble-visitor { align-self: flex-end; background: var(--text); color: var(--ink); border-bottom-right-radius: 4px; }
+.chat-options { display: flex; flex-wrap: wrap; gap: 8px; }
 
-.trial-stage {
-  display: grid; grid-template-columns: 1fr 1.1fr; gap: 1px;
-  background: var(--line); border: 1px solid var(--line); border-radius: 20px; overflow: hidden;
-}
-.trial-doc, .trial-panel { background: var(--ink-2); padding: clamp(20px, 3vw, 32px); display: flex; flex-direction: column; gap: 16px; }
-.doc-head { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; color: var(--muted); }
-.doc-edit-hint { color: var(--seal); animation: nudge 2.4s ease-in-out infinite; white-space: nowrap; }
-.doc-edit-hint.quiet { animation: none; color: var(--faint); }
-@keyframes nudge { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
-.doc {
-  width: 100%; min-height: 300px; resize: vertical;
-  background: rgba(255, 255, 255, 0.02); color: var(--text);
-  border: 1px dashed rgba(255, 181, 71, 0.5); border-radius: 12px; padding: 16px;
-  font-family: var(--body); font-size: 16px; line-height: 1.7; transition: border-color .3s ease;
-}
-.doc:hover { border-color: var(--seal); }
-.doc:focus { outline: none; border-style: solid; border-color: var(--seal); }
-.doc[readonly] { border: 1px solid var(--line-strong); color: var(--muted); cursor: not-allowed; }
-.demo-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.demo-actions[hidden] { display: none; }
 .chip {
   font-family: var(--body); font-size: 14px; color: var(--muted);
   border: 1px solid var(--line-strong); background: transparent;
   padding: 7px 14px; border-radius: 999px; cursor: pointer;
 }
 .chip:hover { color: var(--text); border-color: var(--text); }
-
-.stepper { list-style: none; display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
-.step-tab {
-  display: flex; align-items: center; gap: 10px;
-  font-family: var(--body); font-size: 15px; font-weight: 500; color: var(--muted);
-  background: transparent; border: 1px solid var(--line-strong); border-radius: 999px;
-  padding: 7px 16px 7px 7px; cursor: pointer; transition: all .2s ease;
-}
-.step-tab span { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--line-strong); color: var(--text); font-size: 13px; }
-.step-tab[aria-current="step"] { color: var(--ink); background: var(--text); border-color: var(--text); }
-.step-tab[aria-current="step"] span { background: var(--ink); color: var(--text); }
-.step-tab.done span { background: var(--seal); color: var(--ink); }
-.step-tab:disabled { opacity: .4; cursor: not-allowed; }
-
-.panel { display: flex; flex-direction: column; gap: 18px; height: 100%; }
-.panel[hidden] { display: none; }
-.panel h3 { font-size: clamp(22px, 2.4vw, 28px); font-weight: 600; letter-spacing: -0.02em; }
-.panel > p { color: var(--muted); }
-.panel-next { margin-top: auto; align-self: flex-start; }
-.print { display: grid; grid-template-columns: repeat(16, 1fr); gap: 3px; }
-.print i, .print-mini i { aspect-ratio: 1; background: var(--ice); transition: opacity .45s ease; }
-.print i { border-radius: 2px; }
-.print-mini { display: grid; grid-template-columns: repeat(16, 1fr); gap: 1px; }
-.print-mini i { border-radius: 1px; }
-.print-code summary { font-size: 13px; color: var(--faint); cursor: pointer; }
-.print-code code { display: block; margin-top: 8px; font-family: var(--mono); font-size: 12px; color: var(--muted); word-break: break-all; }
-
-.status { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--line-strong); font-size: 15px; line-height: 1.5; }
-.status::before { content: ""; width: 10px; height: 10px; margin-top: 6px; border-radius: 50%; flex: none; background: var(--seal); }
-.status.ok { border-color: rgba(120, 220, 160, 0.4); background: rgba(120, 220, 160, 0.06); }
-.status.ok::before { background: #78dca0; box-shadow: 0 0 10px #78dca0; }
-.status.bad { border-color: rgba(255, 106, 92, 0.5); background: rgba(255, 106, 92, 0.07); }
-.status.bad::before { background: var(--alert); box-shadow: 0 0 10px var(--alert); }
-
-.chain { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
-.block {
-  border: 1px solid var(--line); border-radius: 12px; padding: 10px;
-  display: grid; grid-template-rows: auto 2.6em auto auto; gap: 8px; align-content: start;
-  font-size: 12px; color: var(--muted); line-height: 1.3;
-  animation: rise .5s ease both; transition: border-color .3s ease, background .3s ease;
-}
-.block b { color: var(--text); font-weight: 500; font-size: 13px; }
-.block.mine { border-color: rgba(255, 181, 71, 0.55); background: var(--seal-soft); }
-.block.broken { border-color: rgba(255, 106, 92, 0.65); background: rgba(255, 106, 92, 0.08); }
-.block-state { font-size: 11px; color: var(--faint); white-space: nowrap; }
-.block b, .block > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.block .block-label { white-space: normal; }
-.block.broken .block-state { color: var(--alert); }
 
 section { padding: clamp(88px, 12vw, 150px) 0; border-top: 1px solid var(--line); }
 h2 { font-size: clamp(36px, 5.6vw, 72px); }
@@ -183,14 +124,7 @@ h2 { font-size: clamp(36px, 5.6vw, 72px); }
 .statement { background: var(--ink); padding: clamp(24px, 3vw, 36px); display: grid; grid-template-rows: subgrid; grid-row: span 2; row-gap: 12px; align-content: start; }
 .statement h3 { font-size: clamp(21px, 2vw, 26px); font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
 .statement p { color: var(--muted); font-size: 16px; }
-.statement a { color: var(--seal); text-decoration: underline; text-underline-offset: 3px; }
-.trial-note { font-size: 13px; color: var(--faint); }
 
-.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 20px; overflow: hidden; }
-.step { background: var(--ink); padding: clamp(24px, 3vw, 36px); display: grid; grid-template-rows: subgrid; grid-row: span 3; row-gap: 12px; align-content: start; }
-.step-num { font-size: 15px; color: var(--faint); }
-.step h3 { font-size: clamp(21px, 2vw, 26px); font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
-.step p { color: var(--muted); font-size: 16px; }
 @keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
 
 .cta-final { text-align: center; padding: clamp(110px, 14vw, 180px) 0; position: relative; overflow: hidden; }
@@ -212,8 +146,7 @@ footer a:hover { color: var(--text); }
 .load > *:nth-child(5) { animation-delay: .32s; }
 
 @media (max-width: 900px) {
-  .chain { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .statements, .trial-stage, .steps { grid-template-columns: 1fr; }
+  .statements { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
@@ -233,7 +166,6 @@ document.head.appendChild(s);
 <header class="nav">
   <div class="wrap">
     <a class="brand" href="#top" aria-label="Goya Ledger, inicio">goya ledger</a>
-    <a class="btn btn-light btn-sm" href="#prueba">Pruébalo</a>
   </div>
 </header>
 
@@ -242,106 +174,15 @@ document.head.appendChild(s);
   <div class="hero">
     <div class="wrap hero-fold">
       <div class="load">
-        <p class="eyebrow">Goya · Firma y evidencia para plataformas de software</p>
-        <h1>Contratos que tu software firma, sigue y puede probar. <span class="h1-quiet">Hoy y en 30 años.</span></h1>
-        <p class="lede">Con una API, tus clientes firman dentro de tu producto y tu sistema se entera de cada firma. Cada firma queda con fecha y huella verificables con estándares públicos, <strong>sin depender de Goya</strong>, y con criptografía que resiste computadores cuánticos.</p>
-        <div class="hero-actions">
-          <a class="btn btn-light" href="#prueba">Haz la prueba</a>
-          <a class="btn btn-ghost" href="/q-day">Escanea tus firmas</a>
+        <p class="eyebrow">Goya · Sellos para tus documentos</p>
+        <h1>Tus documentos, a prueba de cambios. <span class="h1-quiet">Te decimos en dos minutos si lo necesitas.</span></h1>
+        <div class="assistant" aria-label="Asistente de Goya">
+          <div class="chat-log" id="chat-log" aria-live="polite"></div>
+          <div class="chat-options" id="chat-options"></div>
         </div>
       </div>
     </div>
   </div>
-
-  <section id="beneficios">
-    <div class="wrap">
-      <h2 class="section-title reveal">Lo que gana tu plataforma.</h2>
-      <div class="statements reveal">
-        <div class="statement">
-          <h3>Tus clientes firman sin salir de tu producto.</h3>
-          <p>Firma electrónica simple (Ley 19.799) dentro de tu flujo o desde un enlace. Sin otra herramienta ni otra cuenta.</p>
-        </div>
-        <div class="statement">
-          <h3>Cada contrato avisa a tu sistema.</h3>
-          <p>Recibes un aviso cada vez que una parte firma, y activas un servicio o un cobro apenas se firma.</p>
-        </div>
-        <div class="statement">
-          <h3>La prueba no depende de nosotros.</h3>
-          <p>Firma, fecha y huella se verifican con estándares públicos y algoritmos post-cuánticos. <a href="/q-day">¿Tus firmas actuales resisten?</a></p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="prueba" class="trial">
-    <div class="wrap">
-      <h2 class="section-title reveal">Haz la prueba.</h2>
-      <ol class="stepper" aria-label="Pasos de la prueba">
-        <li><button type="button" class="step-tab" data-step="1" aria-current="step"><span>1</span>Crea su huella</button></li>
-        <li><button type="button" class="step-tab" data-step="2" disabled><span>2</span>Regístralo</button></li>
-        <li><button type="button" class="step-tab" data-step="3" disabled><span>3</span>Intenta falsificarlo</button></li>
-      </ol>
-      <div class="trial-stage">
-        <div class="trial-doc">
-          <div class="doc-head"><span id="doc-title">Contrato de ejemplo</span><span class="doc-edit-hint" id="doc-hint">✎ Haz clic y escribe</span></div>
-          <textarea id="doc" class="doc" spellcheck="false" autocomplete="off" aria-label="Contrato de ejemplo, puedes editarlo"></textarea>
-          <div class="demo-actions" id="quick-edits">
-            <button class="chip" type="button" data-edit="monto">Cambiar el arriendo a $990.000</button>
-            <button class="chip" type="button" data-edit="nombre">Cambiar un apellido</button>
-            <button class="chip" type="button" data-edit="reset">Deshacer cambios</button>
-          </div>
-          <p class="trial-note">Todo ocurre en tu pantalla: no se envía ningún dato.</p>
-        </div>
-        <div class="trial-panel">
-          <div class="panel" data-panel="1">
-            <h3>Esta es la huella del contrato.</h3>
-            <p>Como una huella digital: cada documento tiene una sola. Si cambias cualquier cosa, aunque sea una coma, la huella cambia entera.</p>
-            <div class="print" id="print" aria-hidden="true"></div>
-            <details class="print-code"><summary>Ver la huella como código</summary><code id="print-code"></code></details>
-            <p class="status" id="print-status" role="status"></p>
-            <button class="btn btn-light panel-next" type="button" id="to-step-2">Siguiente: registrarlo →</button>
-          </div>
-          <div class="panel" data-panel="2" hidden>
-            <h3>Queda anotado en el libro.</h3>
-            <p>La huella de tu contrato entra en un bloque, con fecha y hora. Cada bloque guarda la huella del anterior, así que quedan encadenados. Y el libro está copiado en muchos computadores.</p>
-            <div class="chain" id="chain-register"></div>
-            <p class="status" id="register-status" role="status"></p>
-            <button class="btn btn-light panel-next" type="button" id="to-step-3">Siguiente: intenta falsificarlo →</button>
-          </div>
-          <div class="panel" data-panel="3" hidden>
-            <h3>Ahora, intenta falsificarlo.</h3>
-            <p>Cambia el contrato que registraste: el monto, un nombre, lo que quieras. Después mira qué pasa con la cadena.</p>
-            <div class="chain" id="chain-forge"></div>
-            <p class="status" id="forge-status" role="status"></p>
-            <button class="btn btn-ghost panel-next" type="button" id="restart">Empezar de nuevo</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="como">
-    <div class="wrap">
-      <h2 class="section-title reveal">Cómo funciona, en tres pasos.</h2>
-      <div class="steps reveal">
-        <article class="step">
-          <span class="step-num">Paso 1</span>
-          <h3>Tu plataforma envía el contrato.</h3>
-          <p>Una llamada a la API con el documento y quiénes firman. Goya registra su huella, no el documento.</p>
-        </article>
-        <article class="step">
-          <span class="step-num">Paso 2</span>
-          <h3>Tus clientes firman.</h3>
-          <p>Desde tu producto o un enlace. Tu sistema recibe un aviso con cada firma.</p>
-        </article>
-        <article class="step">
-          <span class="step-num">Paso 3</span>
-          <h3>Cualquiera lo comprueba.</h3>
-          <p>Calcula la huella del documento y la compara con la registrada. Coincide o no coincide, hoy o en 30 años.</p>
-        </article>
-      </div>
-    </div>
-  </section>
 
   <section id="honesto">
     <div class="wrap">
@@ -367,8 +208,8 @@ document.head.appendChild(s);
     <div class="horizon" aria-hidden="true"></div>
     <div class="wrap">
       <h2 class="reveal">Que la verdad viaje con el documento.</h2>
-      <p class="reveal">Buscamos las primeras plataformas que quieran integrar Goya.</p>
-      <a class="btn btn-light reveal" href="#prueba">Haz la prueba</a>
+      <p class="reveal">Sin tecnicismos y sin nada que instalar.</p>
+      <a class="btn btn-light reveal" href="#top">Habla con el asistente</a>
     </div>
   </div>
 
@@ -380,203 +221,8 @@ document.head.appendChild(s);
   </div>
 </footer>
 
-<script>
-const ORIGINAL = `CONTRATO DE ARRIENDO
-
-Arrendador: María Pérez
-Arrendataria: Camila Soto
-Propiedad: Av. Los Leones 1234, depto 56, Providencia
-
-Renta mensual: $450.000, pagaderos el día 5 de cada mes.
-Duración: 12 meses desde el 1 de noviembre de 2026.`;
-
-const MY_BLOCK = 1043;
-const CHAIN_ENTRIES = [
-  { number: 1041, label: 'Otros registros', content: 'registros-1041' },
-  { number: 1042, label: 'Otros registros', content: 'registros-1042' },
-  { number: MY_BLOCK, label: 'Tu contrato', isMine: true },
-  { number: 1044, label: 'Registros posteriores', content: 'registros-1044' },
-  { number: 1045, label: 'Registros posteriores', content: 'registros-1045' },
-];
-
-const docInput = document.getElementById('doc');
-const docTitle = document.getElementById('doc-title');
-const docHint = document.getElementById('doc-hint');
-const quickEdits = document.getElementById('quick-edits');
-const printGrid = document.getElementById('print');
-const printCode = document.getElementById('print-code');
-const printStatus = document.getElementById('print-status');
-const registerChain = document.getElementById('chain-register');
-const registerStatus = document.getElementById('register-status');
-const forgeChain = document.getElementById('chain-forge');
-const forgeStatus = document.getElementById('forge-status');
-const stepTabs = [...document.querySelectorAll('.step-tab')];
-const panels = [...document.querySelectorAll('.panel')];
-let originalHash = '';
-let registration = null;
-let currentStep = 1;
-let unlockedStep = 1;
-
-async function computeHash(text) {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function renderPrint(container, hash) {
-  if (container.children.length !== 64) {
-    container.replaceChildren(...Array.from({ length: 64 }, () => document.createElement('i')));
-  }
-  [...hash].forEach((char, index) => {
-    container.children[index].style.opacity = (0.08 + (parseInt(char, 16) / 15) * 0.85).toFixed(2);
-  });
-}
-
-function setStatus(element, tone, text) {
-  element.className = `status ${tone}`;
-  element.textContent = text;
-}
-
-async function buildChain(contractHash) {
-  const blocks = [];
-  let previousHash = '0'.repeat(64);
-  for (const entry of CHAIN_ENTRIES) {
-    const content = entry.isMine ? contractHash : entry.content;
-    const hash = await computeHash(previousHash + content);
-    blocks.push({ ...entry, hash });
-    previousHash = hash;
-  }
-  return blocks;
-}
-
-function renderBlock(block, brokenNumbers) {
-  const isBroken = brokenNumbers.has(block.number);
-  const element = document.createElement('div');
-  element.className = ['block', block.isMine ? 'mine' : '', isBroken ? 'broken' : ''].join(' ').trim();
-  const title = document.createElement('b');
-  title.textContent = `#${block.number.toLocaleString('es-CL')}`;
-  const label = document.createElement('span');
-  label.className = 'block-label';
-  label.textContent = block.label;
-  const print = document.createElement('div');
-  print.className = 'print-mini';
-  renderPrint(print, block.hash);
-  const state = document.createElement('span');
-  state.className = 'block-state';
-  state.textContent = !isBroken ? '✓ Intacto' : block.isMine ? '✗ Alterado' : '✗ Roto';
-  element.append(title, label, print, state);
-  return element;
-}
-
-function renderChain(container, blocks, brokenNumbers = new Set()) {
-  container.replaceChildren(...blocks.map((block) => renderBlock(block, brokenNumbers)));
-}
-
-function updateStepOne(hash) {
-  renderPrint(printGrid, hash);
-  printCode.textContent = hash;
-  if (docInput.value === ORIGINAL) {
-    setStatus(printStatus, hash === originalHash && docHint.classList.contains('quiet') ? 'ok' : 'info',
-      docHint.classList.contains('quiet')
-        ? 'Volviste al texto original: la huella es exactamente la misma de antes.'
-        : 'Pruébalo: cambia cualquier cosa del contrato y mira cómo cambia la huella.');
-    return;
-  }
-  setStatus(printStatus, 'bad', 'Cambiaste el contrato y su huella ya es otra, completamente distinta. Por eso un documento no se puede editar sin que se note.');
-}
-
-async function updateForgery(hash) {
-  const rebuilt = await buildChain(hash);
-  const brokenNumbers = new Set(rebuilt
-    .filter((block, index) => block.hash !== registration.blocks[index].hash)
-    .map((block) => block.number));
-  renderChain(forgeChain, rebuilt, brokenNumbers);
-  if (brokenNumbers.size === 0) {
-    setStatus(forgeStatus, 'ok', 'El contrato coincide con lo registrado. Es el auténtico.');
-    return;
-  }
-  setStatus(forgeStatus, 'bad', `Falsificación detectada. El contrato ya no coincide con su huella del bloque ${MY_BLOCK.toLocaleString('es-CL')}, y la cadena se rompe desde ahí en adelante. Para esconderlo, alguien tendría que rehacer todos esos bloques en todos los computadores a la vez.`);
-}
-
-async function onDocumentChange() {
-  docHint.classList.add('quiet');
-  docHint.textContent = 'Editando';
-  const hash = await computeHash(docInput.value);
-  if (currentStep === 1) updateStepOne(hash);
-  if (currentStep === 3) await updateForgery(hash);
-}
-
-async function register() {
-  const contractHash = await computeHash(docInput.value);
-  registration = { text: docInput.value, blocks: await buildChain(contractHash) };
-  const visibleBlocks = registration.blocks.filter((block) => block.number <= MY_BLOCK);
-  renderChain(registerChain, visibleBlocks);
-  setStatus(registerStatus, 'ok', `Registrado en el bloque ${MY_BLOCK.toLocaleString('es-CL')} a las ${new Date().toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' })}.`);
-  setTimeout(() => {
-    renderChain(registerChain, registration.blocks);
-    setStatus(registerStatus, 'ok', 'Llegaron registros nuevos y se encadenaron después del tuyo. Cada uno depende del anterior.');
-  }, 1600);
-}
-
-async function goToStep(step) {
-  currentStep = step;
-  unlockedStep = Math.max(unlockedStep, step);
-  stepTabs.forEach((tab) => {
-    const tabStep = Number(tab.dataset.step);
-    if (tabStep === step) tab.setAttribute('aria-current', 'step');
-    else tab.removeAttribute('aria-current');
-    tab.disabled = tabStep > unlockedStep;
-    tab.classList.toggle('done', tabStep < step);
-  });
-  panels.forEach((panel) => { panel.hidden = Number(panel.dataset.panel) !== step; });
-  docInput.readOnly = step === 2;
-  quickEdits.hidden = step === 2;
-  docHint.hidden = step === 2;
-  const titles = { 1: 'Contrato de ejemplo', 2: `Contrato registrado en el bloque ${MY_BLOCK.toLocaleString('es-CL')}`, 3: 'El contrato registrado: cámbialo' };
-  docTitle.textContent = titles[step];
-  if (step === 2 && !registration) await register();
-  if (step === 2 && registration) renderChain(registerChain, registration.blocks);
-  if (step === 3) {
-    docHint.classList.remove('quiet');
-    docHint.textContent = '✎ Haz clic y cámbialo';
-    await updateForgery(await computeHash(docInput.value));
-  }
-  if (step === 1) await onDocumentChangeWithoutHint();
-}
-
-async function onDocumentChangeWithoutHint() {
-  updateStepOne(await computeHash(docInput.value));
-}
-
-const edits = {
-  monto: (text) => text.replace(/\$[\d.]+/, '$990.000'),
-  nombre: (text) => text.replace('Camila Soto', 'Camila Sotomayor'),
-  reset: () => (currentStep === 3 && registration ? registration.text : ORIGINAL),
-};
-
-document.querySelectorAll('[data-edit]').forEach((button) => {
-  button.addEventListener('click', () => {
-    docInput.value = edits[button.dataset.edit](docInput.value);
-    onDocumentChange();
-  });
-});
-docInput.addEventListener('input', onDocumentChange);
-stepTabs.forEach((tab) => tab.addEventListener('click', () => goToStep(Number(tab.dataset.step))));
-document.getElementById('to-step-2').addEventListener('click', () => goToStep(2));
-document.getElementById('to-step-3').addEventListener('click', () => goToStep(3));
-document.getElementById('restart').addEventListener('click', () => {
-  registration = null;
-  unlockedStep = 1;
-  docInput.value = ORIGINAL;
-  docHint.classList.remove('quiet');
-  docHint.textContent = '✎ Haz clic y escribe';
-  goToStep(1);
-});
-
-async function initTrial() {
-  docInput.value = ORIGINAL;
-  originalHash = await computeHash(ORIGINAL);
-  updateStepOne(originalHash);
-}
+<script type="module">
+import { resolveStep, applyChoice, DEFAULT_EXAMPLE } from "./assistant.js";
 
 const observer = new IntersectionObserver((entries) => {
   entries.forEach((entry) => {
@@ -587,7 +233,47 @@ const observer = new IntersectionObserver((entries) => {
 }, { threshold: 0.12 });
 document.querySelectorAll('.reveal').forEach((element) => observer.observe(element));
 
-initTrial();
+const chatLog = document.getElementById("chat-log");
+const chatOptions = document.getElementById("chat-options");
+const messageDelayMs = matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 450;
+let visitorState = { example: DEFAULT_EXAMPLE };
+
+function addBubble(text, speaker) {
+  const bubble = document.createElement("p");
+  bubble.className = `bubble bubble-${speaker}`;
+  bubble.textContent = text;
+  chatLog.append(bubble);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function renderOptions(options) {
+  chatOptions.replaceChildren(...options.map((option) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chip";
+    button.textContent = option.label;
+    button.addEventListener("click", () => chooseOption(option));
+    return button;
+  }));
+}
+
+async function showStep(stepId) {
+  const { messages, options } = resolveStep(stepId, visitorState);
+  chatOptions.replaceChildren();
+  for (const message of messages) {
+    await new Promise((resolve) => setTimeout(resolve, messageDelayMs));
+    addBubble(message, "bot");
+  }
+  renderOptions(options);
+}
+
+function chooseOption(option) {
+  addBubble(option.label, "visitor");
+  visitorState = applyChoice(visitorState, option);
+  showStep(option.go);
+}
+
+showStep("inicio");
 </script>
 </body>
 </html>
