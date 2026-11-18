@@ -1,20 +1,20 @@
-# Performance Overhead of FIPS 203/204/205 Post-Quantum Cryptography in BFT Consensus
+# Computational Overhead of FIPS 203/204/205 Post-Quantum Cryptography in a BFT Consensus Pipeline
 
 ## Abstract
 
-This paper reports measured performance overhead of NIST post-quantum cryptographic standards (ML-DSA-65, ML-KEM-768, SLH-DSA-128s) integrated into a HotStuff-based BFT consensus protocol. We instrument a 4-validator network running the complete block production pipeline — key generation, transaction signing, consensus voting, signature verification, and parallel transaction execution — and compare classical (Ed25519) against post-quantum (ML-DSA-65) configurations. End-to-end throughput with ML-DSA-65 reaches 10,260 TPS with 9.75 ms block latency on commodity hardware. The primary bottleneck is transaction signing (83.2% of total time); verification overhead is negligible (1.3x). We validate implementation correctness against 117 official NIST ACVP test vectors with byte-exact output matching. Results are fully reproducible from the open-source implementation.
+This paper reports the computational overhead of NIST post-quantum cryptographic standards (ML-DSA-65, ML-KEM-768, SLH-DSA-128s) integrated into a HotStuff-based BFT consensus implementation. We instrument the complete block production pipeline of a 4-validator configuration — key generation, transaction signing, consensus voting, signature verification, and parallel transaction execution — running in a single process without network transport, and compare classical (Ed25519) against post-quantum (ML-DSA-65) configurations. This isolates cryptographic cost from network cost. In-process throughput with ML-DSA-65 reaches 10,260 TPS with 9.75 ms block latency on a laptop-class CPU using unoptimized reference implementations. The primary bottleneck is transaction signing (83.2% of total time); verification overhead is small (1.3x). We validate implementation correctness against 117 official NIST ACVP test vectors with byte-exact output matching. Results are reproducible from the open-source implementation.
 
 ## 1. Introduction
 
-NIST finalized three post-quantum cryptographic standards in August 2024: FIPS 203 (ML-KEM), FIPS 204 (ML-DSA), and FIPS 205 (SLH-DSA). NIST IR 8547 establishes deprecation of classical algorithms by 2030 and prohibition by 2035. While resource estimates for quantum attacks on elliptic curve cryptography continue to decrease — Gidney and Ekera reduced RSA-2048 factoring to 20 million noisy qubits in 8 hours [1], and Google Quantum AI's 2026 estimates place secp256k1 ECDLP at under 500,000 physical qubits in 9 minutes [2] — no published work reports measured performance of these standards in a production blockchain consensus system.
+NIST finalized three post-quantum cryptographic standards in August 2024: FIPS 203 (ML-KEM), FIPS 204 (ML-DSA), and FIPS 205 (SLH-DSA). The final NIST IR 8547 (October 2026) deprecates quantum-vulnerable signature and key-establishment algorithms after 2030 and disallows them after 2035, regardless of key size [8]. Resource estimates for quantum attacks keep decreasing: Gidney estimated that RSA-2048 can be factored with fewer than one million noisy qubits in under a week [1], and Google Quantum AI estimated that secp256k1 ECDLP can be solved with fewer than 500,000 physical qubits in 18 to 23 minutes on a superconducting architecture, of which 9 to 12 minutes follow a precomputation phase [2]; earlier analyses show how strongly such estimates depend on hardware assumptions [6]. Because migrating long-lived systems takes years, it has to finish before such a machine exists [5][10].
 
-Prior work on PQC performance focuses on isolated cryptographic operations [3][4] or theoretical protocol analysis [5]. Blockchain-specific studies address quantum threats [6] but not deployment performance. This gap matters because BFT consensus protocols amplify cryptographic costs: each consensus round requires O(n) signatures and O(n^2) verifications across validators.
+Prior work on PQC performance focuses mostly on isolated cryptographic operations [3][4]. Two recent works measure post-quantum signatures inside blockchain systems. Yu et al. [11] replace BLS with ML-DSA-65 in a BFT protocol deployed on 50 nodes across 5 cloud regions and report that latency roughly doubles, to about one second. Santos et al. [12] run more than 11 million transactions on an EVM-compatible chain with cryptographically agile transactions supporting ECDSA, Falcon-512 and ML-DSA, and report no measurable overhead from the agile transaction format. BFT protocols amplify cryptographic costs because each round requires O(n) signatures and up to O(n^2) verifications across validators.
 
-This paper addresses the gap with measurements from a deployed system using real cryptographic operations throughout the consensus and transaction processing pipeline.
+This paper complements those network-level results with a per-phase breakdown of where cryptographic cost goes inside a single validator's pipeline: consensus voting, transaction signing and execution, plus hybrid signatures, key exchange and block size.
 
 ## 2. System Architecture
 
-The system under test implements a DAG-based HotStuff BFT consensus protocol with Delegated Proof-of-Stake validator selection. The cryptographic module is isolated in a separate crate with FIPS 140-3 compliant state machine (4 states, 3 transitions, power-up self-tests).
+The system under test implements a DAG-based HotStuff BFT consensus protocol with Delegated Proof-of-Stake validator selection. The cryptographic module is isolated in a separate crate with a state machine modeled on FIPS 140-3 (4 states, 3 transitions, power-up self-tests); the module has not been validated by a CMVP laboratory.
 
 ### 2.1 Cryptographic Primitives
 
@@ -28,11 +28,11 @@ The system under test implements a DAG-based HotStuff BFT consensus protocol wit
 
 ### 2.2 Consensus Protocol
 
-HotStuff BFT with 3 phases (Prepare, PreCommit, Commit). Quorum threshold: 2f+1 out of 3f+1 validators. Each phase requires f+1 valid signatures. A single consensus round produces 9 signatures (3 phases x 3 validators) and 9 verifications.
+HotStuff BFT with 3 phases (Prepare, PreCommit, Commit). Quorum threshold: 2f+1 out of 3f+1 validators. Each phase requires 2f+1 valid signatures. A single consensus round produces 9 signatures (3 phases x 3 validators) and 9 verifications.
 
 ### 2.3 Hybrid Mode
 
-Following ANSSI recommendation [7], the system supports dual signatures (classical + post-quantum) on signed envelopes. Both signatures must verify for the envelope to be accepted. The hybrid TLS layer uses X25519 + ML-KEM-768 via rustls-post-quantum.
+Following ANSSI [7] and BSI [9] recommendations, the system supports dual signatures (classical + post-quantum) on signed envelopes. Both signatures must verify for the envelope to be accepted. The hybrid TLS layer uses X25519 + ML-KEM-768 via rustls-post-quantum.
 
 ## 3. Methodology
 
@@ -43,7 +43,7 @@ Following ANSSI recommendation [7], the system supports dual signatures (classic
 - Crypto library: PQClean (C reference implementations via FFI)
 - Measurement: `std::time::Instant` (monotonic clock)
 - Iterations: 20 blocks x 100 transactions per benchmark run
-- Validators: 4 (minimum BFT with f=1)
+- Validators: 4 (minimum BFT with f=1), instantiated in one process; messages are passed in memory with no network transport, serialization over sockets, or propagation delay
 
 ### 3.2 Pipeline Instrumentation
 
@@ -119,7 +119,7 @@ TPS plateaus around 11,000 as signing becomes the dominant cost. At low transact
 
 ### 4.5 Hybrid Signature Overhead
 
-ANSSI-compliant dual signature (Ed25519 primary + ML-DSA-65 secondary), 50 iterations.
+Hybrid dual signature as recommended by ANSSI (Ed25519 primary + ML-DSA-65 secondary), 50 iterations.
 
 | Operation | Classical (us) | Hybrid (us) | Overhead |
 |-----------|---------------|-------------|----------|
@@ -163,9 +163,15 @@ Transaction signing consumes 83.2% of pipeline time with ML-DSA-65. This cost is
 
 ML-DSA-65 signatures (3,309 B) are 51.7x larger than Ed25519 (64 B). For a block with 100 transactions and 5 endorsements each, the bandwidth difference is approximately 1.5 MB (ML-DSA) vs 30 KB (Ed25519). At 103 blocks/second, this produces approximately 155 MB/s of signature data. This is within the capacity of modern datacenter networks but may constrain geographic distribution over slower links.
 
-### 5.4 Comparison with Existing Systems
+### 5.4 Comparison with Existing Work and Systems
 
-No directly comparable measurements exist in the literature. QRL uses XMSS (stateful hash-based signatures) but has not published BFT consensus benchmarks. Algorand deploys FALCON for State Proofs but not for transaction signatures. Neither Bitcoin nor Ethereum has deployed any PQC algorithm.
+Yu et al. [11] measure ML-DSA-65 in a geo-distributed BFT deployment and find roughly 2x latency, an effect dominated by network and message size. Our in-process measurements show the purely computational side: verification costs 1.3x and signing 9.9x Ed25519, so in a networked deployment the bandwidth of 3,309-byte signatures (Section 5.3), not verification time, is the more likely source of added latency. Santos et al. [12] show that supporting several signature schemes at the transaction-format level adds no measurable overhead, which is consistent with our hybrid-envelope design.
+
+Among deployed systems, Algorand executed its first Falcon-signed transaction on mainnet in November 2025 and enabled native Falcon-1024 accounts in August 2026 [13]. QRL 2.0 uses ML-DSA-87 for accounts and validators and is on public testnet as of 2026 [14]. As of November 2026, neither Bitcoin nor Ethereum has deployed a post-quantum signature scheme on mainnet; Bitcoin's BIP-360 removes the Taproot key-path exposure without introducing a post-quantum scheme [15], and Ethereum's post-quantum migration targets 2029 [16].
+
+### 5.5 Limitations
+
+All validators run in one process, so the reported throughput excludes network latency, bandwidth limits and real message serialization; it is an upper bound on what the cryptographic pipeline allows, not a network throughput figure. Measurements use PQClean reference implementations without AVX2 or NEON optimizations, on a single laptop-class machine; optimized implementations would reduce ML-DSA signing cost. Transaction signing is sequential, which overstates its share of pipeline time on multi-core hardware. A networked multi-machine evaluation is left for future work.
 
 ## 6. Reproducibility
 
@@ -180,9 +186,9 @@ Source code, test vectors, and benchmark harness are available in the repository
 
 ## References
 
-[1] C. Gidney and M. Ekera, "How to factor 2048 bit RSA integers in 8 hours using 20 million noisy qubits," Quantum, vol. 5, p. 433, 2021.
+[1] C. Gidney, "How to factor 2048 bit RSA integers with less than a million noisy qubits," arXiv:2505.15917, 2025.
 
-[2] Google Quantum AI, "Resource estimates for cryptographically relevant quantum computers," 2026.
+[2] Google Quantum AI, "Securing Elliptic Curve Cryptocurrencies against Quantum Vulnerabilities: Resource Estimates and Mitigations," arXiv:2603.28846, 2026.
 
 [3] M. J. Kannwischer et al., "Improving software quality in cryptography standardization projects," in IEEE EuroS&P Workshops, 2022.
 
@@ -194,8 +200,20 @@ Source code, test vectors, and benchmark harness are available in the repository
 
 [7] ANSSI, "Avis relatif a la migration vers la cryptographie post-quantique," Agence nationale de la securite des systemes d'information, 2024.
 
-[8] NIST, "Transition to Post-Quantum Cryptography Standards," NIST IR 8547, 2024.
+[8] NIST, "Transition to Post-Quantum Cryptography Standards," NIST IR 8547 (final), October 2026.
 
 [9] BSI, "Kryptographische Verfahren: Empfehlungen und Schlussellangen," BSI TR-02102-1, 2024.
 
 [10] M. Mosca, "Cybersecurity in an era with quantum computers: will we be ready?" IEEE Security & Privacy, vol. 16, no. 5, pp. 38-41, 2018.
+
+[11] Q. Yu, J. Villacis, G. Losa, Z. Xiang and X. Wang, "Simple-IT: Practical Low-Latency Signature-Free BFT Consensus," arXiv:2606.14404, 2026.
+
+[12] M. B. Santos, D. Ferrin, R. Kahat and M. Lodder, "Post-Quantum Blockchains with Agility in Mind," IACR Cryptology ePrint Archive, 2026/609, 2026.
+
+[13] Algorand Foundation, "Technical Brief: Quantum-resistant transactions on Algorand with Falcon signatures," 2025; "2025 on Algorand: Roadmap progress," 2025.
+
+[14] The QRL Foundation, "QRL 2.0 (Project Zond)," https://www.theqrl.org/2/, accessed November 2026.
+
+[15] BIP-360, "Pay to Merkle Root (P2MR)," Bitcoin Improvement Proposals, 2026.
+
+[16] Ethereum Foundation, post-quantum roadmap, March 2026.
