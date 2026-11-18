@@ -9,7 +9,7 @@ open Polynomial
 
 def n : ℕ := 256
 
-def cycloPoly : Polynomial Zq := X ^ (2 * n) + 1
+def cycloPoly : Polynomial Zq := X ^ n + 1
 
 abbrev Rq := AdjoinRoot cycloPoly
 
