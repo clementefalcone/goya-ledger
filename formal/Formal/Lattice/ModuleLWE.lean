@@ -1,9 +1,10 @@
 import Formal.Lattice.Rq
 
 /-!
-# Module-LWE — The hardness assumption for ML-DSA-65
+# Module-LWE — sample structure for ML-DSA-65
 
-Axiomatized: breaking the scheme implies solving Module-LWE.
+Defines what a Module-LWE sample is. The hardness of Module-LWE is not
+stated or assumed anywhere in this development.
 -/
 
 namespace GoyaFormal
@@ -24,9 +25,5 @@ def isModuleLweSample (inst : ModuleLweInstance) (wit : ModuleLweWitness) (noise
   inst.vecT = fun i => matVecMul inst.matA wit.vecS i + noise i
 
 end
-
-axiom moduleLweHardness :
-  ∀ (adversary : ModuleLweInstance → Bool),
-    True
 
 end GoyaFormal
