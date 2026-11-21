@@ -79,6 +79,16 @@ impl MiningService {
         miner_address: &str,
         transactions: Vec<Transaction>,
     ) -> Result<u64, String> {
+        let block = self.build_block(miner_address, transactions)?;
+        persist_block(self.store.as_ref(), &block)?;
+        Ok(block.height)
+    }
+
+    pub fn build_block(
+        &self,
+        miner_address: &str,
+        transactions: Vec<Transaction>,
+    ) -> Result<Block, String> {
         let latest_height = self.store.get_latest_height().unwrap_or(0);
         let new_height = if self.store.block_exists(0).unwrap_or(false) {
             latest_height + 1
@@ -159,29 +169,7 @@ impl MiningService {
             }
         }
 
-        // Write block and transactions
-        self.store
-            .write_block(&block)
-            .map_err(|e| format!("failed to write block: {e}"))?;
-
-        // Write coinbase tx
-        self.store
-            .write_transaction(&coinbase)
-            .map_err(|e| format!("failed to write coinbase tx: {e}"))?;
-
-        for mut tx in transactions {
-            tx.block_height = new_height;
-            tx.state = "confirmed".to_string();
-            if let Err(e) = crate::transaction::apply_tx_payload(self.store.as_ref(), &tx) {
-                log::warn!("tx {} payload rejected: {e}", tx.id);
-                tx.state = "invalid_payload".to_string();
-            }
-            self.store
-                .write_transaction(&tx)
-                .map_err(|e| format!("failed to write tx: {e}"))?;
-        }
-
-        Ok(new_height)
+        Ok(block)
     }
 
     /// Calculate mining reward with halving schedule.
@@ -189,6 +177,27 @@ impl MiningService {
         let halvings = height / self.config.halving_interval;
         self.config.base_reward >> halvings.min(64)
     }
+}
+
+pub fn persist_block(store: &dyn BlockStore, block: &Block) -> Result<(), String> {
+    store
+        .write_block(block)
+        .map_err(|e| format!("failed to write block {}: {e}", block.height))?;
+
+    for tx in &block.transaction_data {
+        let mut tx = tx.clone();
+        tx.block_height = block.height;
+        tx.state = "confirmed".to_string();
+        if let Err(e) = crate::transaction::apply_tx_payload(store, &tx) {
+            log::warn!("tx {} payload rejected: {e}", tx.id);
+            tx.state = "invalid_payload".to_string();
+        }
+        store
+            .write_transaction(&tx)
+            .map_err(|e| format!("failed to write tx {}: {e}", tx.id))?;
+    }
+
+    Ok(())
 }
 
 /// Compute SHA-256 hash of a block (for parent_hash linkage).
@@ -310,6 +319,36 @@ mod tests {
         let block = store.read_block(0).unwrap();
         assert_eq!(block.proposer, "miner1");
         assert_eq!(block.transactions.len(), 1); // coinbase only
+    }
+
+    #[test]
+    fn build_block_leaves_store_untouched() {
+        let store = Arc::new(MemoryStore::new());
+        let service = MiningService::new(store.clone(), MiningConfig::default());
+        service.mine_block("miner1", vec![]).unwrap();
+
+        let block = service.build_block("miner1", vec![]).unwrap();
+
+        assert_eq!(block.height, 1);
+        assert_eq!(block.parent_hash, block_hash(&store.read_block(0).unwrap()));
+        assert!(!store.block_exists(1).unwrap());
+    }
+
+    #[test]
+    fn persisting_a_built_block_confirms_its_transactions() {
+        let store = Arc::new(MemoryStore::new());
+        let service = MiningService::new(store.clone(), MiningConfig::default());
+        service.mine_block("miner1", vec![]).unwrap();
+        let block = service
+            .build_block("leader", vec![notarization_tx(&"b".repeat(64))])
+            .unwrap();
+
+        persist_block(store.as_ref(), &block).unwrap();
+
+        let tx = store.read_transaction("notarize:abc").unwrap();
+        assert_eq!(tx.state, "confirmed");
+        assert_eq!(tx.block_height, 1);
+        assert!(store.block_exists(1).unwrap());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pre-push gate: rustfmt, clippy across all targets, the crypto-boundary check,
-# then the unit and doc tests. Roughly a minute with a warm cache.
+# the Lean proofs, then the unit and doc tests. Roughly a minute with a warm cache.
 #
 # Enable with:     git config core.hooksPath .githooks
 # Skip once with:  git push --no-verify

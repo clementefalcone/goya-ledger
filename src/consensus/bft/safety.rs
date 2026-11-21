@@ -94,6 +94,23 @@ impl ChainAncestryChecker {
     fn lookup(&self, idx: &BlockIndex, hash: &[u8; 32]) -> Option<BlockInfo> {
         idx.hash_to_info.get(hash).cloned()
     }
+
+    pub fn index_proposal(&self, block: &crate::storage::traits::Block) {
+        let mut idx = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        idx.hash_to_info.insert(
+            crate::mining::block_hash(block),
+            BlockInfo {
+                height: block.height,
+                parent_hash: block.parent_hash,
+            },
+        );
+    }
+}
+
+impl<T: AncestryChecker + ?Sized> AncestryChecker for std::sync::Arc<T> {
+    fn is_ancestor(&self, ancestor: &[u8; 32], descendant: &[u8; 32]) -> bool {
+        (**self).is_ancestor(ancestor, descendant)
+    }
 }
 
 impl AncestryChecker for ChainAncestryChecker {
@@ -258,7 +275,9 @@ impl SafetyState {
         //     BUT the proposal must extend the justify_qc's certified block.
         //     A higher QC attached to an unrelated sibling is not sufficient.
         if let Some(jqc) = justify_qc {
-            if jqc.round > lock.round && ancestry.is_ancestor(&jqc.block_hash, proposal_block_hash)
+            if jqc.round > lock.round
+                && jqc.round < proposal_round
+                && ancestry.is_ancestor(&jqc.block_hash, proposal_block_hash)
             {
                 return Ok(());
             }
@@ -493,6 +512,18 @@ mod tests {
         assert!(matches!(r, Err(SafetyError::LockedConflict { .. })));
     }
 
+    #[test]
+    fn justify_qc_from_proposal_round_or_later_does_not_unlock() {
+        let mut s = SafetyState::new();
+        s.update_locked_qc(&make_qc(BftPhase::PreCommit, 0xAA, 5));
+        let chain = chain_abc();
+        for justify_round in [7, 8] {
+            let jqc = make_qc(BftPhase::Prepare, 0xFF, justify_round);
+            let r = s.safe_to_vote(7, &block_hash(0xFF), Some(&jqc), &chain);
+            assert!(matches!(r, Err(SafetyError::LockedConflict { .. })));
+        }
+    }
+
     // ── high_qc / locked_qc updates ─────────────────────────────────
 
     #[test]
@@ -636,6 +667,21 @@ mod tests {
         let (store, hash_a, _, hash_c) = store_with_chain();
         let checker = ChainAncestryChecker::new(store);
         assert!(!checker.is_ancestor(&hash_c, &hash_a));
+    }
+
+    #[test]
+    fn chain_checker_sees_indexed_proposal_on_top_of_tip() {
+        let (store, hash_a, hash_b, hash_c) = store_with_chain();
+        let proposal = make_block(3, hash_c);
+        let proposal_hash = crate::mining::block_hash(&proposal);
+        let checker = ChainAncestryChecker::new(store);
+        assert!(!checker.is_ancestor(&hash_c, &proposal_hash));
+
+        checker.index_proposal(&proposal);
+
+        assert!(checker.is_ancestor(&hash_c, &proposal_hash));
+        assert!(checker.is_ancestor(&hash_a, &proposal_hash));
+        assert!(!checker.is_ancestor(&hash_b, &proposal_hash));
     }
 
     #[test]

@@ -60,9 +60,9 @@ Estos son los mismos estándares que están adoptando el Departamento de Defensa
 
 **Lo que dice la ley:** Los servicios esenciales deben garantizar continuidad ante fallas, ataques o desastres. Se exigen planes de recuperación y mecanismos de resiliencia.
 
-**Lo que entregamos:** Cerulean opera como una red distribuida — no existe un punto único de falla. Si un nodo cae, la red continúa operando. Los datos se persisten en almacenamiento duradero con recuperación automática tras reinicio. El sistema soporta apagados controlados sin pérdida de información.
+**Lo que entregamos:** Hoy la red tiene un nodo que escribe y nodos réplica que guardan una copia completa de la cadena. Si el nodo que escribe cae, los registros siguen disponibles y verificables en las réplicas, pero no se aceptan registros nuevos hasta que vuelve. El consenso BFT con 4 validadores ya está implementado y probado: con un validador caído, los otros 3 siguen aceptando registros y el que vuelve se pone al día solo. Su activación en producción está pendiente. Los datos se persisten en almacenamiento duradero con recuperación automática tras reinicio. El sistema soporta apagados controlados sin pérdida de información.
 
-**Resultado para su organización:** Su infraestructura de registros sigue funcionando aunque fallen servidores individuales. Recuperación automática, sin intervención manual.
+**Resultado para su organización:** Sus registros no se pierden si falla un servidor. Con el consenso BFT activo, además seguirán aceptándose registros nuevos aunque falle un validador.
 
 ---
 
@@ -148,7 +148,7 @@ Depende del alcance. Ofrecemos desde pilotos acotados hasta despliegues multi-or
 | Confidencialidad | Aislamiento por organización, acceso denegado por defecto | Cumple |
 | Trazabilidad | Firma digital + timestamp en cada operación | Cumple |
 | Criptografía actualizada | NIST FIPS 204/202/203 (estándares 2024) | Excede |
-| Continuidad operacional | Red distribuida sin punto único de falla | Cumple |
+| Continuidad operacional | Réplicas completas de la cadena; consenso BFT de 4 validadores probado, activación pendiente | Parcial |
 | Detección de amenazas | Detección automática de manipulación + rate limiting | Cumple |
 | Gobernanza | Votación verificable y auditable entre participantes | Cumple |
 | Protección post-cuántica | ML-DSA-65 (firmas) + ML-KEM-768 (TLS híbrido opt-in) | Excede (no exigido) |

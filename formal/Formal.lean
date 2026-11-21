@@ -1,5 +1,5 @@
 import Formal.FipsStateMachine
-import Formal.BftSafety
+import Formal.HotStuffSafety
 import Formal.QuarantineCorrectness
 import Formal.Lattice.Zq
 import Formal.Lattice.Rq

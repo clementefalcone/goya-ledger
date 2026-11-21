@@ -71,6 +71,7 @@ async fn queue_and_await_block(
     tx: Transaction,
 ) -> Result<(), ApiError> {
     let id = tx.id.clone();
+    let gossip = crate::network::Message::SubmitTransaction(tx.clone());
     state
         .tx_pool
         .lock()
@@ -80,6 +81,9 @@ async fn queue_and_await_block(
             reason: format!("transaction {id} not queued: {reason}"),
         })?;
     state.block_wake.notify_one();
+    if let Some(node) = &state.node {
+        node.broadcast_message(&gossip).await;
+    }
     let mined = tokio::time::timeout(BLOCK_INCLUSION_TIMEOUT, read_mined(store, &id))
         .await
         .map_err(|_| ApiError::ConsensusError {

@@ -77,6 +77,7 @@ if want 0; then
   run 0 "rustfmt"        cargo fmt --check
   run 0 "clippy"         cargo clippy --all-targets -- -D warnings
   run 0 "crypto boundary" cargo test --test crypto_boundary
+  run 0 "lean proofs"    sh -c 'cd formal && lake build && ! grep -rnwE "sorry|admit|axiom" Formal'
 fi
 
 # ── T1: unit ──────────────────────────────────────────────────────────────

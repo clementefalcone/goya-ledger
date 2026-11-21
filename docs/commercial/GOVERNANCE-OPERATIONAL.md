@@ -107,7 +107,7 @@ La Ley 21.663 exige notificación a la ANCI. El operador debe:
 ### Arquitectura de resiliencia
 
 - Red distribuida: mínimo 3 nodos para tolerancia a fallas (Raft) o 4 nodos (BFT)
-- Sin punto único de falla: la caída de un nodo no interrumpe la red
+- Con 4 validadores BFT, la caída de un nodo no interrumpe la red. Hoy producción tiene un solo nodo que escribe y réplicas: si ese nodo cae, no se aceptan registros nuevos hasta que vuelve
 - Persistencia en RocksDB: recuperación automática tras reinicio
 - Graceful shutdown: cierre controlado sin pérdida de datos
 
@@ -124,8 +124,9 @@ La Ley 21.663 exige notificación a la ANCI. El operador debe:
 
 | Escenario | Procedimiento | RTO objetivo |
 |---|---|---|
-| Caída de 1 nodo | Automático — red continúa, nodo se recupera al reiniciar | 0 (sin interrupción) |
-| Caída de minoría de nodos | Automático — consenso mantiene operación | 0 (sin interrupción) |
+| Caída de 1 nodo (con BFT activo) | Automático — red continúa, nodo se recupera al reiniciar | 0 (sin interrupción) |
+| Caída de minoría de nodos (con BFT activo) | Automático — consenso mantiene operación | 0 (sin interrupción) |
+| Caída del nodo que escribe (producción actual) | Reiniciar el nodo; las réplicas siguen sirviendo lecturas | Escrituras detenidas hasta reiniciar |
 | Caída total de la red | Restaurar desde backup, re-sincronizar nodos | <4 horas |
 | Compromiso de un nodo | Aislar, revocar certificado, restaurar desde nodo limpio | <2 horas |
 
