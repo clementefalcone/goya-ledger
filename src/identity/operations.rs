@@ -79,6 +79,17 @@ fn require_signature(
     )))
 }
 
+const DIDS_REGISTERED_BEFORE_SIGNATURES_WERE_REQUIRED: &[&str] = &[
+    "did:goya:0e9ad72a823d77559c8f893fe6dd24a0ac3acd2347e9e62ae80143b749d755a4ac18768808406824f7c81e7cd96aa3ef3c0d6317e10030b07c27383b30e097e3",
+];
+
+fn is_registered_before_signatures_were_required(record: &IdentityRecord) -> bool {
+    DIDS_REGISTERED_BEFORE_SIGNATURES_WERE_REQUIRED.contains(&record.did.as_str())
+        && record.recovery_commitment.is_none()
+        && record.vault_entries.is_empty()
+        && record.migrated_from.is_none()
+}
+
 pub fn check_register(
     store: &dyn BlockStore,
     record: &IdentityRecord,
@@ -108,18 +119,21 @@ pub fn check_register(
             record.did
         )));
     }
-    let signature = owner_signature.ok_or_else(|| {
-        IdentityOpError::BadSignature(format!(
-            "registration of {} carries no owner signature",
-            record.did
-        ))
-    })?;
-    require_signature(
-        &record.public_key,
-        &register_message(&record.did, record.recovery_commitment.as_deref()),
-        signature,
-        &record.did,
-    )?;
+    match owner_signature {
+        Some(signature) => require_signature(
+            &record.public_key,
+            &register_message(&record.did, record.recovery_commitment.as_deref()),
+            signature,
+            &record.did,
+        )?,
+        None if is_registered_before_signatures_were_required(record) => {}
+        None => {
+            return Err(IdentityOpError::BadSignature(format!(
+                "registration of {} carries no owner signature",
+                record.did
+            )))
+        }
+    }
     match store.read_identity(&record.did) {
         Ok(existing) if existing == *record => Ok(Change::AlreadyApplied),
         Ok(_) => Err(IdentityOpError::Conflict(format!(
@@ -832,5 +846,35 @@ mod tests {
         apply_rotate(&store, &rotation.request(), 700).unwrap();
         apply_rotate(&store, &rotation.request(), 800).unwrap();
         assert_eq!(store.read_identity(&owner.did).unwrap().updated_at, 700);
+    }
+
+    fn legacy_unsigned_record() -> IdentityRecord {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy_unsigned_registration.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn replay_accepts_the_mainnet_registration_made_before_signatures_were_required() {
+        let store = MemoryStore::new();
+        let record = legacy_unsigned_record();
+        apply_register(&store, &record, None).unwrap();
+        assert_eq!(store.read_identity(&record.did).unwrap(), record);
+    }
+
+    #[test]
+    fn replay_rejects_the_legacy_did_with_a_recovery_commitment_added() {
+        let store = MemoryStore::new();
+        let mut record = legacy_unsigned_record();
+        record.recovery_commitment = Some("did:goya:attacker".to_string());
+        assert!(apply_register(&store, &record, None).is_err());
+    }
+
+    #[test]
+    fn register_without_signature_is_rejected_for_any_other_did() {
+        let store = MemoryStore::new();
+        let owner = Owner::ed25519();
+        assert!(apply_register(&store, &owner.record(), None).is_err());
     }
 }
