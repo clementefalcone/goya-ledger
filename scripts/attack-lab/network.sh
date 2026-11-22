@@ -39,7 +39,7 @@ joined() { local IFS=,; echo "$*"; }
 
 start_one() {
   local i=$1 dir="$ROOT/n$1" validators=() keys=() peers=() trusted=()
-  [ -f "$dir/pid" ] && kill -0 "$(cat "$dir/pid")" 2>/dev/null && return 0
+  [ -n "$(node_pids "$i")" ] && return 0
   for j in "${NODES[@]}"; do
     validators+=("v$j")
     keys+=("v$j:$(cat "$ROOT/n$j/pk.hex")")
@@ -51,16 +51,22 @@ start_one() {
     BFT_VALIDATOR_KEYS="$(joined "${keys[@]}")" TRUSTED_BLOCK_SIGNERS="$(joined "${trusted[@]}")" \
     BOOTSTRAP_NODES="$(joined "${peers[@]}")" RUST_LOG=info \
     "$BIN" "$(api_port "$i")" "$(p2p_port "$i")" >> node.log 2>&1) &
-  echo $! > "$dir/pid"
 }
 
 start() { for i in "${NODES[@]}"; do start_one "$i"; done; }
 
+node_pids() { pgrep -f "$BIN $(api_port "$1") $(p2p_port "$1")" || true; }
+
 stop_one() {
-  local pidfile="$ROOT/n$1/pid"
-  [ -f "$pidfile" ] || return 0
-  kill "$(cat "$pidfile")" 2>/dev/null || true
-  rm -f "$pidfile"
+  local pids
+  pids=$(node_pids "$1")
+  [ -n "$pids" ] && kill $pids 2>/dev/null
+  for _ in $(seq 1 50); do
+    [ -z "$(node_pids "$1")" ] && return 0
+    sleep 0.2
+  done
+  echo "n$1 did not stop" >&2
+  return 1
 }
 
 stop() { for i in "${NODES[@]}"; do stop_one "$i"; done; }

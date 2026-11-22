@@ -5,6 +5,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -311,6 +312,79 @@ def attack_recovery_convergence():
                    committed and converged and len(digests) == 1)
 
 
+def capture_proposal(listen_port, seconds):
+    captured = []
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", listen_port))
+    server.listen(16)
+    server.settimeout(1)
+
+    def serve():
+        deadline = time.time() + seconds
+        while time.time() < deadline and not captured:
+            try:
+                connection, _ = server.accept()
+            except socket.timeout:
+                continue
+            connection.settimeout(5)
+            data = b""
+            while True:
+                try:
+                    chunk = connection.recv(65536)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                data += chunk
+            connection.close()
+            try:
+                message = json.loads(data)
+            except ValueError:
+                continue
+            if isinstance(message, dict) and "BftProposal" in message:
+                captured.append(message)
+        server.close()
+
+    listener = threading.Thread(target=serve)
+    listener.start()
+    with socket.create_connection(("127.0.0.1", p2p_port(0))) as connection:
+        connection.sendall(json.dumps({"Version": {
+            "version": "1.0.0", "block_count": 0, "latest_hash": "",
+            "p2p_address": f"127.0.0.1:{listen_port}", "network_id": "goya-attack-lab",
+        }}).encode())
+    listener.join()
+    return captured[0] if captured else None
+
+
+def attack_round_inflation():
+    network("stop_one", "2")
+    network("stop_one", "3")
+    threading.Thread(target=lambda: call(0, "POST", "/notarize", notarization(Identity(), os.urandom(32).hex()),
+                                         timeout=60)).start()
+    proposal = capture_proposal(19690, 60)
+    if proposal is None:
+        network("start_one", "2")
+        network("start_one", "3")
+        return Outcome("Replay a captured proposal with round 10^12", "consensus", "victim keeps voting",
+                       "no proposal captured", False)
+    proposal["BftProposal"]["round"] = 10 ** 12
+    with socket.create_connection(("127.0.0.1", p2p_port(1)), timeout=5) as connection:
+        connection.sendall(json.dumps(proposal).encode())
+    network("start_one", "2")
+    started = time.time()
+    victim_votes = wait_until(
+        lambda: call(0, "POST", "/notarize", notarization(Identity(), os.urandom(32).hex()), timeout=15)[0] == 201,
+        300,
+    )
+    network("start_one", "3")
+    wait_until(lambda: len({height(node) for node in range(NODE_COUNT)}) == 1, 90)
+    return Outcome("Replay a captured proposal with round 10^12", "consensus",
+                   "victim keeps voting: a quorum that needs it commits",
+                   f"quorum with the victim committed={victim_votes} after {time.time() - started:.0f}s",
+                   victim_votes)
+
+
 def attack_harvest_now_forge_later():
     classical = Ed25519PrivateKey.generate()
     harvested_public_key = raw_public(classical)
@@ -352,6 +426,7 @@ ATTACKS = [
     attack_crash_one_validator,
     attack_beyond_threshold,
     attack_recovery_convergence,
+    attack_round_inflation,
     attack_flood,
 ]
 
