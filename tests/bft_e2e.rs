@@ -242,7 +242,7 @@ impl BftTestNetwork {
         let ids: Vec<String> = self.nodes.keys().cloned().collect();
         for id in &ids {
             let node = self.nodes.get_mut(id).unwrap();
-            node.manager.on_timeout();
+            node.manager.jump_to_round(node.manager.current_round() + 1);
         }
     }
 

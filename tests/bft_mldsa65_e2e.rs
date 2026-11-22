@@ -522,7 +522,10 @@ fn s4_viewchange_lock_recovery_no_fork() {
 
     // Leader "dies" — no Commit votes. Timeout.
     for id in &ids {
-        net.managers.get_mut(id).unwrap().on_timeout();
+        {
+            let manager = net.managers.get_mut(id).unwrap();
+            manager.jump_to_round(manager.current_round() + 1)
+        };
     }
 
     // Round 1: new leader (node-sin, idx 1) proposes B.

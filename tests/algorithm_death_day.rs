@@ -1285,7 +1285,10 @@ fn phase6_network_recovers_after_malicious_leader_round() {
         managers.get_mut(id).unwrap().start_round(1);
     }
     for id in &ids {
-        managers.get_mut(id).unwrap().on_timeout();
+        {
+            let manager = managers.get_mut(id).unwrap();
+            manager.jump_to_round(manager.current_round() + 1)
+        };
     }
 
     let decided_r2 = run_honest_round(&validators, &mut managers, 2);
@@ -1347,7 +1350,10 @@ fn phase7_partition_heals_consensus_resumes() {
     // Timeout all nodes to advance round
     let ids: Vec<String> = managers.keys().cloned().collect();
     for id in &ids {
-        managers.get_mut(id).unwrap().on_timeout();
+        {
+            let manager = managers.get_mut(id).unwrap();
+            manager.jump_to_round(manager.current_round() + 1)
+        };
     }
 
     // Heal: all 4 nodes participate in round 2
@@ -1425,7 +1431,10 @@ fn phase7_migration_during_partition_then_rejoin() {
     // Timeout to advance past stalled round
     let ids: Vec<String> = managers.keys().cloned().collect();
     for id in &ids {
-        managers.get_mut(id).unwrap().on_timeout();
+        {
+            let manager = managers.get_mut(id).unwrap();
+            manager.jump_to_round(manager.current_round() + 1)
+        };
     }
 
     // Heal partition: all 4 rejoin — BFT consensus uses original signing keys

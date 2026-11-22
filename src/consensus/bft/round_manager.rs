@@ -307,11 +307,6 @@ impl<V: SignatureVerifier + Clone> RoundManager<V> {
     ///
     /// Increments the backoff counter and advances to the next round with
     /// a new leader. Returns `NewRound` so the caller can reset their timer.
-    pub fn on_timeout(&mut self) -> ManagerAction {
-        let next_round = self.current_round + 1;
-        self.jump_to_round(next_round)
-    }
-
     pub fn jump_to_round(&mut self, round: u64) -> ManagerAction {
         if let Some(ref mut r) = self.current {
             r.process(RoundEvent::Timeout);
@@ -533,7 +528,7 @@ mod tests {
     fn timeout_advances_round() {
         let mut m = manager("v0");
         m.start();
-        let action = m.on_timeout();
+        let action = m.jump_to_round(m.current_round() + 1);
         match action {
             ManagerAction::NewRound {
                 round, leader_id, ..
@@ -552,16 +547,16 @@ mod tests {
         m.start();
         assert_eq!(m.current_timeout_ms(), 3000);
 
-        m.on_timeout(); // consecutive=1
+        m.jump_to_round(m.current_round() + 1); // consecutive=1
         assert_eq!(m.current_timeout_ms(), 6000);
 
-        m.on_timeout(); // consecutive=2
+        m.jump_to_round(m.current_round() + 1); // consecutive=2
         assert_eq!(m.current_timeout_ms(), 12000);
 
-        m.on_timeout(); // consecutive=3
+        m.jump_to_round(m.current_round() + 1); // consecutive=3
         assert_eq!(m.current_timeout_ms(), 24000);
 
-        m.on_timeout(); // consecutive=4 → 48000 capped to 30000
+        m.jump_to_round(m.current_round() + 1); // consecutive=4 → 48000 capped to 30000
         assert_eq!(m.current_timeout_ms(), 30_000);
     }
 
@@ -569,8 +564,8 @@ mod tests {
     fn backoff_resets_after_decide() {
         let mut m = manager("v0");
         m.start();
-        m.on_timeout(); // consecutive=1
-        m.on_timeout(); // consecutive=2
+        m.jump_to_round(m.current_round() + 1); // consecutive=1
+        m.jump_to_round(m.current_round() + 1); // consecutive=2
         assert_eq!(m.current_timeout_ms(), 12000);
 
         // Simulate a decide.
@@ -904,7 +899,7 @@ mod tests {
         assert_eq!(m.round_state(), Some(RoundState::PreCommitting));
 
         // TIMEOUT: round 0 failed. Advance to round 1.
-        let action = m.on_timeout();
+        let action = m.jump_to_round(m.current_round() + 1);
         match &action {
             ManagerAction::NewRound {
                 round, leader_id, ..
@@ -1057,7 +1052,7 @@ mod tests {
         }
         assert_eq!(m.safety().locked_qc().unwrap().block_hash, block_hash(0xAA));
 
-        m.on_timeout(); // → round 1
+        m.jump_to_round(m.current_round() + 1); // → round 1
 
         // Byzantine leader proposes B (sibling of A).
         // justify_qc.round == lock.round → does NOT supersede.
@@ -1086,7 +1081,7 @@ mod tests {
                 m.process_event(RoundEvent::Vote(make_vote(phase, 0xAA, 0, voter)));
             }
         }
-        m.on_timeout();
+        m.jump_to_round(m.current_round() + 1);
         assert!(m.is_current_leader());
         m
     }
@@ -1109,7 +1104,7 @@ mod tests {
                     node.process_event(RoundEvent::Vote(make_vote(phase, 0xAA, 0, voter)));
                 }
             }
-            node.on_timeout();
+            node.jump_to_round(node.current_round() + 1);
         }
 
         for node in &mut nodes {
@@ -1202,7 +1197,7 @@ mod tests {
                 voter,
             )));
         }
-        m.on_timeout(); // → round 1
+        m.jump_to_round(m.current_round() + 1); // → round 1
 
         // C is child of A → extends lock → accepted.
         let action = m.process_event(RoundEvent::Proposal {
@@ -1246,8 +1241,8 @@ mod tests {
                 voter,
             )));
         }
-        m.on_timeout(); // → round 1
-        m.on_timeout(); // → round 2
+        m.jump_to_round(m.current_round() + 1); // → round 1
+        m.jump_to_round(m.current_round() + 1); // → round 2
 
         // justify_qc from round 1 > lock round 0 → safe unlock.
         let action = m.process_event(RoundEvent::Proposal {
@@ -1268,8 +1263,8 @@ mod tests {
         let chain = chain_for_tests();
         let mut m = manager_with_chain("v1", chain);
         m.start();
-        m.on_timeout(); // → round 1
-        m.on_timeout(); // → round 2
+        m.jump_to_round(m.current_round() + 1); // → round 1
+        m.jump_to_round(m.current_round() + 1); // → round 2
 
         // Lock on A at round 2.
         m.process_event(RoundEvent::Proposal {
@@ -1293,7 +1288,7 @@ mod tests {
                 voter,
             )));
         }
-        m.on_timeout(); // → round 3
+        m.jump_to_round(m.current_round() + 1); // → round 3
 
         // justify_qc from round 0 < lock round 2 → stale.
         let action = m.process_event(RoundEvent::Proposal {
@@ -1318,7 +1313,7 @@ mod tests {
         });
         assert_eq!(m.safety().last_voted_round(), Some(0));
 
-        m.on_timeout(); // → round 1
+        m.jump_to_round(m.current_round() + 1); // → round 1
         let action = m.process_event(RoundEvent::Proposal {
             block_hash: block_hash(0xBB),
             leader_id: "v1".into(),
@@ -1361,7 +1356,7 @@ mod tests {
                 voter,
             )));
         }
-        m.on_timeout(); // → round 1
+        m.jump_to_round(m.current_round() + 1); // → round 1
 
         // Lock survives.
         assert_eq!(m.safety().locked_qc().unwrap().block_hash, block_hash(0xAA));
@@ -1378,7 +1373,7 @@ mod tests {
         ));
 
         // Sibling B: rejected.
-        m.on_timeout(); // → round 2
+        m.jump_to_round(m.current_round() + 1); // → round 2
         let action = m.process_event(RoundEvent::Proposal {
             block_hash: block_hash(0xBB),
             leader_id: "v2".into(),
@@ -1410,7 +1405,7 @@ mod tests {
         }
         assert!(m.safety().locked_qc().is_none()); // no lock!
 
-        m.on_timeout(); // → round 1
+        m.jump_to_round(m.current_round() + 1); // → round 1
 
         // B is freely accepted (no lock).
         m.process_event(RoundEvent::Proposal {
@@ -1433,8 +1428,8 @@ mod tests {
     fn old_round_votes_are_noop() {
         let mut m = manager("v1");
         m.start();
-        m.on_timeout(); // → round 1
-        m.on_timeout(); // → round 2
+        m.jump_to_round(m.current_round() + 1); // → round 1
+        m.jump_to_round(m.current_round() + 1); // → round 2
 
         // Vote from round 0 — ignored.
         let action = m.process_event(RoundEvent::Vote(make_vote(
@@ -1479,7 +1474,7 @@ mod tests {
 
         // Partition: several timeouts.
         for _ in 0..5 {
-            m.on_timeout();
+            m.jump_to_round(m.current_round() + 1);
         }
         // round = 5 now.
 
@@ -1546,7 +1541,7 @@ mod tests {
             )));
         }
         // v1 locked on A.
-        m1.on_timeout(); // → round 1
+        m1.jump_to_round(m1.current_round() + 1); // → round 1
 
         // Byzantine leader proposes B (sibling). REJECTED.
         let action = m1.process_event(RoundEvent::Proposal {
@@ -1768,7 +1763,7 @@ mod tests {
                 voter,
             )));
         }
-        m.on_timeout(); // → round 1
+        m.jump_to_round(m.current_round() + 1); // → round 1
 
         // Valid QC (passes validate_received_qc) but proposal B is sibling of A.
         // QC certifies A at round 0 (same as lock) → does NOT unlock.
