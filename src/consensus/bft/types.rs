@@ -50,6 +50,19 @@ pub struct VoteMessage {
 /// Prevents cross-protocol replay of signatures.
 const VOTE_DOMAIN: &[u8] = b"GOYA-BFT-VOTE-V1";
 
+const PROPOSAL_DOMAIN: &[u8] = b"GOYA-BFT-PROPOSAL-V1";
+
+pub fn proposal_signing_payload(block_hash: &[u8; 32], round: u64, leader_id: &str) -> Vec<u8> {
+    let leader_bytes = leader_id.as_bytes();
+    let mut payload = Vec::with_capacity(PROPOSAL_DOMAIN.len() + 32 + 8 + 4 + leader_bytes.len());
+    payload.extend_from_slice(PROPOSAL_DOMAIN);
+    payload.extend_from_slice(block_hash);
+    payload.extend_from_slice(&round.to_le_bytes());
+    payload.extend_from_slice(&(leader_bytes.len() as u32).to_le_bytes());
+    payload.extend_from_slice(leader_bytes);
+    payload
+}
+
 impl VoteMessage {
     /// Construct the canonical bytes that must be signed:
     /// `domain || phase_byte || block_hash || round_le || voter_id_len_le || voter_id`.

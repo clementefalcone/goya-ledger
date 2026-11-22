@@ -6,10 +6,11 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::consensus::bft::quorum::SignatureVerifier;
 use crate::consensus::bft::round::{RoundAction, RoundEvent};
 use crate::consensus::bft::round_manager::{ManagerAction, RoundManager, RoundManagerConfig};
 use crate::consensus::bft::safety::ChainAncestryChecker;
-use crate::consensus::bft::types::{QuorumCertificate, VoteMessage};
+use crate::consensus::bft::types::{proposal_signing_payload, QuorumCertificate, VoteMessage};
 use crate::consensus::bft::validator_registry::RegistryVerifier;
 use crate::identity::signing::SigningProvider;
 use crate::mining::MiningService;
@@ -30,10 +31,27 @@ pub enum BftEvent {
         block: Block,
         /// QC justifying this proposal (leader's high_qc).
         justify_qc: Option<crate::consensus::bft::types::QuorumCertificate>,
+        leader_signature: Vec<u8>,
     },
     /// A BFT vote arrived from a peer.
     Vote(VoteMessage),
     Transaction(Transaction),
+}
+
+fn is_authentic_proposal(
+    verifier: &impl SignatureVerifier,
+    round_leader: &str,
+    round: u64,
+    block_hash: &[u8; 32],
+    leader_id: &str,
+    leader_signature: &[u8],
+) -> bool {
+    leader_id == round_leader
+        && verifier.verify(
+            leader_id,
+            &proposal_signing_payload(block_hash, round, leader_id),
+            leader_signature,
+        )
 }
 
 /// Run the BFT consensus loop. Mines when leader, votes when follower.
@@ -51,6 +69,7 @@ pub async fn run_bft_loop(
     wake: Arc<tokio::sync::Notify>,
 ) {
     let config = RoundManagerConfig::default();
+    let proposal_verifier = verifier.clone();
     let mut book = ProposalBook::new(store.clone());
     let mut manager = RoundManager::with_ancestry(
         node_id.clone(),
@@ -90,16 +109,16 @@ pub async fn run_bft_loop(
         tokio::select! {
             Some(event) = rx.recv() => {
                 match event {
-                    BftEvent::Proposal { round, block_hash, leader_id, block, justify_qc } => {
-                        while manager.current_round() < round {
-                            let _ = manager.on_timeout();
-                        }
-                        if round != manager.current_round() {
+                    BftEvent::Proposal { round, block_hash, leader_id, block, justify_qc, leader_signature } => {
+                        if round < manager.current_round() {
                             continue;
                         }
-                        if leader_id != manager.current_leader() {
-                            log::warn!("BFT: rejected proposal from {leader_id} in round {round}: leader is {}", manager.current_leader());
+                        if !is_authentic_proposal(&proposal_verifier, manager.leader_for_round(round), round, &block_hash, &leader_id, &leader_signature) {
+                            log::warn!("BFT: rejected proposal from {leader_id} in round {round}: not signed by the round's leader {}", manager.leader_for_round(round));
                             continue;
+                        }
+                        if round > manager.current_round() {
+                            let _ = manager.jump_to_round(round);
                         }
                         if crate::mining::block_hash(&block) != block_hash {
                             log::warn!("BFT: rejected proposal from {leader_id} in round {round}: block body does not hash to {}", hex::encode(block_hash));
@@ -284,12 +303,20 @@ async fn try_mine_and_propose(
         .high_qc()
         .and_then(|qc| serde_json::to_vec(qc).ok())
         .unwrap_or_default();
+    let leader_signature = signer
+        .sign(&proposal_signing_payload(
+            &block_hash,
+            manager.current_round(),
+            node_id,
+        ))
+        .unwrap_or_default();
     let msg = crate::network::Message::BftProposal {
         round: manager.current_round(),
         block_hash,
         leader_id: node_id.to_string(),
         block_data,
         justify_qc: justify_qc_data,
+        leader_signature,
     };
     node.broadcast_message(&msg).await;
 
@@ -490,6 +517,35 @@ mod tests {
     use crate::mining::{block_hash, MiningConfig};
     use crate::storage::{BlockStore, MemoryStore};
     use std::collections::HashMap;
+
+    #[test]
+    fn proposal_replayed_with_another_round_is_not_authentic() {
+        use crate::consensus::bft::validator_registry::ValidatorRegistry;
+        use crate::identity::signing::MlDsaSigningProvider;
+        let leader = MlDsaSigningProvider::generate();
+        let registry =
+            ValidatorRegistry::from_map(HashMap::from([("v0".to_string(), leader.public_key())]));
+        let verifier = RegistryVerifier::new(Arc::new(registry));
+        let hash = [7u8; 32];
+        let signature = leader
+            .sign(&proposal_signing_payload(&hash, 4, "v0"))
+            .unwrap();
+        assert!(is_authentic_proposal(
+            &verifier, "v0", 4, &hash, "v0", &signature
+        ));
+        assert!(!is_authentic_proposal(
+            &verifier,
+            "v0",
+            1_000_000_000_000,
+            &hash,
+            "v0",
+            &signature
+        ));
+        assert!(!is_authentic_proposal(&verifier, "v0", 4, &hash, "v0", &[]));
+        assert!(!is_authentic_proposal(
+            &verifier, "v1", 4, &hash, "v0", &signature
+        ));
+    }
 
     struct Fixture {
         store: Arc<MemoryStore>,

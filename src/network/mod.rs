@@ -149,6 +149,8 @@ pub enum Message {
         /// Serialized justify_qc (leader's high_qc). Empty if none.
         #[serde(default)]
         justify_qc: Vec<u8>,
+        #[serde(default)]
+        leader_signature: Vec<u8>,
     },
     /// Validator vote for a BFT phase (Prepare / PreCommit / Commit).
     BftVote(crate::consensus::bft::types::VoteMessage),
@@ -1577,6 +1579,7 @@ impl Node {
                 leader_id,
                 block_data,
                 justify_qc,
+                leader_signature,
             } => {
                 log::info!(
                     "BFT: received proposal round={round} leader={leader_id} data_len={} jqc_len={}",
@@ -1608,6 +1611,7 @@ impl Node {
                             leader_id,
                             block,
                             justify_qc: jqc,
+                            leader_signature,
                         });
                     } else {
                         log::warn!("BFT: failed to deserialize block_data");

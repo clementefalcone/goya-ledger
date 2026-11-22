@@ -130,7 +130,10 @@ impl<V: SignatureVerifier + Clone> RoundManager<V> {
 
     /// Current timeout in ms (with exponential backoff).
     pub fn current_timeout_ms(&self) -> u64 {
-        let timeout = self.config.base_timeout_ms * 2u64.saturating_pow(self.consecutive_timeouts);
+        let timeout = self
+            .config
+            .base_timeout_ms
+            .saturating_mul(2u64.saturating_pow(self.consecutive_timeouts));
         timeout.min(self.config.max_timeout_ms)
     }
 
@@ -298,14 +301,16 @@ impl<V: SignatureVerifier + Clone> RoundManager<V> {
     /// Increments the backoff counter and advances to the next round with
     /// a new leader. Returns `NewRound` so the caller can reset their timer.
     pub fn on_timeout(&mut self) -> ManagerAction {
-        // Notify the current round of the timeout.
+        let next_round = self.current_round + 1;
+        self.jump_to_round(next_round)
+    }
+
+    pub fn jump_to_round(&mut self, round: u64) -> ManagerAction {
         if let Some(ref mut r) = self.current {
             r.process(RoundEvent::Timeout);
         }
-
-        self.consecutive_timeouts += 1;
-        let next_round = self.current_round + 1;
-        self.start_round(next_round)
+        self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+        self.start_round(round)
     }
 
     /// Advance to the next round after a successful Decide.
@@ -352,6 +357,23 @@ mod tests {
             voter_id: voter.to_string(),
             signature: vec![1u8; 64],
         }
+    }
+
+    #[test]
+    fn timeout_backoff_saturates_instead_of_overflowing() {
+        let mut m = manager("v0");
+        m.consecutive_timeouts = 64;
+        assert_eq!(m.current_timeout_ms(), m.config.max_timeout_ms);
+    }
+
+    #[test]
+    fn jumping_to_a_distant_round_takes_one_step() {
+        let mut m = manager("v1");
+        m.start();
+        let started = std::time::Instant::now();
+        m.jump_to_round(1_000_000_000_000);
+        assert_eq!(m.current_round(), 1_000_000_000_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     // --- leader rotation ---
