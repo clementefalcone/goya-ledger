@@ -428,11 +428,11 @@ async fn async_main_inner() -> std::io::Result<()> {
                     .expect("failed to load ML-DSA-65 key from disk")
                 } else {
                     let provider = crate::identity::signing::MlDsaSigningProvider::generate();
-                    let key_bytes = provider.export_key_bytes();
                     if let Some(parent) = key_path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    std::fs::write(&key_path, &key_bytes)
+                    provider
+                        .persist_key_file(&key_path)
                         .expect("failed to persist ML-DSA-65 signing key");
                     log::info!("ML-DSA-65 signing key persisted to {}", key_path.display());
                     provider

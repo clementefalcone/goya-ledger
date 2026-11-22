@@ -154,6 +154,17 @@ impl MlDsaSigningProvider {
         }
     }
 
+    pub fn persist_key_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?
+            .write_all(&self.export_key_bytes())
+    }
+
     pub fn export_key_bytes(&self) -> Vec<u8> {
         let mut buf = self.public_key.as_bytes().to_vec();
         buf.extend_from_slice(self.private_key.as_bytes());
@@ -506,6 +517,19 @@ pub fn run_crypto_self_tests() -> Result<(), SigningError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_key_file_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("signing_key_mldsa65.bin");
+        let provider = MlDsaSigningProvider::generate();
+        provider.persist_key_file(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read(&path).unwrap(), provider.export_key_bytes());
+        assert!(provider.persist_key_file(&path).is_err());
+    }
 
     #[test]
     fn crypto_self_tests_pass() {
