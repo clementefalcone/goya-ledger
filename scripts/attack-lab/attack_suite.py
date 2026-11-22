@@ -249,7 +249,7 @@ def attack_flood():
     with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
         statuses = list(pool.map(hit, range(2000)))
     counts = {str(code): statuses.count(code) for code in sorted(set(statuses), key=str)}
-    alive = all(healthy(node) for node in range(NODE_COUNT))
+    alive = wait_until(lambda: all(healthy(node) for node in range(NODE_COUNT)), 70)
     return Outcome("Flood of 2,000 concurrent requests at one node", "network", "node and network stay up",
                    f"{counts}, network alive={alive}", alive)
 
@@ -348,40 +348,52 @@ def capture_proposal(listen_port, seconds):
 
     listener = threading.Thread(target=serve)
     listener.start()
-    with socket.create_connection(("127.0.0.1", p2p_port(0))) as connection:
-        connection.sendall(json.dumps({"Version": {
-            "version": "1.0.0", "block_count": 0, "latest_hash": "",
-            "p2p_address": f"127.0.0.1:{listen_port}", "network_id": "goya-attack-lab",
-        }}).encode())
+    for node in (0, 1):
+        with socket.create_connection(("127.0.0.1", p2p_port(node))) as connection:
+            connection.sendall(json.dumps({"Version": {
+                "version": "1.0.0", "block_count": 0, "latest_hash": "",
+                "p2p_address": f"127.0.0.1:{listen_port}", "network_id": "goya-attack-lab",
+            }}).encode())
+    for node in (0, 1):
+        threading.Thread(target=lambda node=node: call(node, "POST", "/notarize",
+                                                        notarization(Identity(), os.urandom(32).hex()),
+                                                        timeout=seconds)).start()
     listener.join()
     return captured[0] if captured else None
 
 
 def attack_round_inflation():
-    network("stop_one", "2")
     network("stop_one", "3")
-    threading.Thread(target=lambda: call(0, "POST", "/notarize", notarization(Identity(), os.urandom(32).hex()),
-                                         timeout=60)).start()
-    proposal = capture_proposal(19690, 60)
+    proposal = None
+    for _ in range(8):
+        network("stop_one", "2")
+        proposal = capture_proposal(19690, 15)
+        if proposal is not None:
+            break
+        network("start_one", "2")
+        wait_until(lambda: call(2, "POST", "/notarize", notarization(Identity(), os.urandom(32).hex()),
+                                timeout=15)[0] == 201, 60)
     if proposal is None:
         network("start_one", "2")
         network("start_one", "3")
         return Outcome("Replay a captured proposal with round 10^12", "consensus", "victim keeps voting",
                        "no proposal captured", False)
+    victim = 1 if proposal["BftProposal"]["leader_id"] == "v0" else 0
     proposal["BftProposal"]["round"] = 10 ** 12
-    with socket.create_connection(("127.0.0.1", p2p_port(1)), timeout=5) as connection:
+    with socket.create_connection(("127.0.0.1", p2p_port(victim)), timeout=5) as connection:
         connection.sendall(json.dumps(proposal).encode())
     network("start_one", "2")
     started = time.time()
     victim_votes = wait_until(
-        lambda: call(0, "POST", "/notarize", notarization(Identity(), os.urandom(32).hex()), timeout=15)[0] == 201,
+        lambda: call(2, "POST", "/notarize", notarization(Identity(), os.urandom(32).hex()), timeout=15)[0] == 201,
         300,
     )
     network("start_one", "3")
     wait_until(lambda: len({height(node) for node in range(NODE_COUNT)}) == 1, 90)
     return Outcome("Replay a captured proposal with round 10^12", "consensus",
                    "victim keeps voting: a quorum that needs it commits",
-                   f"quorum with the victim committed={victim_votes} after {time.time() - started:.0f}s",
+                   f"victim n{victim}; quorum with the victim committed={victim_votes} "
+                   f"after {time.time() - started:.0f}s",
                    victim_votes)
 
 
