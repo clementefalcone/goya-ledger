@@ -10,7 +10,10 @@ use crate::consensus::bft::quorum::SignatureVerifier;
 use crate::consensus::bft::round::{RoundAction, RoundEvent};
 use crate::consensus::bft::round_manager::{ManagerAction, RoundManager, RoundManagerConfig};
 use crate::consensus::bft::safety::ChainAncestryChecker;
-use crate::consensus::bft::types::{proposal_signing_payload, QuorumCertificate, VoteMessage};
+use crate::consensus::bft::types::{
+    proposal_signing_payload, timeout_signing_payload, QuorumCertificate, TimeoutMessage,
+    TimeoutVote, VoteMessage,
+};
 use crate::consensus::bft::validator_registry::RegistryVerifier;
 use crate::identity::signing::SigningProvider;
 use crate::mining::MiningService;
@@ -35,6 +38,7 @@ pub enum BftEvent {
     },
     /// A BFT vote arrived from a peer.
     Vote(VoteMessage),
+    Timeout(TimeoutMessage),
     Transaction(Transaction),
 }
 
@@ -117,8 +121,9 @@ pub async fn run_bft_loop(
                             log::warn!("BFT: rejected proposal from {leader_id} in round {round}: not signed by the round's leader {}", manager.leader_for_round(round));
                             continue;
                         }
-                        if round > manager.current_round() {
-                            let _ = manager.jump_to_round(round);
+                        if !manager.enter_justified_round(round, justify_qc.as_ref()) {
+                            log::warn!("BFT: rejected proposal from {leader_id} in round {round}: no QC or timeout quorum justifies leaving round {}", manager.current_round());
+                            continue;
                         }
                         if crate::mining::block_hash(&block) != block_hash {
                             log::warn!("BFT: rejected proposal from {leader_id} in round {round}: block body does not hash to {}", hex::encode(block_hash));
@@ -166,6 +171,16 @@ pub async fn run_bft_loop(
                             reset_timeout(&mut timeout, &manager);
                         }
                     }
+                    BftEvent::Timeout(message) => {
+                        let sender_is_behind = manager.is_behind(&message);
+                        if manager.process_timeout_message(&message) {
+                            enter_round_after_timeout(&mut manager, &mut pending_block, &mut early_votes, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
+                        } else if sender_is_behind {
+                            if let Some(own) = manager.own_timeout().cloned() {
+                                node.broadcast_message(&crate::network::Message::BftTimeout(manager.timeout_message(own))).await;
+                            }
+                        }
+                    }
                     BftEvent::Transaction(tx) => {
                         let id = tx.id.clone();
                         if let Err(reason) = tx_pool.lock().unwrap_or_else(|e| e.into_inner()).add(tx) {
@@ -184,18 +199,58 @@ pub async fn run_bft_loop(
                 }
             }
             _ = &mut timeout => {
-                early_votes.clear();
-                let action = manager.on_timeout();
-                handle_action(&action, &node, &signer, &node_id, &mut manager).await;
-                pending_block = None;
-                reset_timeout(&mut timeout, &manager);
-                let am_leader = manager.is_current_leader();
-                log::info!("BFT timeout: advanced to round {}, am_leader={am_leader}", manager.current_round());
-                if am_leader {
-                    try_mine_and_propose(&mut manager, &mut pending_block, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
+                let round = manager.current_round();
+                let vote = TimeoutVote {
+                    round,
+                    voter_id: node_id.clone(),
+                    signature: signer.sign(&timeout_signing_payload(round, &node_id)).unwrap_or_default(),
+                };
+                let message = manager.timeout_message(vote);
+                node.broadcast_message(&crate::network::Message::BftTimeout(message.clone())).await;
+                manager.record_local_timeout();
+                if manager.process_timeout_message(&message) {
+                    enter_round_after_timeout(&mut manager, &mut pending_block, &mut early_votes, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
+                } else {
+                    reset_timeout(&mut timeout, &manager);
                 }
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enter_round_after_timeout(
+    manager: &mut RoundManager<RegistryVerifier>,
+    pending_block: &mut Option<Block>,
+    early_votes: &mut Vec<VoteMessage>,
+    timeout: &mut std::pin::Pin<&mut tokio::time::Sleep>,
+    node_id: &str,
+    node: &Arc<Node>,
+    signer: &Arc<dyn SigningProvider>,
+    mining_service: &Arc<MiningService>,
+    tx_pool: &Arc<std::sync::Mutex<TransactionPool>>,
+    book: &mut ProposalBook,
+) {
+    early_votes.clear();
+    *pending_block = None;
+    reset_timeout(timeout, manager);
+    let am_leader = manager.is_current_leader();
+    log::info!(
+        "BFT timeout: advanced to round {}, am_leader={am_leader}",
+        manager.current_round()
+    );
+    if am_leader {
+        try_mine_and_propose(
+            manager,
+            pending_block,
+            node_id,
+            node,
+            signer,
+            mining_service,
+            tx_pool,
+            book,
+        )
+        .await;
     }
 }
 

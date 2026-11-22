@@ -156,17 +156,7 @@ pub enum Message {
     BftVote(crate::consensus::bft::types::VoteMessage),
     /// A formed quorum certificate broadcast to peers.
     BftQuorumCertificate(crate::consensus::bft::types::QuorumCertificate),
-    /// View change: validator signals round timeout and proposes advancing.
-    BftViewChange {
-        /// The round that timed out.
-        timed_out_round: u64,
-        /// The new round being proposed.
-        new_round: u64,
-        /// Validator sending the view change.
-        voter_id: String,
-        /// Highest commit QC this validator has seen (proof of progress).
-        highest_qc: Option<crate::consensus::bft::types::QuorumCertificate>,
-    },
+    BftTimeout(crate::consensus::bft::types::TimeoutMessage),
 }
 
 /**
@@ -1633,7 +1623,15 @@ impl Node {
                 }
                 Ok(None)
             }
-            Message::BftQuorumCertificate(_) | Message::BftViewChange { .. } => {
+            Message::BftTimeout(ref message) => {
+                if let Some(tx) = bft_tx {
+                    let _ = tx.send(crate::consensus::controller::BftEvent::Timeout(
+                        message.clone(),
+                    ));
+                }
+                Ok(None)
+            }
+            Message::BftQuorumCertificate(_) => {
                 log::debug!("BFT QC/ViewChange received — not yet handled");
                 Ok(None)
             }

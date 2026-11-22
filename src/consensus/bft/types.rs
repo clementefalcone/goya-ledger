@@ -52,6 +52,32 @@ const VOTE_DOMAIN: &[u8] = b"GOYA-BFT-VOTE-V1";
 
 const PROPOSAL_DOMAIN: &[u8] = b"GOYA-BFT-PROPOSAL-V1";
 
+const TIMEOUT_DOMAIN: &[u8] = b"GOYA-BFT-TIMEOUT-V1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeoutVote {
+    pub round: u64,
+    pub voter_id: String,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimeoutMessage {
+    pub vote: TimeoutVote,
+    pub high_qc: Option<QuorumCertificate>,
+    pub round_certificate: Vec<TimeoutVote>,
+}
+
+pub fn timeout_signing_payload(round: u64, voter_id: &str) -> Vec<u8> {
+    let voter_bytes = voter_id.as_bytes();
+    let mut payload = Vec::with_capacity(TIMEOUT_DOMAIN.len() + 8 + 4 + voter_bytes.len());
+    payload.extend_from_slice(TIMEOUT_DOMAIN);
+    payload.extend_from_slice(&round.to_le_bytes());
+    payload.extend_from_slice(&(voter_bytes.len() as u32).to_le_bytes());
+    payload.extend_from_slice(voter_bytes);
+    payload
+}
+
 pub fn proposal_signing_payload(block_hash: &[u8; 32], round: u64, leader_id: &str) -> Vec<u8> {
     let leader_bytes = leader_id.as_bytes();
     let mut payload = Vec::with_capacity(PROPOSAL_DOMAIN.len() + 32 + 8 + 4 + leader_bytes.len());

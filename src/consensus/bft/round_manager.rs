@@ -9,7 +9,10 @@
 use super::quorum::{QuorumValidator, SignatureVerifier};
 use super::round::{BftRound, RoundAction, RoundEvent, RoundState};
 use super::safety::{AlwaysExtends, AncestryChecker, SafetyState};
-use super::types::{BftPhase, QcError, QuorumCertificate};
+use super::types::{
+    timeout_signing_payload, BftPhase, QcError, QuorumCertificate, TimeoutMessage, TimeoutVote,
+};
+use std::collections::HashMap;
 
 /// Configuration for the round manager.
 #[derive(Debug, Clone)]
@@ -63,6 +66,8 @@ pub struct RoundManager<V: SignatureVerifier + Clone> {
     safety: SafetyState,
     /// Ancestry checker for lock verification.
     ancestry: Box<dyn AncestryChecker>,
+    pub(crate) timeouts: HashMap<String, TimeoutVote>,
+    round_certificate: Vec<TimeoutVote>,
 }
 
 impl<V: SignatureVerifier + Clone> RoundManager<V> {
@@ -101,6 +106,8 @@ impl<V: SignatureVerifier + Clone> RoundManager<V> {
             highest_commit_qc: None,
             safety: SafetyState::new(),
             ancestry,
+            timeouts: HashMap::new(),
+            round_certificate: Vec::new(),
         }
     }
 
@@ -316,8 +323,111 @@ impl<V: SignatureVerifier + Clone> RoundManager<V> {
     /// Advance to the next round after a successful Decide.
     ///
     /// Resets timeout backoff since progress was made.
+    pub fn process_timeout_vote(&mut self, vote: &TimeoutVote) -> Option<ManagerAction> {
+        let is_newer = self
+            .timeouts
+            .get(&vote.voter_id)
+            .is_none_or(|known| vote.round > known.round);
+        if !is_newer || !self.is_valid_timeout(vote) {
+            return None;
+        }
+        self.timeouts.insert(vote.voter_id.clone(), vote.clone());
+        let certified = self.certified_timeout_round()?;
+        if certified < self.current_round {
+            return None;
+        }
+        let action = self.jump_to_round(certified + 1);
+        self.round_certificate = self
+            .timeouts
+            .values()
+            .filter(|known| known.round >= certified)
+            .cloned()
+            .collect();
+        Some(action)
+    }
+
+    pub fn timeout_message(&self, vote: TimeoutVote) -> TimeoutMessage {
+        TimeoutMessage {
+            vote,
+            high_qc: self.safety.high_qc().cloned(),
+            round_certificate: self.round_certificate.clone(),
+        }
+    }
+
+    pub fn process_timeout_message(&mut self, message: &TimeoutMessage) -> bool {
+        let round_before = self.current_round;
+        if let Some(qc) = &message.high_qc {
+            if qc.round >= self.current_round {
+                self.enter_justified_round(qc.round + 1, Some(qc));
+            }
+        }
+        for vote in message.round_certificate.iter().chain([&message.vote]) {
+            self.process_timeout_vote(vote);
+        }
+        self.current_round != round_before
+    }
+
+    pub fn is_behind(&self, message: &TimeoutMessage) -> bool {
+        let certified = message
+            .round_certificate
+            .iter()
+            .map(|vote| vote.round.saturating_add(1))
+            .min()
+            .unwrap_or(0);
+        let qc_round = message
+            .high_qc
+            .as_ref()
+            .map_or(0, |qc| qc.round.saturating_add(1));
+        message.vote.round.max(certified).max(qc_round) < self.current_round
+    }
+
+    pub fn own_timeout(&self) -> Option<&TimeoutVote> {
+        self.timeouts.get(&self.node_id)
+    }
+
+    pub fn record_local_timeout(&mut self) {
+        self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+    }
+
+    pub fn enter_justified_round(
+        &mut self,
+        round: u64,
+        justify_qc: Option<&QuorumCertificate>,
+    ) -> bool {
+        if round == self.current_round {
+            return true;
+        }
+        let is_justified_by_qc = justify_qc.is_some_and(|qc| {
+            qc.round.checked_add(1) == Some(round) && self.validate_received_qc(qc).is_ok()
+        });
+        if round < self.current_round || !is_justified_by_qc {
+            return false;
+        }
+        self.jump_to_round(round);
+        self.round_certificate.clear();
+        true
+    }
+
+    fn is_valid_timeout(&self, vote: &TimeoutVote) -> bool {
+        self.validators.contains(&vote.voter_id)
+            && self.verifier.verify(
+                &vote.voter_id,
+                &timeout_signing_payload(vote.round, &vote.voter_id),
+                &vote.signature,
+            )
+    }
+
+    fn certified_timeout_round(&self) -> Option<u64> {
+        let threshold =
+            QuorumValidator::new(self.validators.clone(), self.verifier.clone()).quorum_threshold();
+        let mut rounds: Vec<u64> = self.timeouts.values().map(|vote| vote.round).collect();
+        rounds.sort_unstable_by(|a, b| b.cmp(a));
+        rounds.get(threshold.checked_sub(1)?).copied()
+    }
+
     pub fn advance_after_decide(&mut self) -> ManagerAction {
         self.consecutive_timeouts = 0;
+        self.round_certificate.clear();
         let next_round = self.current_round + 1;
         self.start_round(next_round)
     }
@@ -1674,5 +1784,171 @@ mod tests {
             ManagerAction::Round(RoundAction::None),
             "valid QC + wrong branch must be rejected by safe_to_vote"
         );
+    }
+}
+
+#[cfg(test)]
+mod timeout_certificate_tests {
+    use super::*;
+    use crate::consensus::bft::quorum::{AcceptAllVerifier, RejectVoterVerifier};
+    use crate::consensus::bft::types::{TimeoutMessage, TimeoutVote, VoteMessage};
+
+    fn validators() -> Vec<String> {
+        (0..4).map(|i| format!("v{i}")).collect()
+    }
+
+    fn manager<V: SignatureVerifier + Clone>(verifier: V) -> RoundManager<V> {
+        let mut m = RoundManager::new(
+            "v0".into(),
+            validators(),
+            verifier,
+            RoundManagerConfig::default(),
+        );
+        m.start();
+        m
+    }
+
+    fn timeout(round: u64, voter: &str) -> TimeoutVote {
+        TimeoutVote {
+            round,
+            voter_id: voter.into(),
+            signature: vec![1u8; 64],
+        }
+    }
+
+    fn prepare_qc(round: u64) -> QuorumCertificate {
+        let votes = ["v1", "v2", "v3"]
+            .iter()
+            .map(|voter| VoteMessage {
+                block_hash: [9u8; 32],
+                round,
+                phase: BftPhase::Prepare,
+                voter_id: voter.to_string(),
+                signature: vec![1u8; 64],
+            })
+            .collect();
+        QuorumCertificate {
+            block_hash: [9u8; 32],
+            round,
+            phase: BftPhase::Prepare,
+            votes,
+        }
+    }
+
+    #[test]
+    fn timeouts_from_a_quorum_move_a_lagging_validator_forward() {
+        let mut m = manager(AcceptAllVerifier);
+        for voter in ["v1", "v2", "v3"] {
+            m.process_timeout_vote(&timeout(7, voter));
+        }
+        assert_eq!(m.current_round(), 8);
+    }
+
+    #[test]
+    fn timeouts_below_a_quorum_do_not_move_a_validator() {
+        let mut m = manager(AcceptAllVerifier);
+        for voter in ["v1", "v2"] {
+            m.process_timeout_vote(&timeout(7, voter));
+        }
+        assert_eq!(m.current_round(), 0);
+    }
+
+    #[test]
+    fn timeouts_with_bad_signatures_or_from_outsiders_do_not_count() {
+        let mut m = manager(RejectVoterVerifier {
+            reject: ["v3".to_string()].into_iter().collect(),
+        });
+        for voter in ["v1", "v2", "v3", "outsider"] {
+            m.process_timeout_vote(&timeout(7, voter));
+        }
+        assert_eq!(m.current_round(), 0);
+    }
+
+    #[test]
+    fn one_validator_spamming_rounds_keeps_a_single_entry() {
+        let mut m = manager(AcceptAllVerifier);
+        for round in 0..10_000 {
+            m.process_timeout_vote(&timeout(round, "v3"));
+        }
+        assert_eq!(m.timeouts.len(), 1);
+        assert_eq!(m.current_round(), 0);
+    }
+
+    #[test]
+    fn an_inflated_proposal_round_without_proof_is_refused() {
+        let mut m = manager(AcceptAllVerifier);
+        assert!(!m.enter_justified_round(1_000_000_000_000, None));
+        assert!(!m.enter_justified_round(1_000_000_000_000, Some(&prepare_qc(41))));
+        assert_eq!(m.current_round(), 0);
+    }
+
+    #[test]
+    fn a_qc_from_the_previous_round_justifies_the_jump() {
+        let mut m = manager(AcceptAllVerifier);
+        assert!(m.enter_justified_round(42, Some(&prepare_qc(41))));
+        assert_eq!(m.current_round(), 42);
+    }
+
+    #[test]
+    fn a_forged_qc_does_not_justify_the_jump() {
+        let mut m = manager(RejectVoterVerifier {
+            reject: ["v2".to_string(), "v3".to_string()].into_iter().collect(),
+        });
+        assert!(!m.enter_justified_round(42, Some(&prepare_qc(41))));
+        assert_eq!(m.current_round(), 0);
+    }
+
+    #[test]
+    fn a_returning_validator_catches_up_from_one_timeout_message() {
+        let mut ahead = manager(AcceptAllVerifier);
+        for voter in ["v1", "v2", "v3"] {
+            ahead.process_timeout_vote(&timeout(9, voter));
+        }
+        assert_eq!(ahead.current_round(), 10);
+        let message = ahead.timeout_message(timeout(10, "v0"));
+        let mut returning = manager(AcceptAllVerifier);
+        assert!(returning.process_timeout_message(&message));
+        assert_eq!(returning.current_round(), 10);
+    }
+
+    #[test]
+    fn a_high_qc_in_a_timeout_message_moves_a_lagging_validator() {
+        let mut returning = manager(AcceptAllVerifier);
+        let message = TimeoutMessage {
+            vote: timeout(30, "v1"),
+            high_qc: Some(prepare_qc(29)),
+            round_certificate: Vec::new(),
+        };
+        assert!(returning.process_timeout_message(&message));
+        assert_eq!(returning.current_round(), 30);
+    }
+
+    #[test]
+    fn a_local_timeout_alone_does_not_change_the_round() {
+        let mut m = manager(AcceptAllVerifier);
+        m.record_local_timeout();
+        m.process_timeout_vote(&timeout(0, "v0"));
+        assert_eq!(m.current_round(), 0);
+    }
+
+    #[test]
+    fn a_peer_proving_our_round_is_not_behind() {
+        let mut ahead = manager(AcceptAllVerifier);
+        for voter in ["v1", "v2", "v3"] {
+            ahead.process_timeout_vote(&timeout(9, voter));
+        }
+        let reply = ahead.timeout_message(timeout(9, "v0"));
+        assert!(!ahead.is_behind(&reply));
+        assert!(ahead.is_behind(&TimeoutMessage {
+            vote: timeout(3, "v1"),
+            high_qc: None,
+            round_certificate: Vec::new(),
+        }));
+    }
+
+    #[test]
+    fn the_current_round_needs_no_proof() {
+        let mut m = manager(AcceptAllVerifier);
+        assert!(m.enter_justified_round(0, None));
     }
 }
