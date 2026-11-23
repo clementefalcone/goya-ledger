@@ -55,7 +55,7 @@ start_one() {
 
 start() { for i in "${NODES[@]}"; do start_one "$i"; done; }
 
-node_pids() { pgrep -f "$BIN $(api_port "$1") $(p2p_port "$1")" || true; }
+node_pids() { pgrep -f " $(api_port "$1") $(p2p_port "$1")$" || true; }
 
 stop_one() {
   local pids
