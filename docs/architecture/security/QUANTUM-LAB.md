@@ -82,13 +82,22 @@ Grover's algorithm halves the exponent of brute-force search. The target is ≥1
 | SHA3-512 | DID derivation | 512 preimage | 256 preimage, ~170 collision | ok |
 | SHA-256 | anchors, `_sd` digests, commitments | 256 preimage | 128 preimage, ~85 collision | ok (BHT needs impractical memory) |
 | HMAC-SHA-256, 32-byte secrets | checkpoints, pairwise ids | 256 | 128 | ok |
-| SHA-256 truncated to 160 bits | wallet-address DIDs (`wallet_address_of`) | 160 second preimage | **80** | below target |
+| SHA-256 truncated to 160 bits | wallet-address DIDs (`wallet_address_of`) | 160 second preimage | **80** | below target; accepted risk (2026-11-23) |
 | 32-byte disclosure salts (16 before 2026-11-22) | SD-JWT `generate_salt`, mdoc `random` | 256 | 128 | ok; credentials issued with 16-byte salts keep 64 quantum bits |
 | 4–6 digit PIN, Argon2id | `src/pin` | ≤20 | ≤10 | brute-forceable classically; only rate limiting protects it |
 
+## Accepted risks (2026-11-23)
+
+- **Wallet-address DIDs keep 160 bits.** A Grover second preimage still needs 2^80 sequential quantum
+  evaluations, which no projected machine can run. Changing the format would break every existing
+  wallet DID.
+- **Classical TLS on the shared VPS.** Goya has no domain of its own: it is served under
+  `server1.useremotion.com/goya/`, next to other apps, and those apps reach the node over `127.0.0.1`. A
+  post-quantum endpoint for Goya alone would not protect any real traffic. The plan is a dedicated Goya
+  domain, or a host with OpenSSL ≥ 3.5, when validators move to their own VPS.
+
 ## Open items
 
-1. Wallet-address DIDs: 160-bit truncation. A format change, needs a decision.
-2. PQ TLS on the VPS: OpenSSL ≥ 3.5 or a proxy with X25519MLKEM768. P2P TLS before external validators join.
-3. Holder proofs and issuer credential keys stay classical while EUDI wallets require ES256.
-4. Node certificates are ECDSA-P256.
+1. P2P TLS before external validators join.
+2. Holder proofs and issuer credential keys stay classical while EUDI wallets require ES256.
+3. Node certificates are ECDSA-P256.
