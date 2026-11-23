@@ -263,12 +263,16 @@ pub fn parse_peer_allowlist(env_value: &str) -> Option<HashSet<String>> {
 /// Number of random peers to forward a newly received block to (push-gossip fanout).
 const GOSSIP_FANOUT: usize = 3;
 
+const PEER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Opens a TCP connection (optionally wrapped in TLS) without requiring a `Node` reference.
 async fn open_peer_stream(
     address: &str,
     tls_connector: Option<&TlsConnector>,
 ) -> Result<Box<dyn AsyncStream>, Box<dyn std::error::Error + Send + Sync>> {
-    let tcp = TcpStream::connect(address).await?;
+    let tcp = tokio::time::timeout(PEER_IO_TIMEOUT, TcpStream::connect(address))
+        .await
+        .map_err(|_| format!("connect to {address} timed out after {PEER_IO_TIMEOUT:?}"))??;
     match tls_connector {
         Some(connector) => {
             let name = parse_server_name(address)?;
@@ -2302,60 +2306,30 @@ impl Node {
             peers.len(),
             peers
         );
-        for peer_addr in &peers {
-            let addr = peer_addr.clone();
-            match self.open_stream(&addr).await {
-                Ok(mut stream) => {
-                    if let Err(e) = stream.write_all(msg_json.as_bytes()).await {
-                        log::warn!("P2P broadcast write to {addr} failed: {e}");
-                    }
-                }
-                Err(e) => {
-                    log::warn!("P2P broadcast connect to {addr} failed: {e}");
-                }
-            }
+        futures::future::join_all(
+            peers
+                .iter()
+                .map(|addr| self.send_to_peer(addr, msg_json.as_bytes())),
+        )
+        .await;
+    }
+
+    async fn send_to_peer(&self, addr: &str, payload: &[u8]) {
+        let send = async {
+            let mut stream = self.open_stream(addr).await?;
+            stream.write_all(payload).await?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        };
+        match tokio::time::timeout(PEER_IO_TIMEOUT, send).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => log::warn!("P2P send to {addr} failed: {e}"),
+            Err(_) => log::warn!("P2P send to {addr} timed out after {PEER_IO_TIMEOUT:?}"),
         }
     }
 
     pub async fn broadcast_ordered_block(&self, block: &crate::storage::traits::Block) {
-        let my_addr = self.p2p_address();
-        let peers: Vec<String> = {
-            let guard = self.peers.lock().unwrap_or_else(|e| e.into_inner());
-            guard.iter().filter(|p| **p != my_addr).cloned().collect()
-        };
-        log::info!(
-            "Broadcasting block {} to {} peer(s): {:?}",
-            block.height,
-            peers.len(),
-            peers
-        );
-        let msg = Message::OrderedBlock(block.clone());
-        for peer_addr in &peers {
-            let msg_json = match serde_json::to_string(&msg) {
-                Ok(j) => j,
-                Err(e) => {
-                    log::warn!("Failed to serialize block for {peer_addr}: {e}");
-                    continue;
-                }
-            };
-            let addr = peer_addr.clone();
-            match self.open_stream(&addr).await {
-                Ok(mut stream) => {
-                    if let Err(e) = stream.write_all(msg_json.as_bytes()).await {
-                        log::warn!("Failed to write block to {addr}: {e}");
-                    } else {
-                        log::info!(
-                            "Sent block {} to {addr} ({} bytes)",
-                            block.height,
-                            msg_json.len()
-                        );
-                    }
-                }
-                Err(e) => {
-                    log::warn!("Failed to connect to {addr} for block broadcast: {e}");
-                }
-            }
-        }
+        self.broadcast_message(&Message::OrderedBlock(block.clone()))
+            .await;
     }
 
     /**
@@ -3097,6 +3071,48 @@ mod tests {
 
     fn trusted_provider() -> Arc<dyn crate::identity::signing::SigningProvider> {
         Arc::new(crate::identity::signing::SoftwareSigningProvider::generate())
+    }
+
+    #[tokio::test]
+    async fn broadcast_reaches_live_peers_while_others_stall() {
+        use tokio::io::AsyncReadExt;
+        let message = Message::StateResponse {
+            blocks: vec![block_signed_by(trusted_provider()); 4000],
+        };
+        let payload_len = serde_json::to_vec(&message).unwrap().len();
+        let node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None, None);
+        let mut stalled_listeners = Vec::new();
+        for _ in 0..2 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            node.peers
+                .lock()
+                .unwrap()
+                .insert(listener.local_addr().unwrap().to_string());
+            stalled_listeners.push(tokio::spawn(async move {
+                let mut held = Vec::new();
+                while let Ok((socket, _)) = listener.accept().await {
+                    held.push(socket);
+                }
+            }));
+        }
+        let live = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        node.peers
+            .lock()
+            .unwrap()
+            .insert(live.local_addr().unwrap().to_string());
+        let received = tokio::spawn(async move {
+            let (mut socket, _) = live.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            socket.read_to_end(&mut bytes).await.unwrap();
+            bytes.len()
+        });
+
+        let broadcast =
+            tokio::time::timeout(PEER_IO_TIMEOUT * 2, node.broadcast_message(&message)).await;
+
+        assert!(broadcast.is_ok());
+        assert_eq!(received.await.unwrap(), payload_len);
+        stalled_listeners.iter().for_each(|task| task.abort());
     }
 
     #[tokio::test]
