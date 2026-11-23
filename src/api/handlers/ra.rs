@@ -23,12 +23,14 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-fn get_ra(state: &AppState) -> Result<&Arc<RaStore>, HttpResponse> {
+fn get_ra(state: &AppState) -> Result<&Arc<RaStore>, Box<HttpResponse>> {
     state.ra_store.as_ref().ok_or_else(|| {
-        HttpResponse::ServiceUnavailable().json(ApiResponse::<()>::error(
-            err_dto("RA_UNAVAILABLE", "Registration Authority is not configured"),
-            503,
-        ))
+        Box::new(
+            HttpResponse::ServiceUnavailable().json(ApiResponse::<()>::error(
+                err_dto("RA_UNAVAILABLE", "Registration Authority is not configured"),
+                503,
+            )),
+        )
     })
 }
 
@@ -65,7 +67,7 @@ pub async fn submit_proof(
     let trace = uuid::Uuid::new_v4().to_string();
     let ra = match get_ra(&state) {
         Ok(r) => r,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
 
     match ra.submit(
@@ -92,7 +94,7 @@ pub async fn approve_proof(
     let did = path.into_inner();
     let ra = match get_ra(&state) {
         Ok(r) => r,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
 
     match ra.approve(&did, &body.officer_did, now_secs()) {
@@ -115,7 +117,7 @@ pub async fn reject_proof(
     let did = path.into_inner();
     let ra = match get_ra(&state) {
         Ok(r) => r,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
 
     match ra.reject(&did, &body.officer_did, &body.reason, now_secs()) {
@@ -135,7 +137,7 @@ pub async fn get_proof_status(
     let did = path.into_inner();
     let ra = match get_ra(&state) {
         Ok(r) => r,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
 
     match ra.get(&did) {
@@ -168,7 +170,7 @@ pub async fn verify_identity(
     let trace = uuid::Uuid::new_v4().to_string();
     let ra = match get_ra(&state) {
         Ok(r) => r.clone(),
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
     let verifier = match &state.identity_verifier {
         Some(v) => v.clone(),

@@ -1059,7 +1059,7 @@ fn invalid_token_response(message: &str) -> HttpResponse {
 fn authorize_grant(
     req: &HttpRequest,
     token_store: &AccessTokenStore,
-) -> Result<(String, IssuanceGrant), HttpResponse> {
+) -> Result<(String, IssuanceGrant), Box<HttpResponse>> {
     let authorization = req
         .headers()
         .get("authorization")
@@ -1068,10 +1068,10 @@ fn authorize_grant(
     let token = authorization
         .strip_prefix("Bearer ")
         .or_else(|| authorization.strip_prefix("DPoP "))
-        .ok_or_else(|| invalid_token_response("Bearer or DPoP token required"))?;
+        .ok_or_else(|| Box::new(invalid_token_response("Bearer or DPoP token required")))?;
     let grant = token_store
         .grant_for(token)
-        .ok_or_else(|| invalid_token_response("access token unknown or expired"))?;
+        .ok_or_else(|| Box::new(invalid_token_response("access token unknown or expired")))?;
     Ok((token.to_string(), grant))
 }
 
@@ -1092,7 +1092,7 @@ pub async fn credential_endpoint(
 ) -> ApiResult<HttpResponse> {
     let (access_token, grant) = match authorize_grant(&req, &token_store) {
         Ok(authorized) => authorized,
-        Err(response) => return Ok(response),
+        Err(response) => return Ok(*response),
     };
     let requested_configuration_id = body.requested_configuration_id();
     if requested_configuration_id.as_deref() != Some(grant.configuration_id.as_str()) {
@@ -1140,7 +1140,7 @@ pub async fn deferred_credential_endpoint(
 ) -> ApiResult<HttpResponse> {
     let (access_token, _) = match authorize_grant(&req, &token_store) {
         Ok(authorized) => authorized,
-        Err(response) => return Ok(response),
+        Err(response) => return Ok(*response),
     };
     match pending_store.claim(&access_token, &body.transaction_id) {
         Err(e) => Ok(oid4vci_error("invalid_transaction_id", e)),

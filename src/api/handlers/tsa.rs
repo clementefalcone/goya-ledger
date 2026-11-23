@@ -14,12 +14,14 @@ fn err_dto(code: &str, msg: &str) -> ErrorDto {
     }
 }
 
-fn get_tsa(state: &AppState) -> Result<&Arc<TsaProvider>, HttpResponse> {
+fn get_tsa(state: &AppState) -> Result<&Arc<TsaProvider>, Box<HttpResponse>> {
     state.tsa_provider.as_ref().ok_or_else(|| {
-        HttpResponse::ServiceUnavailable().json(ApiResponse::<()>::error(
-            err_dto("TSA_UNAVAILABLE", "TSA service is not configured"),
-            503,
-        ))
+        Box::new(
+            HttpResponse::ServiceUnavailable().json(ApiResponse::<()>::error(
+                err_dto("TSA_UNAVAILABLE", "TSA service is not configured"),
+                503,
+            )),
+        )
     })
 }
 
@@ -33,7 +35,7 @@ pub async fn request_timestamp(
 
     let tsa = match get_tsa(&state) {
         Ok(t) => t,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
 
     let resp = tsa.issue(&body);
@@ -64,7 +66,7 @@ pub async fn tsa_policy(state: web::Data<AppState>) -> ApiResult<HttpResponse> {
 
     let tsa = match get_tsa(&state) {
         Ok(t) => t,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
 
     Ok(HttpResponse::Ok().json(ApiResponse::success(tsa.policy_info(), trace)))
@@ -78,7 +80,7 @@ pub async fn request_timestamp_der(
 ) -> ApiResult<HttpResponse> {
     let tsa = match get_tsa(&state) {
         Ok(t) => t,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
 
     match tsa.issue_der(&body) {

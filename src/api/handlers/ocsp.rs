@@ -15,12 +15,14 @@ fn err_dto(code: &str, msg: &str) -> ErrorDto {
     }
 }
 
-fn get_ocsp(state: &AppState) -> Result<&Arc<OcspResponder>, HttpResponse> {
+fn get_ocsp(state: &AppState) -> Result<&Arc<OcspResponder>, Box<HttpResponse>> {
     state.ocsp_responder.as_ref().ok_or_else(|| {
-        HttpResponse::ServiceUnavailable().json(ApiResponse::<()>::error(
-            err_dto("OCSP_UNAVAILABLE", "OCSP responder is not configured"),
-            503,
-        ))
+        Box::new(
+            HttpResponse::ServiceUnavailable().json(ApiResponse::<()>::error(
+                err_dto("OCSP_UNAVAILABLE", "OCSP responder is not configured"),
+                503,
+            )),
+        )
     })
 }
 
@@ -33,7 +35,7 @@ pub async fn ocsp_query(
     let trace = uuid::Uuid::new_v4().to_string();
     let ocsp = match get_ocsp(&state) {
         Ok(o) => o,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
     let crl_store = match state.crl_store.as_ref() {
         Some(s) => s,
@@ -72,7 +74,7 @@ pub async fn ocsp_status(
     let (msp_id, serial) = path.into_inner();
     let ocsp = match get_ocsp(&state) {
         Ok(o) => o,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
     let crl_store = match state.crl_store.as_ref() {
         Some(s) => s,
@@ -114,7 +116,7 @@ pub async fn ocsp_query_der(
 ) -> ApiResult<HttpResponse> {
     let ocsp = match get_ocsp(&state) {
         Ok(o) => o,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return Ok(*resp),
     };
     let crl_store = match state.crl_store.as_ref() {
         Some(s) => s,

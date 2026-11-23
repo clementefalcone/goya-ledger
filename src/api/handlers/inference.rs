@@ -42,37 +42,39 @@ fn validate_fes_fea(
     algorithm: SigningAlgorithm,
     evidence: &[BiometricEvidence],
     public_key_hex: &str,
-) -> Result<(), HttpResponse> {
+) -> Result<(), Box<HttpResponse>> {
     if !level.algorithm_satisfies(algorithm) {
-        return Err(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-            err_dto(
-                "ALGORITHM_MISMATCH",
-                &format!("signature level {level} requires ML-DSA-65, got {algorithm}"),
+        return Err(Box::new(HttpResponse::BadRequest().json(
+            ApiResponse::<()>::error(
+                err_dto(
+                    "ALGORITHM_MISMATCH",
+                    &format!("signature level {level} requires ML-DSA-65, got {algorithm}"),
+                ),
+                400,
             ),
-            400,
         )));
     }
     if level.requires_biometric() && evidence.is_empty() {
-        return Err(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-            err_dto(
-                "BIOMETRIC_REQUIRED",
-                &format!("signature level {level} requires biometric evidence"),
+        return Err(Box::new(HttpResponse::BadRequest().json(
+            ApiResponse::<()>::error(
+                err_dto(
+                    "BIOMETRIC_REQUIRED",
+                    &format!("signature level {level} requires biometric evidence"),
+                ),
+                400,
             ),
-            400,
         )));
     }
     for e in evidence {
         if let Err(err) = e.validate() {
-            return Err(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-                err_dto("INVALID_BIOMETRIC", &err.to_string()),
-                400,
+            return Err(Box::new(HttpResponse::BadRequest().json(
+                ApiResponse::<()>::error(err_dto("INVALID_BIOMETRIC", &err.to_string()), 400),
             )));
         }
     }
     if let Err(msg) = crate::signature::validate_public_key(algorithm, public_key_hex) {
-        return Err(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
-            err_dto("INVALID_PUBLIC_KEY", &msg),
-            400,
+        return Err(Box::new(HttpResponse::BadRequest().json(
+            ApiResponse::<()>::error(err_dto("INVALID_PUBLIC_KEY", &msg), 400),
         )));
     }
     Ok(())
@@ -400,7 +402,7 @@ pub async fn submit_inference(
         &body.biometric_evidence,
         &body.public_key,
     ) {
-        return Ok(resp);
+        return Ok(*resp);
     }
     let submit_msg = build_inference_payload(
         body.signature_level,
@@ -529,7 +531,7 @@ pub async fn submit_proven(
         &body.biometric_evidence,
         &body.public_key,
     ) {
-        return Ok(resp);
+        return Ok(*resp);
     }
     let submit_msg = build_inference_payload(
         body.signature_level,
@@ -720,7 +722,7 @@ pub async fn challenge_inference(
         &body.biometric_evidence,
         &body.public_key,
     ) {
-        return Ok(resp);
+        return Ok(*resp);
     }
     let challenge_msg = build_inference_payload(
         body.signature_level,
