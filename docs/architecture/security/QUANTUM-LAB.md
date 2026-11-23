@@ -69,8 +69,8 @@ migration path and their owners must register a new ML-DSA DID.
 
 **Production TLS, measured 2026-11-22.** nginx on the VPS (OpenSSL 3.0.13) negotiates X25519 only and
 refuses an X25519MLKEM768-only client (alert 40). Traffic to the apps that call Goya can be harvested
-today and decrypted later. P2P 8081 is public and runs without TLS, because no `TLS_*` is set in
-`/etc/goya-node/env`.
+today and decrypted later. P2P 8081 runs without TLS (no `TLS_*` in `/etc/goya-node/env`) but UFW
+denies it from the internet; it needs TLS before external validators join.
 
 ## 4. Grover margins
 
@@ -89,6 +89,6 @@ Grover's algorithm halves the exponent of brute-force search. The target is ≥1
 ## Open items
 
 1. Wallet-address DIDs: 160-bit truncation. A format change, needs a decision.
-2. PQ TLS on the VPS: OpenSSL ≥ 3.5 or a proxy with X25519MLKEM768, plus TLS or a firewall on P2P 8081.
+2. PQ TLS on the VPS: OpenSSL ≥ 3.5 or a proxy with X25519MLKEM768. P2P TLS before external validators join.
 3. Holder proofs and issuer credential keys stay classical while EUDI wallets require ES256.
 4. Node certificates are ECDSA-P256.
