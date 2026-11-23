@@ -283,6 +283,19 @@ async fn open_peer_stream(
     }
 }
 
+async fn send_to_peer(addr: String, payload: Arc<[u8]>, tls_connector: Option<Arc<TlsConnector>>) {
+    let send = async {
+        let mut stream = open_peer_stream(&addr, tls_connector.as_deref()).await?;
+        stream.write_all(&payload).await?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    };
+    match tokio::time::timeout(PEER_IO_TIMEOUT, send).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::warn!("P2P send to {addr} failed: {e}"),
+        Err(_) => log::warn!("P2P send to {addr} timed out after {PEER_IO_TIMEOUT:?}"),
+    }
+}
+
 /// Background task that re-gossips accepted blocks to up to `GOSSIP_FANOUT` random peers,
 /// excluding the peer that originally sent the block.
 async fn gossip_loop(
@@ -2306,24 +2319,13 @@ impl Node {
             peers.len(),
             peers
         );
-        futures::future::join_all(
-            peers
-                .iter()
-                .map(|addr| self.send_to_peer(addr, msg_json.as_bytes())),
-        )
-        .await;
-    }
-
-    async fn send_to_peer(&self, addr: &str, payload: &[u8]) {
-        let send = async {
-            let mut stream = self.open_stream(addr).await?;
-            stream.write_all(payload).await?;
-            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-        };
-        match tokio::time::timeout(PEER_IO_TIMEOUT, send).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => log::warn!("P2P send to {addr} failed: {e}"),
-            Err(_) => log::warn!("P2P send to {addr} timed out after {PEER_IO_TIMEOUT:?}"),
+        let payload: Arc<[u8]> = msg_json.into_bytes().into();
+        for addr in peers {
+            tokio::spawn(send_to_peer(
+                addr,
+                payload.clone(),
+                self.tls_connector.clone(),
+            ));
         }
     }
 
@@ -3074,10 +3076,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn broadcast_reaches_live_peers_while_others_stall() {
+    async fn broadcast_returns_at_once_and_reaches_live_peers_while_others_stall() {
         use tokio::io::AsyncReadExt;
         let message = Message::StateResponse {
-            blocks: vec![block_signed_by(trusted_provider()); 4000],
+            blocks: vec![block_signed_by(trusted_provider()); 1000],
         };
         let payload_len = serde_json::to_vec(&message).unwrap().len();
         let node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None, None);
@@ -3108,7 +3110,7 @@ mod tests {
         });
 
         let broadcast =
-            tokio::time::timeout(PEER_IO_TIMEOUT * 2, node.broadcast_message(&message)).await;
+            tokio::time::timeout(PEER_IO_TIMEOUT / 2, node.broadcast_message(&message)).await;
 
         assert!(broadcast.is_ok());
         assert_eq!(received.await.unwrap(), payload_len);
