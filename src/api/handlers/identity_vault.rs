@@ -33,6 +33,7 @@ pub async fn add_vault_entry(
     let trace_id = uuid::Uuid::new_v4().to_string();
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
+    super::validation::require_post_quantum_owner(store.as_ref(), &did)?;
     if body.kind == VaultEntryKind::Reader {
         super::validation::require_post_quantum_key("sealed_key", &body.sealed_key)?;
     }
@@ -88,6 +89,7 @@ pub async fn revoke_vault_entry(
     let trace_id = uuid::Uuid::new_v4().to_string();
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
+    super::validation::require_post_quantum_owner(store.as_ref(), &did)?;
 
     let revoked_at = now_secs();
     let request = RevokeVaultEntryRequest {
@@ -141,6 +143,7 @@ pub async fn commit_recovery_key(
     let trace_id = uuid::Uuid::new_v4().to_string();
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
+    super::validation::require_post_quantum_owner(store.as_ref(), &did)?;
 
     let request = CommitRecoveryRequest {
         did: &did,
@@ -197,6 +200,7 @@ pub async fn bind_civil_anchor(
     let trace_id = uuid::Uuid::new_v4().to_string();
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
+    super::validation::require_post_quantum_owner(store.as_ref(), &did)?;
 
     let request = BindCivilAnchorRequest {
         did: &did,
@@ -277,6 +281,53 @@ mod tests {
             })
             .unwrap();
         Owner { state, key, did }
+    }
+
+    fn classical_owner() -> (Owner, crate::identity::signing::SoftwareSigningProvider) {
+        let owner = registered_owner();
+        let key = crate::identity::signing::SoftwareSigningProvider::generate();
+        let public_key = hex::encode(key.public_key());
+        let did = crate::identity::did::did_from_pubkey_hex(&public_key);
+        get_channel_store(&owner.state, "default")
+            .unwrap()
+            .write_identity(&IdentityRecord {
+                did: did.clone(),
+                public_key,
+                signature_algorithm: Some("Ed25519".to_string()),
+                ..get_channel_store(&owner.state, "default")
+                    .unwrap()
+                    .read_identity(&owner.did)
+                    .unwrap()
+            })
+            .unwrap();
+        (Owner { did, ..owner }, key)
+    }
+
+    #[actix_web::test]
+    async fn classical_identity_cannot_change_its_vault_or_recovery() {
+        let (owner, key) = classical_owner();
+        let entry = phone_copy();
+        let signature = hex::encode(
+            key.sign(add_vault_entry_message(&owner.did, &entry).as_bytes())
+                .unwrap(),
+        );
+        let uri = format!("/api/v1/identity/{}/vault", owner.did);
+        assert_eq!(post(&owner, &uri, add_body(&entry, signature)).await, 400);
+        let attacker_recovery = crate::identity::did::did_from_pubkey_hex(&hex::encode(
+            MlDsaSigningProvider::generate().public_key(),
+        ));
+        let message = commit_recovery_message(&owner.did, &attacker_recovery);
+        let body = serde_json::json!({
+            "recovery_commitment": attacker_recovery,
+            "signature": hex::encode(key.sign(message.as_bytes()).unwrap()),
+        });
+        let uri = format!("/api/v1/identity/{}/recovery", owner.did);
+        assert_eq!(post(&owner, &uri, body).await, 400);
+        let record = get_channel_store(&owner.state, "default")
+            .unwrap()
+            .read_identity(&owner.did)
+            .unwrap();
+        assert!(record.vault_entries.is_empty() && record.recovery_commitment.is_none());
     }
 
     fn phone_copy() -> VaultEntry {

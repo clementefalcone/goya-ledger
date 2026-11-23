@@ -81,6 +81,16 @@ pub fn require_post_quantum_algorithm(
     })
 }
 
+pub fn require_post_quantum_owner(
+    store: &dyn crate::storage::traits::BlockStore,
+    did: &str,
+) -> Result<(), ApiError> {
+    let record = store.read_identity(did).map_err(|_| ApiError::NotFound {
+        resource: format!("identity {did}"),
+    })?;
+    require_post_quantum_key("public_key", &record.public_key)
+}
+
 pub fn require_post_quantum_key(field_name: &str, public_key_hex: &str) -> Result<(), ApiError> {
     match crate::signature::verify::infer_algorithm_from_key(public_key_hex) {
         Some(algorithm) => require_post_quantum_algorithm(field_name, algorithm),

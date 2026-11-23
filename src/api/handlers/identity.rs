@@ -215,6 +215,7 @@ pub async fn revoke_identity(
     let channel = channel_id_from_req(&req);
     let store = get_channel_store(&state, channel)?;
 
+    super::validation::require_post_quantum_owner(store.as_ref(), &did)?;
     let change = operations::check_revoke(store.as_ref(), &did, &body.signature)
         .map_err(identity_op_error)?;
     if change == operations::Change::AlreadyApplied {
@@ -702,15 +703,7 @@ pub async fn auth_verify(
         });
     }
 
-    let algorithm = identity
-        .signature_algorithm
-        .as_deref()
-        .and_then(|a| match a {
-            "Ed25519" => Some(crate::identity::signing::SigningAlgorithm::Ed25519),
-            "MlDsa65" => Some(crate::identity::signing::SigningAlgorithm::MlDsa65),
-            _ => None,
-        })
-        .unwrap_or(crate::identity::signing::SigningAlgorithm::Ed25519);
+    super::validation::require_post_quantum_key("public_key", &identity.public_key)?;
 
     let valid = match body.reader_entry_id.as_deref() {
         Some(entry_id) => crate::identity::reader_login::is_signed_by_reader(
@@ -719,10 +712,9 @@ pub async fn auth_verify(
             &challenge.nonce,
             &body.signature,
         ),
-        None => crate::signature::verify_signature(
-            algorithm,
+        None => operations::is_signed_by(
             &identity.public_key,
-            login_message(&challenge.nonce, &body.device_factors).as_bytes(),
+            &login_message(&challenge.nonce, &body.device_factors),
             &body.signature,
         ),
     };
@@ -906,7 +898,7 @@ mod tests {
     struct RegisteredOwner {
         state: web::Data<AppState>,
         did: String,
-        key: crate::identity::signing::SoftwareSigningProvider,
+        key: crate::identity::signing::MlDsaSigningProvider,
     }
 
     fn state_with_session_key() -> AppState {
@@ -920,9 +912,9 @@ mod tests {
     }
 
     fn registered_owner() -> RegisteredOwner {
-        use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
+        use crate::identity::signing::{MlDsaSigningProvider, SigningProvider};
         let state = web::Data::new(state_with_session_key());
-        let key = SoftwareSigningProvider::generate();
+        let key = MlDsaSigningProvider::generate();
         let public_key = hex::encode(key.public_key());
         let did = crate::identity::did::did_from_pubkey_hex(&public_key);
         get_channel_store(&state, "default")
@@ -1038,6 +1030,37 @@ mod tests {
         assert_eq!(owner_status(&owner), "active");
     }
 
+    fn classical_owner() -> (
+        RegisteredOwner,
+        crate::identity::signing::SoftwareSigningProvider,
+    ) {
+        use crate::identity::signing::{SigningProvider, SoftwareSigningProvider};
+        let owner = registered_owner();
+        let key = SoftwareSigningProvider::generate();
+        let public_key = hex::encode(key.public_key());
+        let did = crate::identity::did::did_from_pubkey_hex(&public_key);
+        get_channel_store(&owner.state, "default")
+            .unwrap()
+            .write_identity(&identity_record(&did, &public_key, "active"))
+            .unwrap();
+        (RegisteredOwner { did, ..owner }, key)
+    }
+
+    #[actix_web::test]
+    async fn classical_identity_can_neither_log_in_nor_revoke() {
+        let (owner, key) = classical_owner();
+        let (status, _) = did_login(
+            &owner,
+            |nonce| serde_json::json!({ "signature": sign_hex(&key, &login_message(nonce, &[])) }),
+        )
+        .await;
+        assert_eq!(status, 400);
+        let message = format!("identity:revoke:{}", owner.did);
+        let body = serde_json::json!({ "signature": sign_hex(&key, &message) });
+        assert_eq!(post_owner_action(&owner, "revoke", body).await, 400);
+        assert_eq!(owner_status(&owner), "active");
+    }
+
     #[actix_web::test]
     async fn revoke_with_owner_signature_revokes() {
         let owner = registered_owner();
@@ -1096,11 +1119,12 @@ mod tests {
     }
 
     #[actix_web::test]
-    async fn rotate_rejects_classical_current_key_posing_as_recovery() {
+    async fn rotate_rejects_a_classical_key_posing_as_recovery() {
         let (owner, _recovery) = owner_with_recovery();
+        let classical_key = crate::identity::signing::SoftwareSigningProvider::generate();
         let thief_key = crate::identity::signing::MlDsaSigningProvider::generate();
         let before = owner_public_key(&owner);
-        let body = rotation_body(&owner.did, &owner.key, &thief_key);
+        let body = rotation_body(&owner.did, &classical_key, &thief_key);
         assert_eq!(post_owner_action(&owner, "rotate", body).await, 400);
         assert_eq!(owner_public_key(&owner), before);
     }
