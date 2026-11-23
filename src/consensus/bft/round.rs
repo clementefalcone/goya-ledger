@@ -239,12 +239,15 @@ impl<V: SignatureVerifier + Clone> BftRound<V> {
     }
 
     fn defer_vote(&mut self, vote: VoteMessage) {
-        let is_known_voter = self.validators.contains(&vote.voter_id);
         let is_duplicate = self
             .deferred_votes
             .iter()
             .any(|d| d.phase == vote.phase && d.voter_id == vote.voter_id);
-        if vote.round == self.round && is_known_voter && !is_duplicate {
+        if vote.round != self.round || is_duplicate {
+            return;
+        }
+        let validator = QuorumValidator::new(self.validators.clone(), self.verifier.clone());
+        if validator.validate_vote(&vote).is_ok() {
             self.deferred_votes.push(vote);
         }
     }
@@ -693,6 +696,38 @@ mod tests {
             }
         )));
         assert_eq!(r.state(), RoundState::Committing);
+    }
+
+    #[test]
+    fn forged_early_vote_cannot_displace_the_real_one() {
+        let mut r = follower_round(0, "v1", "v0");
+        r.process(RoundEvent::Proposal {
+            block_hash: block_hash(1),
+            leader_id: "v0".into(),
+            justify_qc: None,
+        });
+        let mut forged = make_test_vote(BftPhase::PreCommit, 1, 0, "v2");
+        forged.signature.clear();
+        r.process(RoundEvent::Vote(forged));
+        r.process(RoundEvent::Vote(make_test_vote(
+            BftPhase::PreCommit,
+            1,
+            0,
+            "v2",
+        )));
+        for voter in ["v0", "v1", "v2"] {
+            r.process(RoundEvent::Vote(make_test_vote(
+                BftPhase::Prepare,
+                1,
+                0,
+                voter,
+            )));
+        }
+
+        let ready = r.take_ready_votes();
+
+        assert_eq!(ready.len(), 1);
+        assert!(!ready[0].signature.is_empty());
     }
 
     #[test]
