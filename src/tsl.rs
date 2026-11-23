@@ -3,6 +3,7 @@
 //! Publishes the list of trust services offered by this node:
 //! which services are active, their policies, algorithms, and status.
 
+use crate::identity::signing::SigningAlgorithm;
 use crate::pki_policy;
 use serde::{Deserialize, Serialize};
 
@@ -84,14 +85,27 @@ pub struct TrustServiceList {
     pub services: Vec<TrustService>,
 }
 
+const OPERATOR: &str = "Goya Ledger";
+const JURISDICTION: &str = "Chile";
+const NODE_CERTIFICATE_ALGORITHM: &str = "ECDSA-P256";
+const USER_SIGNATURE_ALGORITHMS: [SigningAlgorithm; 2] =
+    [SigningAlgorithm::MlDsa65, SigningAlgorithm::SlhDsa128s];
+
 /// Build the default Goya TSL from the current node configuration.
-pub fn build_tsl(operator: &str, jurisdiction: &str, now_secs: u64) -> TrustServiceList {
+pub fn build_tsl(
+    now_secs: u64,
+    node_signing_algorithm: Option<SigningAlgorithm>,
+) -> TrustServiceList {
     let update_interval = 30 * 24 * 3600; // 30 days
+    let node_algorithms: Vec<String> = node_signing_algorithm
+        .iter()
+        .map(ToString::to_string)
+        .collect();
 
     TrustServiceList {
         version: 1,
-        operator: operator.to_string(),
-        jurisdiction: jurisdiction.to_string(),
+        operator: OPERATOR.to_string(),
+        jurisdiction: JURISDICTION.to_string(),
         issued_at: now_secs,
         next_update: now_secs + update_interval,
         services: vec![
@@ -100,7 +114,7 @@ pub fn build_tsl(operator: &str, jurisdiction: &str, now_secs: u64) -> TrustServ
                 name: "Goya Ledger CA".into(),
                 status: ServiceStatus::Active,
                 policy_oid: pki_policy::CP_OID.to_string(),
-                algorithms: vec!["Ed25519".into(), "ML-DSA-65".into(), "ECDSA-P256".into()],
+                algorithms: vec![NODE_CERTIFICATE_ALGORITHM.into()],
                 formats: vec!["X.509v3".into()],
                 endpoint: Some("/api/v1/policy/cp".into()),
             },
@@ -109,7 +123,7 @@ pub fn build_tsl(operator: &str, jurisdiction: &str, now_secs: u64) -> TrustServ
                 name: "Goya Ledger TSA".into(),
                 status: ServiceStatus::Active,
                 policy_oid: pki_policy::TSA_POLICY_OID.to_string(),
-                algorithms: vec!["Ed25519".into(), "ML-DSA-65".into()],
+                algorithms: node_algorithms.clone(),
                 formats: vec!["RFC 3161".into()],
                 endpoint: Some("/api/v1/tsa/timestamp".into()),
             },
@@ -118,7 +132,7 @@ pub fn build_tsl(operator: &str, jurisdiction: &str, now_secs: u64) -> TrustServ
                 name: "Goya Ledger OCSP".into(),
                 status: ServiceStatus::Active,
                 policy_oid: pki_policy::CP_OID.to_string(),
-                algorithms: vec!["Ed25519".into(), "ML-DSA-65".into()],
+                algorithms: node_algorithms,
                 formats: vec!["RFC 6960".into()],
                 endpoint: Some("/api/v1/ocsp/query".into()),
             },
@@ -136,7 +150,10 @@ pub fn build_tsl(operator: &str, jurisdiction: &str, now_secs: u64) -> TrustServ
                 name: "Goya Ledger Signatures".into(),
                 status: ServiceStatus::Active,
                 policy_oid: pki_policy::SIGNATURE_POLICY_OID.to_string(),
-                algorithms: vec!["Ed25519".into(), "ML-DSA-65".into()],
+                algorithms: USER_SIGNATURE_ALGORITHMS
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
                 formats: vec!["XAdES-BES".into(), "CAdES-BES".into(), "PAdES-BES".into()],
                 endpoint: Some("/api/v1/notarize".into()),
             },
@@ -227,7 +244,35 @@ mod tests {
     use super::*;
 
     fn sample_tsl() -> TrustServiceList {
-        build_tsl("Goya Ledger", "Chile", 1_700_000_000)
+        build_tsl(1_700_000_000, Some(SigningAlgorithm::MlDsa65))
+    }
+
+    #[test]
+    fn tsl_advertises_only_the_algorithms_services_sign_with() {
+        let advertised: Vec<(ServiceType, Vec<String>)> = sample_tsl()
+            .services
+            .into_iter()
+            .map(|service| (service.service_type, service.algorithms))
+            .collect();
+        assert_eq!(
+            advertised,
+            vec![
+                (
+                    ServiceType::CertificateAuthority,
+                    vec!["ECDSA-P256".to_string()]
+                ),
+                (
+                    ServiceType::TimeStampAuthority,
+                    vec!["ML-DSA-65".to_string()]
+                ),
+                (ServiceType::OcspResponder, vec!["ML-DSA-65".to_string()]),
+                (ServiceType::RegistrationAuthority, vec![]),
+                (
+                    ServiceType::ElectronicSignature,
+                    vec!["ML-DSA-65".to_string(), "SLH-DSA-SHAKE-128s".to_string()]
+                ),
+            ]
+        );
     }
 
     #[test]

@@ -2,18 +2,22 @@
 
 use crate::api::errors::{ApiResponse, ApiResult};
 use crate::tsl;
-use actix_web::{get, HttpResponse};
+use actix_web::{get, web, HttpResponse};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Get the Trust Service List for this node.
 #[get("/tsl")]
-pub async fn get_tsl() -> ApiResult<HttpResponse> {
+pub async fn get_tsl(state: web::Data<crate::app_state::AppState>) -> ApiResult<HttpResponse> {
     let trace = uuid::Uuid::new_v4().to_string();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let list = tsl::build_tsl("Goya Ledger", "Chile", now);
+    let node_signing_algorithm = state
+        .signing_provider
+        .as_ref()
+        .map(|provider| provider.algorithm());
+    let list = tsl::build_tsl(now, node_signing_algorithm);
     Ok(HttpResponse::Ok().json(ApiResponse::success(list, trace)))
 }
 
