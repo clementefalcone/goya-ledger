@@ -217,7 +217,7 @@ remote_build() {
     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
   host="ubuntu@$ip"
   until "${SSH[@]}" "$host" true 2>/dev/null; do sleep 5; done
-  git ls-files -z | xargs -0 tar czf - | "${SSH[@]}" "$host" 'mkdir -p src && tar xzf - -C src'
+  git ls-files -z | COPYFILE_DISABLE=1 xargs -0 tar czf - | "${SSH[@]}" "$host" 'mkdir -p src && tar xzf - -C src'
   "${SSH[@]}" "$host" "set -e
     cloud-init status --wait >/dev/null
     sudo apt-get update -qq
@@ -231,6 +231,7 @@ remote_build() {
     mkdir -p "target/$(rust_target "$arch")/release"
     scp -q -i "$SSH_KEY" -o ServerAliveInterval=15 "${host}:src/target/release/rust-bc" "target/$(rust_target "$arch")/release/rust-bc"
   else
+    mkdir -p "$ROOT"
     scp -q -i "$SSH_KEY" "${host}:src/build.log" "$ROOT/build-$arch.log"
     echo "build on $arch failed; log at $ROOT/build-$arch.log" >&2
   fi
