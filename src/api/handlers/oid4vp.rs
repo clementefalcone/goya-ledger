@@ -418,7 +418,7 @@ pub async fn submit_response(
         return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
             err_dto(
                 "VERIFICATION_FAILED",
-                "credential is not signed by the ledger-registered key of its issuer, or lacks the issuer's ML-DSA anchor on the ledger",
+                "credential is not signed by the ledger-registered key of its issuer, lacks the issuer's ML-DSA anchor on the ledger, or is not presented with the key in its cnf.jwk",
             ),
             400,
         )));
@@ -468,6 +468,18 @@ fn is_issued_by_anchored_issuer(
             .is_ok_and(|anchor| anchor.issuer_did == did && anchor.revoked_at.is_none())
 }
 
+fn holder_public_key_hex(jwk: &serde_json::Value) -> Option<String> {
+    match jwk.get("kty")?.as_str()? {
+        "EC" => crate::identity::issuer_keys::sec1_public_key_hex(
+            &serde_json::from_value(jwk.clone()).ok()?,
+        ),
+        "OKP" => base64url_decode(jwk.get("x")?.as_str()?)
+            .ok()
+            .map(hex::encode),
+        _ => None,
+    }
+}
+
 fn verify_sd_jwt_presentation(
     vp_token: &str,
     nonce: &str,
@@ -489,7 +501,10 @@ fn verify_sd_jwt_presentation(
 
     let iss = payload["iss"].as_str().unwrap_or("");
 
-    let sig_verified = is_issued_by_anchored_issuer(ledger, vp_token, iss);
+    let holder_bound = holder_public_key_hex(&payload["cnf"]["jwk"]).is_some_and(|holder_key| {
+        crate::identity::sd_jwt::is_presented_by_holder(vp_token, &holder_key)
+    });
+    let sig_verified = holder_bound && is_issued_by_anchored_issuer(ledger, vp_token, iss);
 
     // Parse disclosed claims from disclosures
     let mut disclosed = serde_json::Map::new();
@@ -685,10 +700,29 @@ mod tests {
         claims: Vec<(String, serde_json::Value)>,
         nonce: &str,
     ) -> String {
-        use crate::identity::sd_jwt::{issue_sd_jwt_vc_with_kb, present_sd_jwt_with_kb, VcClaims};
         let holder = crate::identity::signing::SoftwareSigningProvider::generate();
+        presentation_by(issuer, issuer_did, claims, &holder, &holder, nonce)
+    }
+
+    fn presentation_by(
+        issuer: &dyn SigningProvider,
+        issuer_did: &str,
+        claims: Vec<(String, serde_json::Value)>,
+        holder: &dyn SigningProvider,
+        presenter: &dyn SigningProvider,
+        nonce: &str,
+    ) -> String {
+        use crate::identity::sd_jwt::{issue_sd_jwt_vc, present_sd_jwt_with_kb, VcClaims};
         let disclosed: Vec<usize> = (0..claims.len()).collect();
-        let sd_jwt = issue_sd_jwt_vc_with_kb(
+        let holder_jwk = serde_json::json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                holder.public_key()
+            ),
+        });
+        let sd_jwt = issue_sd_jwt_vc(
             &VcClaims {
                 iss: issuer_did.into(),
                 sub: "did:goya:holder".into(),
@@ -696,18 +730,16 @@ mod tests {
                 exp: 2_000_000_000,
                 vct: "IdentityCredential".into(),
                 claims,
-                cnf: None,
+                cnf: Some(serde_json::json!({ "jwk": holder_jwk })),
                 status: None,
             },
             issuer,
-            &hex::encode(holder.public_key()),
-            holder.algorithm(),
         )
         .unwrap();
         present_sd_jwt_with_kb(
             &sd_jwt,
             &disclosed,
-            &holder,
+            presenter,
             "v.example.com",
             nonce,
             1_700_000_000,
@@ -1072,6 +1104,31 @@ mod tests {
         .await;
         assert_eq!(status, 400);
         assert_eq!(body["error"]["code"], "NONCE_MISMATCH");
+    }
+
+    #[actix_web::test]
+    async fn rejects_a_stolen_credential_presented_with_the_thief_key() {
+        let ledger = make_ledger();
+        let issuer = registered_issuer(&ledger);
+        let store = make_store();
+        register_test_rp(&store, "v.example.com");
+        let holder = crate::identity::signing::SoftwareSigningProvider::generate();
+        let thief = crate::identity::signing::SoftwareSigningProvider::generate();
+        let (status, body) = submit_to_fresh_request(&store, &ledger, |nonce| {
+            let vp_token = presentation_by(
+                &issuer.credential_key,
+                &issuer.iss,
+                vec![("given_name".into(), serde_json::json!("Juan"))],
+                &holder,
+                &thief,
+                nonce,
+            );
+            anchor(&ledger, &issuer, &vp_token);
+            vp_token
+        })
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "VERIFICATION_FAILED");
     }
 
     #[actix_web::test]

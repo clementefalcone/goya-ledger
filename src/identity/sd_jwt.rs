@@ -599,6 +599,22 @@ fn verify_sd_jwt_vc_full(
     })
 }
 
+pub fn is_presented_by_holder(presentation: &str, holder_pubkey_hex: &str) -> bool {
+    let Some(algorithm) = crate::signature::verify::infer_algorithm_from_key(holder_pubkey_hex)
+    else {
+        return false;
+    };
+    let Some(kb_jwt) = presentation
+        .rsplit('~')
+        .next()
+        .filter(|kb_jwt| kb_jwt.split('.').count() == 3)
+    else {
+        return false;
+    };
+    let expected_jkt = jwk_thumbprint(holder_pubkey_hex, algorithm);
+    verify_kb_jwt(kb_jwt, presentation, &expected_jkt, Some(holder_pubkey_hex)).unwrap_or(false)
+}
+
 /// Verify a Key Binding JWT (RFC 9901 §5.8).
 /// `holder_pubkey_hex`: if provided, verifies signature + jkt thumbprint match.
 fn verify_kb_jwt(
