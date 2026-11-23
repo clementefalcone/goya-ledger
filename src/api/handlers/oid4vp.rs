@@ -131,10 +131,9 @@ pub struct RelyingParty {
     pub registered_at: u64,
 }
 
-/// In-memory request store for cross-device flow + issuer key registry + RP registry.
+/// In-memory request store for cross-device flow + RP registry.
 pub struct VpRequestStore {
     requests: RwLock<HashMap<String, AuthorizationRequest>>,
-    issuer_keys: RwLock<HashMap<String, String>>,
     relying_parties: RwLock<HashMap<String, RelyingParty>>,
 }
 
@@ -142,7 +141,6 @@ impl VpRequestStore {
     pub fn new() -> Self {
         Self {
             requests: RwLock::new(HashMap::new()),
-            issuer_keys: RwLock::new(HashMap::new()),
             relying_parties: RwLock::new(HashMap::new()),
         }
     }
@@ -156,17 +154,6 @@ impl VpRequestStore {
 
     pub fn get(&self, id: &str) -> Option<AuthorizationRequest> {
         self.requests.read().unwrap().get(id).cloned()
-    }
-
-    pub fn register_issuer_key(&self, did: &str, pubkey_hex: &str) {
-        self.issuer_keys
-            .write()
-            .unwrap()
-            .insert(did.to_string(), pubkey_hex.to_string());
-    }
-
-    pub fn resolve_issuer_key(&self, did: &str) -> Option<String> {
-        self.issuer_keys.read().unwrap().get(did).cloned()
     }
 
     pub fn register_rp(&self, rp: RelyingParty) {
@@ -390,9 +377,11 @@ pub async fn get_request(
 #[post("/oid4vp/response")]
 pub async fn submit_response(
     store: web::Data<VpRequestStore>,
+    state: web::Data<crate::app_state::AppState>,
     body: web::Json<VpResponse>,
 ) -> ApiResult<HttpResponse> {
     let trace = uuid::Uuid::new_v4().to_string();
+    let ledger = crate::api::handlers::channels::get_channel_store(&state, "default")?;
 
     // Find the original request by state
     let request = {
@@ -411,7 +400,7 @@ pub async fn submit_response(
 
     // Detect format from the vp_token
     let result = if body.vp_token.contains('~') {
-        verify_sd_jwt_presentation(&body.vp_token, &request.nonce, &store)
+        verify_sd_jwt_presentation(&body.vp_token, &request.nonce, ledger.as_ref())
     } else {
         verify_mdoc_presentation(&body.vp_token, &request.nonce)
     };
@@ -429,7 +418,7 @@ pub async fn submit_response(
         return Ok(HttpResponse::BadRequest().json(ApiResponse::<()>::error(
             err_dto(
                 "VERIFICATION_FAILED",
-                "issuer signature missing or not verifiable against a registered issuer key",
+                "credential is not signed by the ledger-registered key of its issuer, or lacks the issuer's ML-DSA anchor on the ledger",
             ),
             400,
         )));
@@ -457,10 +446,32 @@ pub async fn submit_response(
     Ok(HttpResponse::Ok().json(ApiResponse::success(vr, trace)))
 }
 
+fn is_issued_by_anchored_issuer(
+    ledger: &dyn crate::storage::traits::BlockStore,
+    vp_token: &str,
+    iss: &str,
+) -> bool {
+    use crate::identity::issuer_keys::{https_url_path, issuer_path, sec1_public_key_hex};
+    let Some(did) = https_url_path(iss).and_then(|path| path.strip_prefix(&issuer_path(""))) else {
+        return false;
+    };
+    let Some(credential_key) = ledger
+        .read_issuer_credential_key(did)
+        .ok()
+        .and_then(|registration| sec1_public_key_hex(&registration.jwk))
+    else {
+        return false;
+    };
+    crate::identity::sd_jwt::verify_sd_jwt_vc(vp_token, &credential_key).is_ok()
+        && ledger
+            .read_credential(&crate::identity::issuer_credentials::anchor_id(vp_token))
+            .is_ok_and(|anchor| anchor.issuer_did == did && anchor.revoked_at.is_none())
+}
+
 fn verify_sd_jwt_presentation(
     vp_token: &str,
     nonce: &str,
-    store: &VpRequestStore,
+    ledger: &dyn crate::storage::traits::BlockStore,
 ) -> Result<VerificationResult, String> {
     let parts: Vec<&str> = vp_token.split('~').collect();
     if parts.is_empty() {
@@ -478,12 +489,7 @@ fn verify_sd_jwt_presentation(
 
     let iss = payload["iss"].as_str().unwrap_or("");
 
-    // Attempt issuer pubkey lookup for signature verification
-    let sig_verified = if let Some(pubkey_hex) = store.resolve_issuer_key(iss) {
-        crate::identity::sd_jwt::verify_sd_jwt_vc(vp_token, &pubkey_hex).is_ok()
-    } else {
-        false
-    };
+    let sig_verified = is_issued_by_anchored_issuer(ledger, vp_token, iss);
 
     // Parse disclosed claims from disclosures
     let mut disclosed = serde_json::Map::new();
@@ -600,6 +606,79 @@ mod tests {
         web::Data::new(VpRequestStore::new())
     }
 
+    type Ledger = web::Data<crate::app_state::AppState>;
+
+    fn make_ledger() -> Ledger {
+        web::Data::new(crate::app_state::AppState::test_default())
+    }
+
+    struct LedgerIssuer {
+        credential_key: crate::identity::signing::EcdsaP256SigningProvider,
+        did: String,
+        iss: String,
+    }
+
+    fn ledger_store(ledger: &Ledger) -> std::sync::Arc<dyn crate::storage::traits::BlockStore> {
+        crate::api::handlers::channels::get_channel_store(ledger, "default").unwrap()
+    }
+
+    fn registered_issuer(ledger: &Ledger) -> LedgerIssuer {
+        let credential_key = crate::identity::signing::EcdsaP256SigningProvider::generate();
+        let did = crate::identity::did::did_from_pubkey_hex(&hex::encode(
+            crate::identity::signing::MlDsaSigningProvider::generate().public_key(),
+        ));
+        ledger_store(ledger)
+            .write_issuer_credential_key(&crate::storage::traits::IssuerCredentialKey {
+                did: did.clone(),
+                jwk: crate::identity::issuer_keys::p256_public_jwk(&credential_key),
+                registered_at: 1,
+                public_key: String::new(),
+                signature: String::new(),
+            })
+            .unwrap();
+        let iss = format!(
+            "https://node.example{}",
+            crate::identity::issuer_keys::issuer_path(&did)
+        );
+        LedgerIssuer {
+            credential_key,
+            did,
+            iss,
+        }
+    }
+
+    fn anchor(ledger: &Ledger, issuer: &LedgerIssuer, vp_token: &str) {
+        let id = crate::identity::issuer_credentials::anchor_id(vp_token);
+        ledger_store(ledger)
+            .write_credential(&crate::storage::traits::Credential {
+                id: id.clone(),
+                issuer_did: issuer.did.clone(),
+                subject_did: id,
+                cred_type: "IdentityCredential".into(),
+                issued_at: 1_700_000_000,
+                expires_at: 2_000_000_000,
+                revoked_at: None,
+                claims: serde_json::Value::Null,
+                signature: String::new(),
+                status: "active".into(),
+                claims_commitment: None,
+                claims_salt: None,
+            })
+            .unwrap();
+    }
+
+    fn anchored_presentation(
+        ledger: &Ledger,
+        issuer: &LedgerIssuer,
+        claims: Vec<(String, serde_json::Value)>,
+        nonce: &str,
+    ) -> String {
+        let vp_token =
+            bound_sd_jwt_presentation(&issuer.credential_key, &issuer.iss, claims, nonce);
+        anchor(ledger, issuer, &vp_token);
+        vp_token
+    }
+
     fn bound_sd_jwt_presentation(
         issuer: &dyn SigningProvider,
         issuer_did: &str,
@@ -663,8 +742,11 @@ mod tests {
 
     macro_rules! vp_app {
         ($store:expr) => {
+            vp_app!($store, make_ledger())
+        };
+        ($store:expr, $ledger:expr) => {
             test::init_service(
-                App::new().app_data($store).service(
+                App::new().app_data($store).app_data($ledger).service(
                     web::scope("/api/v1")
                         .service(register_rp)
                         .service(list_rps)
@@ -765,16 +847,11 @@ mod tests {
 
     #[actix_web::test]
     async fn e2e_submit_sd_jwt_via_dcql() {
-        use crate::identity::signing::SoftwareSigningProvider;
-
-        let provider = SoftwareSigningProvider::generate();
-        let iss_did =
-            crate::identity::did::did_from_pubkey_hex(&hex::encode(provider.public_key()));
-
+        let ledger = make_ledger();
+        let issuer = registered_issuer(&ledger);
         let store = make_store();
         register_test_rp(&store, "v.example.com");
-        store.register_issuer_key(&iss_did, &hex::encode(provider.public_key()));
-        let app = vp_app!(store.clone());
+        let app = vp_app!(store.clone(), ledger.clone());
 
         // Create DCQL request
         let req = test::TestRequest::post()
@@ -790,9 +867,9 @@ mod tests {
         let state = body["data"]["state"].as_str().unwrap().to_string();
         let nonce = body["data"]["nonce"].as_str().unwrap().to_string();
 
-        let vp_token = bound_sd_jwt_presentation(
-            &provider,
-            &iss_did,
+        let vp_token = anchored_presentation(
+            &ledger,
+            &issuer,
             vec![("given_name".into(), serde_json::json!("Juan"))],
             &nonce,
         );
@@ -890,15 +967,11 @@ mod tests {
 
     #[actix_web::test]
     async fn e2e_dcql_missing_claim_rejects() {
-        use crate::identity::signing::SoftwareSigningProvider;
-
-        let provider = SoftwareSigningProvider::generate();
-        let iss_did =
-            crate::identity::did::did_from_pubkey_hex(&hex::encode(provider.public_key()));
+        let ledger = make_ledger();
+        let issuer = registered_issuer(&ledger);
         let store = make_store();
         register_test_rp(&store, "v.example.com");
-        store.register_issuer_key(&iss_did, &hex::encode(provider.public_key()));
-        let app = vp_app!(store.clone());
+        let app = vp_app!(store.clone(), ledger.clone());
 
         let req = test::TestRequest::post()
             .uri("/api/v1/oid4vp/request")
@@ -914,9 +987,9 @@ mod tests {
         let nonce = body["data"]["nonce"].as_str().unwrap().to_string();
 
         // SD-JWT WITHOUT given_name (required by DCQL)
-        let vp_token = bound_sd_jwt_presentation(
-            &provider,
-            &iss_did,
+        let vp_token = anchored_presentation(
+            &ledger,
+            &issuer,
             vec![("age_over_18".into(), serde_json::json!(true))],
             &nonce,
         );
@@ -936,9 +1009,10 @@ mod tests {
 
     async fn submit_to_fresh_request(
         store: &web::Data<VpRequestStore>,
+        ledger: &Ledger,
         vp_token_for_nonce: impl FnOnce(&str) -> String,
     ) -> (u16, serde_json::Value) {
-        let app = vp_app!(store.clone());
+        let app = vp_app!(store.clone(), ledger.clone());
         let req = test::TestRequest::post()
             .uri("/api/v1/oid4vp/request")
             .set_json(serde_json::json!({
@@ -968,7 +1042,7 @@ mod tests {
         let provider = SoftwareSigningProvider::generate();
         let store = make_store();
         register_test_rp(&store, "v.example.com");
-        let (status, body) = submit_to_fresh_request(&store, |nonce| {
+        let (status, body) = submit_to_fresh_request(&store, &make_ledger(), |nonce| {
             bound_sd_jwt_presentation(
                 &provider,
                 "did:goya:unregistered",
@@ -983,17 +1057,14 @@ mod tests {
 
     #[actix_web::test]
     async fn rejects_a_presentation_not_bound_to_the_request_nonce() {
-        use crate::identity::signing::SoftwareSigningProvider;
-        let provider = SoftwareSigningProvider::generate();
-        let iss_did =
-            crate::identity::did::did_from_pubkey_hex(&hex::encode(provider.public_key()));
+        let ledger = make_ledger();
+        let issuer = registered_issuer(&ledger);
         let store = make_store();
         register_test_rp(&store, "v.example.com");
-        store.register_issuer_key(&iss_did, &hex::encode(provider.public_key()));
-        let (status, body) = submit_to_fresh_request(&store, |_| {
-            bound_sd_jwt_presentation(
-                &provider,
-                &iss_did,
+        let (status, body) = submit_to_fresh_request(&store, &ledger, |_| {
+            anchored_presentation(
+                &ledger,
+                &issuer,
                 vec![("given_name".into(), serde_json::json!("Juan"))],
                 "nonce-of-another-request",
             )
@@ -1004,11 +1075,32 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn rejects_an_es256_credential_without_its_ml_dsa_anchor() {
+        let ledger = make_ledger();
+        let issuer = registered_issuer(&ledger);
+        let store = make_store();
+        register_test_rp(&store, "v.example.com");
+        let (status, body) = submit_to_fresh_request(&store, &ledger, |nonce| {
+            bound_sd_jwt_presentation(
+                &issuer.credential_key,
+                &issuer.iss,
+                vec![("given_name".into(), serde_json::json!("Juan"))],
+                nonce,
+            )
+        })
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "VERIFICATION_FAILED");
+    }
+
+    #[actix_web::test]
     async fn rejects_a_malformed_mdoc_without_crashing() {
         let store = make_store();
         register_test_rp(&store, "v.example.com");
-        let (status, body) =
-            submit_to_fresh_request(&store, |_| "{\"not\":\"an mdoc\"}".to_string()).await;
+        let (status, body) = submit_to_fresh_request(&store, &make_ledger(), |_| {
+            "{\"not\":\"an mdoc\"}".to_string()
+        })
+        .await;
         assert_eq!(status, 400);
         assert_eq!(body["error"]["code"], "VERIFICATION_FAILED");
     }
@@ -1188,17 +1280,6 @@ mod tests {
     }
 
     // ── Other ────────────────────────────────────────────────────
-
-    #[actix_web::test]
-    async fn issuer_key_registry_roundtrip() {
-        let store = VpRequestStore::new();
-        assert!(store.resolve_issuer_key("did:goya:abc").is_none());
-        store.register_issuer_key("did:goya:abc", "deadbeef");
-        assert_eq!(
-            store.resolve_issuer_key("did:goya:abc"),
-            Some("deadbeef".to_string())
-        );
-    }
 
     #[actix_web::test]
     async fn e2e_create_request_with_response_mode() {
