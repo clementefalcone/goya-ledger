@@ -68,6 +68,12 @@ pub enum Message {
         latest_hash: String,
         p2p_address: Option<String>, // Dirección P2P del nodo que envía el mensaje
         network_id: Option<String>,  // Network ID para separar testnet/mainnet
+        #[serde(default)]
+        signer: String,
+        #[serde(default)]
+        signed_at: u64,
+        #[serde(default)]
+        signature: String,
     },
     // Mensajes de contratos
     GetContracts,
@@ -193,8 +199,6 @@ pub struct Node {
     pub seed_nodes: Vec<String>,
     // Peers fallidos con timestamp para retry
     pub failed_peers: Arc<Mutex<HashMap<String, (u64, u32)>>>, // (peer_address, (timestamp, attempt_count))
-    /// Si está definido, solo se aceptan conexiones entrantes cuya dirección remota esté en el conjunto (`PEER_ALLOWLIST`).
-    pub peer_allowlist: Option<Arc<HashSet<String>>>,
     pub tls_acceptor: Option<Arc<TlsAcceptor>>,
     pub tls_connector: Option<Arc<TlsConnector>>,
     /// Role of this node in the network (peer / orderer / both).
@@ -235,35 +239,68 @@ pub struct Node {
     pub announce_address: Option<String>,
 }
 
-/// Parsea `PEER_ALLOWLIST` (coma-separada, cada token `IP:puerto` o `[IPv6]:puerto`).
-/// Devuelve `None` si no hay ninguna dirección válida (lista deshabilitada o vacía tras parseo).
-pub fn parse_peer_allowlist(env_value: &str) -> Option<HashSet<String>> {
-    let mut set = HashSet::new();
-    for token in env_value.split(',') {
-        let t = token.trim();
-        if t.is_empty() {
-            continue;
-        }
-        match t.parse::<SocketAddr>() {
-            Ok(addr) => {
-                set.insert(addr.to_string());
-            }
-            Err(_) => {
-                eprintln!("⚠️  PEER_ALLOWLIST: entrada ignorada (no es dirección válida): {t:?}");
-            }
-        }
-    }
-    if set.is_empty() {
-        None
-    } else {
-        Some(set)
-    }
-}
-
 /// Number of random peers to forward a newly received block to (push-gossip fanout).
 const GOSSIP_FANOUT: usize = 3;
 
 const PEER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+const PEER_ANNOUNCEMENT_MAX_AGE_SECS: u64 = 300;
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn peer_announcement_message(network_id: &str, p2p_address: &str, signed_at: u64) -> String {
+    format!("p2p:version:{network_id}:{p2p_address}:{signed_at}")
+}
+
+fn version_message(
+    signer: Option<&dyn crate::identity::signing::SigningProvider>,
+    network_id: &str,
+    p2p_address: String,
+    chain_tip: (usize, String),
+) -> Message {
+    let signed_at = unix_now_secs();
+    let announcement = peer_announcement_message(network_id, &p2p_address, signed_at);
+    let (signer, signature) = signer
+        .and_then(|s| {
+            s.sign(announcement.as_bytes())
+                .ok()
+                .map(|sig| (hex::encode(s.public_key()), hex::encode(sig)))
+        })
+        .unwrap_or_default();
+    Message::Version {
+        version: "1.0.0".to_string(),
+        block_count: chain_tip.0,
+        latest_hash: chain_tip.1,
+        p2p_address: Some(p2p_address),
+        network_id: Some(network_id.to_string()),
+        signer,
+        signed_at,
+        signature,
+    }
+}
+
+fn is_admissible_announcement(
+    network_id: &str,
+    p2p_address: &str,
+    proof: (&str, u64, &str),
+    trusted_signers: &[String],
+) -> bool {
+    let (signer, signed_at, signature) = proof;
+    let is_routable = !p2p_address.is_empty() && !p2p_address.starts_with("0.0.0.0");
+    is_routable
+        && trusted_signers.iter().any(|key| key == signer)
+        && unix_now_secs().abs_diff(signed_at) <= PEER_ANNOUNCEMENT_MAX_AGE_SECS
+        && crate::identity::operations::is_signed_by(
+            signer,
+            &peer_announcement_message(network_id, p2p_address, signed_at),
+            signature,
+        )
+}
 
 /// Opens a TCP connection (optionally wrapped in TLS) without requiring a `Node` reference.
 async fn open_peer_stream(
@@ -375,14 +412,12 @@ impl Node {
         network_id: Option<String>,
         bootstrap_nodes: Option<Vec<String>>,
         seed_nodes: Option<Vec<String>>,
-        peer_allowlist: Option<Arc<HashSet<String>>>,
     ) -> Node {
         Node::with_role(
             address,
             network_id,
             bootstrap_nodes,
             seed_nodes,
-            peer_allowlist,
             NodeRole::from_env(),
         )
     }
@@ -392,7 +427,6 @@ impl Node {
         network_id: Option<String>,
         bootstrap_nodes: Option<Vec<String>>,
         seed_nodes: Option<Vec<String>>,
-        peer_allowlist: Option<Arc<HashSet<String>>>,
         role: NodeRole,
     ) -> Node {
         Node {
@@ -410,7 +444,6 @@ impl Node {
             bootstrap_nodes: bootstrap_nodes.unwrap_or_default(),
             seed_nodes: seed_nodes.unwrap_or_default(),
             failed_peers: Arc::new(Mutex::new(HashMap::new())),
-            peer_allowlist,
             tls_acceptor: None,
             tls_connector: None,
             role,
@@ -572,7 +605,6 @@ impl Node {
         let rate_limits = self.contract_rate_limits.clone();
         let pending_broadcasts = self.pending_contract_broadcasts.clone();
         let network_id = self.network_id.clone();
-        let peer_allowlist = self.peer_allowlist.clone();
         let tls_acceptor = self.tls_acceptor.clone();
         let role = self.role;
         let ordering_service = self.ordering_service.clone();
@@ -604,16 +636,6 @@ impl Node {
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
-                    let peer_key = peer_addr.to_string();
-                    if let Some(ref allowed) = peer_allowlist {
-                        if !allowed.contains(&peer_key) {
-                            eprintln!(
-                                "🚫 Conexión P2P rechazada (no está en PEER_ALLOWLIST): {peer_key}"
-                            );
-                            drop(stream);
-                            continue;
-                        }
-                    }
                     println!("📡 Nueva conexión desde: {peer_addr}");
                     let peers_clone = peers.clone();
                     let contract_manager_clone = contract_manager.clone();
@@ -830,6 +852,9 @@ impl Node {
                     if let Message::Version {
                         p2p_address,
                         network_id: their_network_id,
+                        signer,
+                        signed_at,
+                        signature,
                         ..
                     } = &message
                     {
@@ -846,21 +871,14 @@ impl Node {
                             }
                         }
 
-                        // Use the peer's declared address if it's routable (not 0.0.0.0).
-                        // Fall back to socket IP + declared port otherwise.
-                        {
-                            let declared = p2p_address.as_deref().unwrap_or("");
-                            let usable = if declared.starts_with("0.0.0.0") || declared.is_empty() {
-                                let port = declared.rsplit(':').next()
-                                    .and_then(|p| p.parse::<u16>().ok())
-                                    .unwrap_or(8081);
-                                format!("{}:{}", peer_addr.ip(), port)
-                            } else {
-                                declared.to_string()
-                            };
-                            let mut peers_guard = peers.lock().unwrap_or_else(|e| e.into_inner());
-                            peers_guard.insert(usable.clone());
-                            println!("📡 Peer agregado desde conexión entrante: {usable}");
+                        let declared = p2p_address.as_deref().unwrap_or("");
+                        let trusted = crate::ordering::trusted_block_signers(signing_provider.as_deref());
+                        let proof = (signer.as_str(), *signed_at, signature.as_str());
+                        if is_admissible_announcement(network_id.as_deref().unwrap_or(""), declared, proof, &trusted) {
+                            peers.lock().unwrap_or_else(|e| e.into_inner()).insert(declared.to_string());
+                            log::info!("P2P peer {declared} admitted: announcement signed by trusted key {}", &signer[..16.min(signer.len())]);
+                        } else {
+                            log::warn!("P2P announcement of {declared:?} from {peer_addr_str} not admitted: not signed by a trusted validator key");
                         }
                         first_message = false;
                     }
@@ -963,23 +981,9 @@ impl Node {
                 Ok(Some(Message::Peers(peer_list)))
             }
 
-            Message::Peers(peer_list) => {
-                let mut peers = peers.lock().unwrap_or_else(|e| e.into_inner());
-                for peer in peer_list {
-                    if !peer.is_empty()
-                        && !peer.starts_with("0.0.0.0")
-                        && my_p2p_address.as_deref() != Some(peer.as_str())
-                    {
-                        peers.insert(peer);
-                    }
-                }
-                Ok(None)
-            }
+            Message::Peers(_) => Ok(None),
 
             Message::Version {
-                block_count: their_count,
-                latest_hash: _their_hash,
-                p2p_address,
                 network_id: their_network_id,
                 ..
             } => {
@@ -993,16 +997,7 @@ impl Node {
                     }
                 }
 
-                // Si el peer envió su dirección P2P, agregarlo a nuestra lista
-                // (skip 0.0.0.0 / empty — same filter as handle_connection)
-                if let Some(ref addr) = p2p_address {
-                    if !addr.is_empty() && !addr.starts_with("0.0.0.0") {
-                        let mut peers_guard = peers.lock().unwrap_or_else(|e| e.into_inner());
-                        peers_guard.insert(addr.clone());
-                    }
-                }
-
-                let (my_count, my_hash) = if let Some(s) = &store {
+                let chain_tip = if let Some(s) = &store {
                     let h = s.get_latest_height().unwrap_or(0);
                     let hash = s
                         .read_block(h)
@@ -1014,15 +1009,12 @@ impl Node {
                     (0, String::new())
                 };
 
-                let _ = their_count;
-
-                Ok(Some(Message::Version {
-                    version: "1.0.0".to_string(),
-                    block_count: my_count,
-                    latest_hash: my_hash,
-                    p2p_address: my_p2p_address,
-                    network_id: network_id.clone(),
-                }))
+                Ok(Some(version_message(
+                    signing_provider.as_deref(),
+                    network_id.as_deref().unwrap_or(""),
+                    my_p2p_address.unwrap_or_default(),
+                    chain_tip,
+                )))
             }
 
             Message::Pong => Ok(None),
@@ -1667,114 +1659,84 @@ impl Node {
      * Conecta a un peer
      */
     pub async fn connect_to_peer(&self, address: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut stream = self.open_stream(address).await.map_err(|e| {
-            Box::new(std::io::Error::other(e.to_string())) as Box<dyn std::error::Error>
-        })?;
-
-        let version_msg = {
-            let (block_count, latest_hash) = if let Some(s) = &self.store {
-                let h = s.get_latest_height().unwrap_or(0);
-                let hash = s
-                    .read_block(h)
-                    .ok()
-                    .map(|b| hex::encode(b.parent_hash))
-                    .unwrap_or_default();
-                ((h + 1) as usize, hash)
-            } else {
-                (0, String::new())
-            };
-            let p2p_addr = self.p2p_address();
-            Message::Version {
-                version: "1.0.0".to_string(),
-                block_count,
-                latest_hash,
-                p2p_address: Some(p2p_addr),
-                network_id: Some(self.network_id.clone()),
-            }
+        let chain_tip = if let Some(s) = &self.store {
+            let h = s.get_latest_height().unwrap_or(0);
+            let hash = s
+                .read_block(h)
+                .ok()
+                .map(|b| hex::encode(b.parent_hash))
+                .unwrap_or_default();
+            ((h + 1) as usize, hash)
+        } else {
+            (0, String::new())
         };
-
-        let msg_json = serde_json::to_string(&version_msg)?;
-        stream.write_all(msg_json.as_bytes()).await?;
-
-        let mut buffer = vec![0u8; p2p_response_buffer_size()];
-        let n = match stream.read(&mut buffer).await {
-            Ok(0) => {
-                // Conexión cerrada sin respuesta - probablemente rechazada por el servidor
-                return Err(
-                    "Connection closed by peer (likely Network ID mismatch or rejection)".into(),
-                );
-            }
-            Ok(n) => n,
-            Err(e) => {
-                // Error al leer - conexión probablemente cerrada
+        let announcement = version_message(
+            self.signing_provider.as_deref(),
+            &self.network_id,
+            self.p2p_address(),
+            chain_tip,
+        );
+        let response = self
+            .send_and_wait(address, announcement, PEER_IO_TIMEOUT * 2)
+            .await
+            .map_err(|e| format!("handshake with {address} failed: {e}"))?;
+        let Message::Version {
+            block_count: their_count,
+            p2p_address,
+            network_id: their_network_id,
+            signer,
+            signed_at,
+            signature,
+            ..
+        } = response
+        else {
+            return Err(format!("peer {address} did not answer the handshake with Version").into());
+        };
+        if let Some(their_id) = their_network_id {
+            if their_id != self.network_id {
                 return Err(format!(
-                    "Error reading response from peer: {e} (connection may have been rejected)"
+                    "Network ID mismatch: expected '{}', got '{}'. Rejecting connection.",
+                    self.network_id, their_id
                 )
                 .into());
             }
-        };
-
-        let response_str = String::from_utf8_lossy(&buffer[..n]);
-
-        if let Ok(Message::Version {
-            block_count: their_count,
-            latest_hash: _their_hash,
-            p2p_address,
-            network_id: their_network_id,
-            ..
-        }) = serde_json::from_str(&response_str)
+        }
+        let declared = p2p_address.unwrap_or_default();
+        let trusted = crate::ordering::trusted_block_signers(self.signing_provider.as_deref());
+        let proof = (signer.as_str(), signed_at, signature.as_str());
+        if declared != address
+            || !is_admissible_announcement(&self.network_id, &declared, proof, &trusted)
         {
-            // Validar Network ID PRIMERO - rechazar conexión si no coincide (ANTES de agregar a peers)
-            if let Some(their_id) = their_network_id {
-                if their_id != self.network_id {
-                    return Err(format!(
-                        "Network ID mismatch: expected '{}', got '{}'. Rejecting connection.",
-                        self.network_id, their_id
-                    )
-                    .into());
-                }
-            } else {
-                // Si el peer no envía network_id, asumimos compatibilidad (backward compatibility)
-                println!("⚠️  Peer {address} no envió network_id, asumiendo compatibilidad");
+            return Err(format!(
+                "peer {address} did not prove a trusted validator key for that address (announced {declared:?})"
+            )
+            .into());
+        }
+        self.peers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(address.to_string());
+        println!("📡 Peer agregado en connect_to_peer: {address}");
+
+        let my_count = self
+            .store
+            .as_ref()
+            .and_then(|s| s.get_latest_height().ok())
+            .map(|h| (h + 1) as usize)
+            .unwrap_or(0);
+
+        if their_count > my_count {
+            println!(
+                "📥 Requesting state sync from {address} (them: {their_count}, us: {my_count})"
+            );
+            self.request_state_sync(address, my_count as u64).await?;
+        }
+
+        if self.contract_manager.is_some() {
+            println!("📋 Sincronizando contratos desde {address}...");
+            if let Err(e) = self.request_contracts(address).await {
+                eprintln!("⚠️  Error sincronizando contratos desde {address}: {e}");
             }
-
-            // Always use the address we connected to — the peer's declared
-            // address may be 0.0.0.0 (behind NAT/container).
-            let peer_p2p_addr = address.to_string();
-            let _ = p2p_address; // ignored — not reachable from outside
-
-            {
-                let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
-                peers.insert(peer_p2p_addr.clone());
-                println!("📡 Peer agregado en connect_to_peer: {peer_p2p_addr}");
-            }
-
-            let my_count = self
-                .store
-                .as_ref()
-                .and_then(|s| s.get_latest_height().ok())
-                .map(|h| (h + 1) as usize)
-                .unwrap_or(0);
-
-            // State sync via StateRequest if peer has more blocks
-            if their_count > my_count {
-                println!(
-                    "📥 Requesting state sync from {address} (them: {their_count}, us: {my_count})"
-                );
-                self.request_state_sync(address, my_count as u64).await?;
-            }
-
-            // Sincronizar contratos
-            if self.contract_manager.is_some() {
-                println!("📋 Sincronizando contratos desde {address}...");
-                if let Err(e) = self.request_contracts(address).await {
-                    eprintln!("⚠️  Error sincronizando contratos desde {address}: {e}");
-                }
-            }
-        } else {
-            // Si no recibimos Version válido, aún así agregar el peer
-            let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
-            peers.insert(address.to_string());
         }
 
         println!("✅ Conectado a peer: {address}");
@@ -2088,23 +2050,21 @@ impl Node {
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
 
-        // Agregar nuevos peers descubiertos a nuestra lista (sin conectar aún)
-        // Límite máximo de 200 peers para evitar crecimiento indefinido
         const MAX_PEERS: usize = 200;
         let mut new_peers_count = 0;
-        {
-            let mut peers_guard = self.peers.lock().unwrap_or_else(|e| e.into_inner());
-            let current_count = peers_guard.len();
-
-            for discovered_peer in discovered_peers {
-                if !peers_guard.contains(&discovered_peer) {
-                    // Si ya tenemos el máximo, no agregar más
-                    if current_count + new_peers_count >= MAX_PEERS {
-                        break;
-                    }
-                    peers_guard.insert(discovered_peer.clone());
-                    new_peers_count += 1;
-                }
+        for discovered_peer in discovered_peers {
+            let (is_known, is_full) = {
+                let peers_guard = self.peers.lock().unwrap_or_else(|e| e.into_inner());
+                (
+                    peers_guard.contains(&discovered_peer),
+                    peers_guard.len() >= MAX_PEERS,
+                )
+            };
+            if is_full {
+                break;
+            }
+            if !is_known && self.connect_to_peer(&discovered_peer).await.is_ok() {
+                new_peers_count += 1;
             }
         }
 
@@ -2789,25 +2749,6 @@ fn commit_incoming_block(
 }
 
 #[cfg(test)]
-mod peer_allowlist_tests {
-    use super::parse_peer_allowlist;
-
-    #[test]
-    fn parse_peer_allowlist_accepts_comma_separated_addrs() {
-        let s = "127.0.0.1:8081, 192.168.1.1:9090";
-        let set = parse_peer_allowlist(s).expect("valid");
-        assert!(set.contains("127.0.0.1:8081"));
-        assert!(set.contains("192.168.1.1:9090"));
-    }
-
-    #[test]
-    fn parse_peer_allowlist_empty_returns_none() {
-        assert!(parse_peer_allowlist("").is_none());
-        assert!(parse_peer_allowlist("   , , ").is_none());
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
@@ -2824,35 +2765,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_peer_allowlist_valid_addresses() {
-        let result = parse_peer_allowlist("127.0.0.1:8000,127.0.0.1:8001");
-        assert!(result.is_some());
-        let set = result.unwrap();
-        assert!(set.contains("127.0.0.1:8000"));
-        assert!(set.contains("127.0.0.1:8001"));
-    }
-
-    #[test]
-    fn parse_peer_allowlist_empty_returns_none() {
-        assert!(parse_peer_allowlist("").is_none());
-        assert!(parse_peer_allowlist("   ").is_none());
-    }
-
-    #[test]
-    fn parse_peer_allowlist_invalid_entries_skipped() {
-        let result = parse_peer_allowlist("127.0.0.1:8000,not-an-addr,127.0.0.1:8001");
-        let set = result.unwrap();
-        assert_eq!(set.len(), 2);
-    }
-
-    #[test]
     fn set_tls_acceptor_stores_acceptor() {
         use crate::tls::build_server_config;
         let cert = write_temp(TEST_CERT_PEM);
         let key = write_temp(TEST_KEY_PEM);
         let server_config = build_server_config(cert.path(), key.path()).unwrap();
         let acceptor = TlsAcceptor::from(Arc::new(server_config));
-        let mut node = Node::new("127.0.0.1:9999".parse().unwrap(), None, None, None, None);
+        let mut node = Node::new("127.0.0.1:9999".parse().unwrap(), None, None, None);
         node.set_tls_acceptor(acceptor);
         assert!(node.tls_acceptor.is_some());
     }
@@ -2871,7 +2790,7 @@ mod tests {
 
     fn make_node(role: NodeRole) -> Node {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        Node::with_role(addr, None, None, None, None, role)
+        Node::with_role(addr, None, None, None, role)
     }
 
     #[test]
@@ -3083,6 +3002,199 @@ mod tests {
         Arc::new(crate::identity::signing::SoftwareSigningProvider::generate())
     }
 
+    fn validator_key() -> Arc<dyn crate::identity::signing::SigningProvider> {
+        Arc::new(crate::identity::signing::MlDsaSigningProvider::generate())
+    }
+
+    fn announcement_proof(message: &Message) -> (String, String, u64, String) {
+        let Message::Version {
+            p2p_address,
+            signer,
+            signed_at,
+            signature,
+            ..
+        } = message
+        else {
+            panic!("expected Version, got {message:?}");
+        };
+        (
+            p2p_address.clone().unwrap_or_default(),
+            signer.clone(),
+            *signed_at,
+            signature.clone(),
+        )
+    }
+
+    #[test]
+    fn announcement_is_admissible_only_from_a_trusted_key_for_the_signed_address() {
+        let validator = validator_key();
+        let trusted = vec![hex::encode(validator.public_key())];
+        let signed = version_message(
+            Some(validator.as_ref()),
+            "goya-testnet",
+            "10.0.0.7:8081".into(),
+            (1, String::new()),
+        );
+        let (address, signer, signed_at, signature) = announcement_proof(&signed);
+        let proof = (signer.as_str(), signed_at, signature.as_str());
+        let stale_at = unix_now_secs() - PEER_ANNOUNCEMENT_MAX_AGE_SECS - 60;
+        let stale_signature = hex::encode(
+            validator
+                .sign(peer_announcement_message("goya-testnet", &address, stale_at).as_bytes())
+                .unwrap(),
+        );
+        let unsigned = version_message(None, "goya-testnet", address.clone(), (1, String::new()));
+        let (_, no_signer, unsigned_at, no_signature) = announcement_proof(&unsigned);
+
+        assert!(is_admissible_announcement(
+            "goya-testnet",
+            &address,
+            proof,
+            &trusted
+        ));
+        assert!(!is_admissible_announcement(
+            "goya-testnet",
+            "10.6.6.6:8081",
+            proof,
+            &trusted
+        ));
+        assert!(!is_admissible_announcement(
+            "mainnet", &address, proof, &trusted
+        ));
+        assert!(!is_admissible_announcement(
+            "goya-testnet",
+            &address,
+            proof,
+            &[hex::encode(validator_key().public_key())]
+        ));
+        assert!(!is_admissible_announcement(
+            "goya-testnet",
+            &address,
+            (signer.as_str(), stale_at, stale_signature.as_str()),
+            &trusted
+        ));
+        assert!(!is_admissible_announcement(
+            "goya-testnet",
+            &address,
+            (no_signer.as_str(), unsigned_at, no_signature.as_str()),
+            &trusted
+        ));
+    }
+
+    async fn spawn_p2p_server(
+        signer: Arc<dyn crate::identity::signing::SigningProvider>,
+    ) -> (
+        u16,
+        Arc<Mutex<HashSet<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut node = Node::new(
+            format!("127.0.0.1:{port}").parse().unwrap(),
+            Some("goya-testnet".into()),
+            None,
+            None,
+        );
+        node.signing_provider = Some(signer);
+        let peers = node.peers.clone();
+        let server = tokio::spawn(async move {
+            let _ = node.start_server(port).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        (port, peers, server)
+    }
+
+    async fn announce(port: u16, message: &Message) {
+        use tokio::io::AsyncWriteExt;
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(&serde_json::to_vec(message).unwrap())
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    #[tokio::test]
+    async fn inbound_announcement_enters_the_peer_list_only_with_a_trusted_signature() {
+        let validator = validator_key();
+        let (port, peers, server) = spawn_p2p_server(validator.clone()).await;
+
+        announce(
+            port,
+            &version_message(
+                None,
+                "goya-testnet",
+                "10.1.1.1:8081".into(),
+                (0, String::new()),
+            ),
+        )
+        .await;
+        announce(
+            port,
+            &version_message(
+                Some(validator_key().as_ref()),
+                "goya-testnet",
+                "10.2.2.2:8081".into(),
+                (0, String::new()),
+            ),
+        )
+        .await;
+        announce(
+            port,
+            &version_message(
+                Some(validator.as_ref()),
+                "goya-testnet",
+                "10.3.3.3:8081".into(),
+                (0, String::new()),
+            ),
+        )
+        .await;
+        let admitted = peers.lock().unwrap().clone();
+        server.abort();
+
+        assert_eq!(admitted, HashSet::from(["10.3.3.3:8081".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn outbound_handshake_admits_only_a_peer_that_proves_a_trusted_key() {
+        let validator = validator_key();
+        let (trusted_port, _, trusted_server) = spawn_p2p_server(validator.clone()).await;
+        let (stranger_port, _, stranger_server) = spawn_p2p_server(validator_key()).await;
+        let mut dialer = Node::new(
+            "127.0.0.1:0".parse().unwrap(),
+            Some("goya-testnet".into()),
+            None,
+            None,
+        );
+        dialer.signing_provider = Some(validator);
+
+        let to_trusted = dialer
+            .connect_to_peer(&format!("127.0.0.1:{trusted_port}"))
+            .await;
+        let to_stranger = dialer
+            .connect_to_peer(&format!("127.0.0.1:{stranger_port}"))
+            .await;
+        trusted_server.abort();
+        stranger_server.abort();
+
+        assert!(
+            to_trusted.is_ok(),
+            "{:?}",
+            to_trusted.err().map(|e| e.to_string())
+        );
+        assert!(to_stranger.is_err());
+        assert_eq!(
+            *dialer.peers.lock().unwrap(),
+            HashSet::from([format!("127.0.0.1:{trusted_port}")])
+        );
+    }
+
     #[tokio::test]
     async fn message_split_across_many_reads_is_delivered_without_banning_the_sender() {
         use tokio::io::AsyncWriteExt;
@@ -3092,7 +3204,7 @@ mod tests {
             .unwrap()
             .port();
         let (bft_tx, mut bft_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None, None);
+        let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
         node.bft_tx = Some(bft_tx);
         let server = tokio::spawn(async move {
             let _ = node.start_server(port).await;
@@ -3132,7 +3244,7 @@ mod tests {
             blocks: vec![block_signed_by(trusted_provider()); 1000],
         };
         let payload_len = serde_json::to_vec(&message).unwrap().len();
-        let node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None, None);
+        let node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
         let mut stalled_listeners = Vec::new();
         for _ in 0..2 {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3190,7 +3302,7 @@ mod tests {
         });
         let store: Arc<dyn crate::storage::traits::BlockStore> =
             Arc::new(crate::storage::MemoryStore::new());
-        let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None, None);
+        let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
         node.store = Some(store.clone());
         node.signing_provider = Some(signer);
         node.peers.lock().unwrap().insert(peer);

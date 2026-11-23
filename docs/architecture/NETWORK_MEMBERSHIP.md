@@ -1,21 +1,25 @@
 # Membresía de red P2P
 
-**Regla:** En producción solo son miembros de confianza los nodos cuya dirección P2P (`IP:puerto`) está **explícitamente incluida** en la lista autorizada del despliegue; el resto no se considera parte de la red hasta que un operador la añada.
+**Regla:** un nodo entra a la lista de peers solo si prueba, con una firma de su llave de validador, que controla la dirección que anuncia.
 
-**Lista inicial de ejemplo (sustituir por la real):**
+## Anuncios firmados
 
-- `127.0.0.1:8081` (solo desarrollo local)
-- *(añadir aquí cada peer de staging/producción)*
+El mensaje `Version` lleva `signer` (llave pública en hex), `signed_at` (segundos UNIX) y `signature`. La firma cubre el mensaje `p2p:version:{network_id}:{p2p_address}:{signed_at}`. Un nodo admite la dirección anunciada solo si se cumplen las cuatro condiciones:
 
-## Implementación
+1. La llave está en `TRUSTED_BLOCK_SIGNERS`, o es la del propio nodo.
+2. La firma es válida para ese `network_id` y esa dirección.
+3. `signed_at` difiere menos de 300 s del reloj local.
+4. La dirección es enrutable, es decir, no vacía y distinta de `0.0.0.0`.
 
-Variable de entorno **`PEER_ALLOWLIST`**: lista separada por comas de direcciones `IP:puerto` (IPv6 entre corchetes, p. ej. `[::1]:8081`). Si está **definida** y contiene al menos una dirección válida, el servidor P2P **solo acepta conexiones entrantes** cuya dirección remota coincida con una de la lista. Si no está definida o no hay entradas válidas, el comportamiento es el de siempre (sin filtro en aceptación).
+Por cada vía de entrada a la lista:
 
-Ejemplo:
+- **Conexión entrante:** se admite la dirección declarada en el `Version`.
+- **Conexión saliente (`connect_to_peer`):** además, la dirección declarada por el peer debe ser exactamente la que se marcó.
+- **`Peers` y descubrimiento:** las listas que reportan otros nodos ya no se insertan. Se intenta conectar a cada dirección y solo entra la que supere el handshake firmado.
 
-```bash
-export PEER_ALLOWLIST="127.0.0.1:8081,10.0.0.5:8081"
-```
+Un nodo sin `TRUSTED_BLOCK_SIGNERS` no admite a nadie más. Un `Version` sin firma o de una llave desconocida igual puede pedir bloques y enviar mensajes firmados, pero no entra a la lista de peers.
+
+Cada validador debe definir `P2P_EXTERNAL_ADDRESS` con la dirección por la que los demás lo marcan.
 
 ## Certificate Pinning TLS
 

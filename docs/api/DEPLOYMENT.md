@@ -86,7 +86,7 @@ docker compose up -d
 - [ ] Replace self-signed TLS certificates with CA-issued ones
 - [ ] Set `JWT_SECRET` to a strong random value
 - [ ] Set `ACL_MODE` to strict (default) — never run permissive in production
-- [ ] Review `PEER_ALLOWLIST` to restrict inbound P2P connections
+- [ ] List every validator's public key in `TRUSTED_BLOCK_SIGNERS`; only signed announcements from those keys join the peer list (see `docs/architecture/NETWORK_MEMBERSHIP.md`)
 - [ ] Enable `TLS_PINNED_CERTS` for certificate pinning
 - [ ] Rotate TLS certificates via SIGHUP or `TLS_RELOAD_INTERVAL`
 

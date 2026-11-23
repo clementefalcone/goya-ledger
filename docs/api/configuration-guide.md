@@ -53,9 +53,9 @@ All configuration is via environment variables. No config files needed.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `P2P_EXTERNAL_ADDRESS` | — | Announce address (e.g. `node1:8081`) |
+| `TRUSTED_BLOCK_SIGNERS` | — | Comma-separated hex public keys of the other validators. They sign blocks and the peer announcements that admit a node to the peer list |
 | `BOOTSTRAP_NODES` | — | Comma-separated `host:port` for initial peers |
 | `SEED_NODES` | — | Always-tried peer list |
-| `PEER_ALLOWLIST` | — | Comma-separated allowed peer addresses |
 | `ANCHOR_PEERS` | — | Cross-org gossip anchors |
 
 ## Staking

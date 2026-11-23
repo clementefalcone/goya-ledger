@@ -75,7 +75,7 @@ use billing::BillingManager;
 use cache::BalanceCache;
 use metrics::MetricsCollector;
 use middleware::RateLimitMiddleware;
-use network::{parse_peer_allowlist, Node};
+use network::Node;
 use rust_bc::light_client::mode::NodeMode;
 use staking::StakingManager;
 use std::env;
@@ -190,12 +190,6 @@ async fn async_main_inner() -> std::io::Result<()> {
             .collect()
     };
 
-    let peer_allowlist = env::var("PEER_ALLOWLIST")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .and_then(|s| parse_peer_allowlist(&s))
-        .map(Arc::new);
-
     // Auto-discovery: intervalo en segundos (default: 120 = 2 minutos)
     let auto_discovery_interval = env::var("AUTO_DISCOVERY_INTERVAL")
         .ok()
@@ -226,12 +220,6 @@ async fn async_main_inner() -> std::io::Result<()> {
     }
     if !seed_nodes.is_empty() {
         println!("🌱 Seed nodes: {}", seed_nodes.join(", "));
-    }
-    if let Some(ref allow) = peer_allowlist {
-        println!(
-            "🔒 PEER_ALLOWLIST activo ({} dirección/es P2P entrantes permitidas)",
-            allow.len()
-        );
     }
     println!(
         "🔍 Auto-discovery: intervalo {auto_discovery_interval}s, max conexiones {auto_discovery_max_connections}, delay inicial {auto_discovery_initial_delay}s"
@@ -284,7 +272,6 @@ async fn async_main_inner() -> std::io::Result<()> {
         Some(network_id.clone()),
         Some(bootstrap_nodes.clone()),
         Some(seed_nodes.clone()),
-        peer_allowlist.clone(),
     );
     node_arc.set_contract_manager(contract_manager.clone());
     if let Some(ref checkpoint_mgr) = checkpoint_manager {
@@ -324,7 +311,6 @@ async fn async_main_inner() -> std::io::Result<()> {
         Some(network_id.clone()),
         Some(bootstrap_nodes.clone()),
         Some(seed_nodes.clone()),
-        peer_allowlist.clone(),
     );
     node_for_server.set_contract_manager(contract_manager.clone());
     if let Some(ref checkpoint_mgr) = checkpoint_manager {
