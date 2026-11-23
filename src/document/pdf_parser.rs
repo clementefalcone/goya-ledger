@@ -131,6 +131,20 @@ mod tests {
     }
 
     #[test]
+    fn deeply_nested_pdf_does_not_abort_the_process() {
+        let depth = 100_000;
+        let nested = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        let header = "%PDF-1.7\n";
+        let object = format!("1 0 obj\n<< /Type /Catalog /Nested {nested} >>\nendobj\n");
+        let xref_offset = header.len() + object.len();
+        let pdf = format!(
+            "{header}{object}xref\n0 2\n0000000000 65535 f \n{:010} 00000 n \ntrailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            header.len()
+        );
+        let _ = fingerprint_pdf(pdf.as_bytes());
+    }
+
+    #[test]
     fn normalize_text_collapses_whitespace() {
         assert_eq!(normalize_text("  Hello   World  "), "hello world");
     }
