@@ -814,8 +814,16 @@ impl Node {
 
             // Accumulate chunks until we have a complete JSON message.
             accum.extend_from_slice(&buffer[..n]);
-            let message_str = String::from_utf8_lossy(&accum);
-            if let Ok(message) = serde_json::from_str::<Message>(&message_str) {
+            let parsed = serde_json::from_slice::<Message>(&accum);
+            if parsed.as_ref().is_err_and(|e| e.is_eof()) {
+                let sec = net_security.lock().unwrap_or_else(|e| e.into_inner());
+                if let Err(e) = sec.validate_message_size(accum.len()) {
+                    log::warn!("P2P message from {peer_addr_str} dropped: {e}");
+                    break;
+                }
+                continue;
+            }
+            if let Ok(message) = parsed {
             accum.clear();
                 // Si es el primer mensaje y es Version, validar network_id y responder
                 if first_message {
@@ -3073,6 +3081,48 @@ mod tests {
 
     fn trusted_provider() -> Arc<dyn crate::identity::signing::SigningProvider> {
         Arc::new(crate::identity::signing::SoftwareSigningProvider::generate())
+    }
+
+    #[tokio::test]
+    async fn message_split_across_many_reads_is_delivered_without_banning_the_sender() {
+        use tokio::io::AsyncWriteExt;
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None, None);
+        node.bft_tx = Some(bft_tx);
+        let server = tokio::spawn(async move {
+            let _ = node.start_server(port).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let vote = Message::BftVote(crate::consensus::bft::types::VoteMessage {
+            block_hash: [3u8; 32],
+            round: 9,
+            phase: crate::consensus::bft::types::BftPhase::Prepare,
+            voter_id: "v2".into(),
+            signature: vec![7u8; 3309],
+        });
+        let payload = serde_json::to_vec(&vote).unwrap();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream.set_nodelay(true).unwrap();
+        for chunk in payload.chunks(payload.len() / 60 + 1) {
+            stream.write_all(chunk).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        }
+
+        let delivered =
+            tokio::time::timeout(std::time::Duration::from_secs(3), bft_rx.recv()).await;
+        server.abort();
+
+        assert!(matches!(
+            delivered,
+            Ok(Some(crate::consensus::controller::BftEvent::Vote(ref v))) if v.round == 9
+        ));
     }
 
     #[tokio::test]
