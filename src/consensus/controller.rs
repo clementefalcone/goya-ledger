@@ -145,6 +145,7 @@ pub async fn run_bft_loop(
                             }
                         }
                         early_votes.clear();
+                        decided = decided || replay_ready_votes(&node, &signer, &node_id, &mut manager).await;
                         if decided {
                             if let Some(blk) = pending_block.take() {
                                 commit_block(blk, &manager, &store, &node, &tx_pool).await;
@@ -162,7 +163,9 @@ pub async fn run_bft_loop(
                             continue;
                         }
                         let action = manager.process_event(RoundEvent::Vote(vote));
-                        if handle_action(&action, &node, &signer, &node_id, &mut manager).await {
+                        let decided = handle_action(&action, &node, &signer, &node_id, &mut manager).await
+                            || replay_ready_votes(&node, &signer, &node_id, &mut manager).await;
+                        if decided {
                             if let Some(blk) = pending_block.take() {
                                 commit_block(blk, &manager, &store, &node, &tx_pool).await;
                             }
@@ -423,6 +426,26 @@ fn reset_timeout(
     timeout
         .as_mut()
         .reset(tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms));
+}
+
+async fn replay_ready_votes(
+    node: &Arc<Node>,
+    signer: &Arc<dyn SigningProvider>,
+    node_id: &str,
+    manager: &mut RoundManager<RegistryVerifier>,
+) -> bool {
+    loop {
+        let ready = manager.take_ready_votes();
+        if ready.is_empty() {
+            return false;
+        }
+        for vote in ready {
+            let action = manager.process_event(RoundEvent::Vote(vote));
+            if handle_action(&action, node, signer, node_id, manager).await {
+                return true;
+            }
+        }
+    }
 }
 
 async fn handle_action(

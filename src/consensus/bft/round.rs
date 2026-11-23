@@ -96,8 +96,15 @@ pub struct BftRound<V: SignatureVerifier> {
     prepare_collector: Option<VoteCollector<V>>,
     precommit_collector: Option<VoteCollector<V>>,
     commit_collector: Option<VoteCollector<V>>,
+    deferred_votes: Vec<VoteMessage>,
     validators: Vec<String>,
     verifier: V,
+}
+
+const VOTING_PHASES: [BftPhase; 3] = [BftPhase::Prepare, BftPhase::PreCommit, BftPhase::Commit];
+
+fn phase_position(phase: BftPhase) -> Option<usize> {
+    VOTING_PHASES.iter().position(|p| *p == phase)
 }
 
 impl<V: SignatureVerifier + Clone> BftRound<V> {
@@ -127,6 +134,7 @@ impl<V: SignatureVerifier + Clone> BftRound<V> {
             prepare_collector: None,
             precommit_collector: None,
             commit_collector: None,
+            deferred_votes: Vec::new(),
             validators,
             verifier,
         }
@@ -211,17 +219,45 @@ impl<V: SignatureVerifier + Clone> BftRound<V> {
     }
 
     fn handle_vote(&mut self, vote: VoteMessage) -> RoundAction {
-        let bh = match self.block_hash {
-            Some(h) => h,
-            None => return RoundAction::None,
+        let (Some(bh), Some(current)) = (self.block_hash, self.collecting_phase()) else {
+            return RoundAction::None;
         };
-
-        match self.state {
-            RoundState::Preparing => self.on_vote(BftPhase::Prepare, vote, bh),
-            RoundState::PreCommitting => self.on_vote(BftPhase::PreCommit, vote, bh),
-            RoundState::Committing => self.on_vote(BftPhase::Commit, vote, bh),
-            _ => RoundAction::None,
+        if phase_position(vote.phase) > phase_position(current) {
+            self.defer_vote(vote);
+            return RoundAction::None;
         }
+        self.on_vote(current, vote, bh)
+    }
+
+    fn collecting_phase(&self) -> Option<BftPhase> {
+        match self.state {
+            RoundState::Preparing => Some(BftPhase::Prepare),
+            RoundState::PreCommitting => Some(BftPhase::PreCommit),
+            RoundState::Committing => Some(BftPhase::Commit),
+            _ => None,
+        }
+    }
+
+    fn defer_vote(&mut self, vote: VoteMessage) {
+        let is_known_voter = self.validators.contains(&vote.voter_id);
+        let is_duplicate = self
+            .deferred_votes
+            .iter()
+            .any(|d| d.phase == vote.phase && d.voter_id == vote.voter_id);
+        if vote.round == self.round && is_known_voter && !is_duplicate {
+            self.deferred_votes.push(vote);
+        }
+    }
+
+    pub fn take_ready_votes(&mut self) -> Vec<VoteMessage> {
+        let Some(current) = self.collecting_phase() else {
+            return Vec::new();
+        };
+        let (ready, later) = std::mem::take(&mut self.deferred_votes)
+            .into_iter()
+            .partition(|vote| vote.phase == current);
+        self.deferred_votes = later;
+        ready
     }
 
     fn on_vote(&mut self, phase: BftPhase, vote: VoteMessage, bh: [u8; 32]) -> RoundAction {
@@ -609,6 +645,81 @@ mod tests {
             "v0",
         )));
         assert_eq!(action, RoundAction::None);
+    }
+
+    #[test]
+    fn votes_for_a_later_phase_count_once_the_round_reaches_it() {
+        let mut r = follower_round(0, "v1", "v0");
+        r.process(RoundEvent::Proposal {
+            block_hash: block_hash(1),
+            leader_id: "v0".into(),
+            justify_qc: None,
+        });
+        for voter in ["v2", "v3"] {
+            r.process(RoundEvent::Vote(make_test_vote(
+                BftPhase::PreCommit,
+                1,
+                0,
+                voter,
+            )));
+        }
+        for voter in ["v0", "v1", "v2"] {
+            r.process(RoundEvent::Vote(make_test_vote(
+                BftPhase::Prepare,
+                1,
+                0,
+                voter,
+            )));
+        }
+        assert_eq!(r.state(), RoundState::PreCommitting);
+
+        r.process(RoundEvent::Vote(make_test_vote(
+            BftPhase::PreCommit,
+            1,
+            0,
+            "v1",
+        )));
+        let ready = r.take_ready_votes();
+        assert_eq!(ready.len(), 2);
+        let actions: Vec<RoundAction> = ready
+            .into_iter()
+            .map(|vote| r.process(RoundEvent::Vote(vote)))
+            .collect();
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            RoundAction::PhaseComplete {
+                phase: BftPhase::PreCommit,
+                ..
+            }
+        )));
+        assert_eq!(r.state(), RoundState::Committing);
+    }
+
+    #[test]
+    fn deferred_votes_reject_strangers_other_rounds_and_duplicates() {
+        let mut r = follower_round(0, "v1", "v0");
+        r.process(RoundEvent::Proposal {
+            block_hash: block_hash(1),
+            leader_id: "v0".into(),
+            justify_qc: None,
+        });
+        for vote in [
+            make_test_vote(BftPhase::PreCommit, 1, 0, "mallory"),
+            make_test_vote(BftPhase::PreCommit, 1, 7, "v2"),
+            make_test_vote(BftPhase::PreCommit, 1, 0, "v2"),
+            make_test_vote(BftPhase::PreCommit, 1, 0, "v2"),
+        ] {
+            r.process(RoundEvent::Vote(vote));
+        }
+        for voter in ["v0", "v1", "v2"] {
+            r.process(RoundEvent::Vote(make_test_vote(
+                BftPhase::Prepare,
+                1,
+                0,
+                voter,
+            )));
+        }
+        assert_eq!(r.take_ready_votes().len(), 1);
     }
 
     #[test]

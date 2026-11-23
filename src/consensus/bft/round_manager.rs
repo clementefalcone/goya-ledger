@@ -11,6 +11,7 @@ use super::round::{BftRound, RoundAction, RoundEvent, RoundState};
 use super::safety::{AlwaysExtends, AncestryChecker, SafetyState};
 use super::types::{
     timeout_signing_payload, BftPhase, QcError, QuorumCertificate, TimeoutMessage, TimeoutVote,
+    VoteMessage,
 };
 use std::collections::HashMap;
 
@@ -114,6 +115,13 @@ impl<V: SignatureVerifier + Clone> RoundManager<V> {
     /// Current round number.
     pub fn current_round(&self) -> u64 {
         self.current_round
+    }
+
+    pub fn take_ready_votes(&mut self) -> Vec<VoteMessage> {
+        self.current
+            .as_mut()
+            .map(|round| round.take_ready_votes())
+            .unwrap_or_default()
     }
 
     /// The leader for a given round (round-robin over validators).
