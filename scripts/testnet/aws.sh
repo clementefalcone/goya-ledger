@@ -197,7 +197,7 @@ deploy() {
 remote_build() {
   local arch=$1 region=us-east-1 type=c7g.2xlarge ami builder ip host toolchain gate=true result
   [ "$arch" = amd64 ] && type=c7i.2xlarge
-  [ "${REMOTE_GATE:-0}" = 1 ] && gate="cargo fmt --check && cargo clippy -- -D warnings && cargo test --lib"
+  [ "${REMOTE_GATE:-0}" = 1 ] && gate="cargo fmt --check && cargo clippy -- -D warnings && cargo test --lib && cargo test --test bft_e2e --test bft_mldsa65_e2e"
   toolchain=$(grep '^channel' rust-toolchain.toml | cut -d'"' -f2)
   prepare_region "$region"
   allow "$region" 22 "$(my_ip)"
