@@ -57,7 +57,7 @@ metrics = "0.21"
 metrics-exporter-prometheus = "0.12"
 actix-ws = "0.3"
 cryptoki = { version = "0.7", optional = true }
-pqcrypto-mldsa = "0.1.2"
+pqcrypto-mldsa = { version = "0.1.2", default-features = false, features = ["std", "neon"] }
 pqcrypto-traits = "0.3"
 argon2 = "0.5"
 zeroize = { version = "1.7", features = ["derive"] }
