@@ -86,6 +86,36 @@ Grover's algorithm halves the exponent of brute-force search. The target is ≥1
 | 32-byte disclosure salts (16 before 2026-11-22) | SD-JWT `generate_salt`, mdoc `random` | 256 | 128 | ok; credentials issued with 16-byte salts keep 64 quantum bits |
 | 4–6 digit PIN, Argon2id | `src/pin` | ≤20 | ≤10 | brute-forceable classically; only rate limiting protects it |
 
+## 5. Multi-region testnet (2026-11-23)
+
+Seven validators, four ARM and three x86, in sa-east-1, us-east-1 and eu-central-1 (`scripts/testnet/aws.sh`).
+
+| Lab | Result |
+|---|---|
+| Downgrade and algorithm confusion | 10/10 held, control accepted |
+| Signature and identity attacks, including a replay to another continent | 9/9 held |
+| Harvest now, forge later (simulated Shor) | held |
+| Malformed inputs | rejected with 4xx, node alive. The harness logged `None` for the 10 MB body because the server answered 400 before the upload finished |
+
+Exercising the network surfaced five defects that a single host never showed.
+
+| Defect | Fix |
+|---|---|
+| pqcrypto NEON code issues SHA3 `eor3`, so the node gets SIGILL on Graviton2 | 829d2a7 |
+| A vote for a later phase was dropped, so 5 of 7 validators stalled | 3eb01de |
+| Broadcast connected serially with no timeout, so one silent peer stalled consensus | 6956ab6, 6117421 |
+| A forged early vote could take a validator's slot | 1bff857 |
+| Each partial read counted as an invalid message, so honest validators were banned mid-proposal, and the 10 MB limit applied per read | 026f928 |
+
+With the fixes:
+
+- 5 of 7 validators keep deciding blocks; 4 of 7 halt without forking.
+- A 5/2 partition leaves the minority on an exact prefix of the majority's chain, and the network converges within 30 s of healing.
+- About 160 injected fake peers per node leave commit latency at 3–4 s.
+- Messages above 10 MB are dropped at the limit.
+
+**Open:** any P2P connection can announce an arbitrary peer address. Peers should authenticate with their validator key.
+
 ## Accepted risks (2026-11-23)
 
 - **Wallet-address DIDs keep 160 bits.** A Grover second preimage still needs 2^80 sequential quantum
