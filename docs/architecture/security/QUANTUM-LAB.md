@@ -83,13 +83,12 @@ Grover's algorithm halves the exponent of brute-force search. The target is ≥1
 | SHA-256 | anchors, `_sd` digests, commitments | 256 preimage | 128 preimage, ~85 collision | ok (BHT needs impractical memory) |
 | HMAC-SHA-256, 32-byte secrets | checkpoints, pairwise ids | 256 | 128 | ok |
 | SHA-256 truncated to 160 bits | wallet-address DIDs (`wallet_address_of`) | 160 second preimage | **80** | below target |
-| 16-byte disclosure salts | SD-JWT `generate_salt`, mdoc `random` | 128 | **64** | below target: undisclosed claims can be un-blinded once harvested |
+| 32-byte disclosure salts (16 before 2026-11-22) | SD-JWT `generate_salt`, mdoc `random` | 256 | 128 | ok; credentials issued with 16-byte salts keep 64 quantum bits |
 | 4–6 digit PIN, Argon2id | `src/pin` | ≤20 | ≤10 | brute-forceable classically; only rate limiting protects it |
 
 ## Open items
 
-1. Salts 16 → 32 bytes (SD-JWT and mdoc). Small change, compatible with verifiers.
-2. Wallet-address DIDs: 160-bit truncation. A format change, needs a decision.
-3. PQ TLS on the VPS: OpenSSL ≥ 3.5 or a proxy with X25519MLKEM768, plus TLS or a firewall on P2P 8081.
-4. Holder proofs and issuer credential keys stay classical while EUDI wallets require ES256.
-5. Node certificates are ECDSA-P256.
+1. Wallet-address DIDs: 160-bit truncation. A format change, needs a decision.
+2. PQ TLS on the VPS: OpenSSL ≥ 3.5 or a proxy with X25519MLKEM768, plus TLS or a firewall on P2P 8081.
+3. Holder proofs and issuer credential keys stay classical while EUDI wallets require ES256.
+4. Node certificates are ECDSA-P256.

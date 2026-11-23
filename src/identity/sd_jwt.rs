@@ -97,7 +97,7 @@ fn make_disclosure(salt: &str, name: &str, value: &serde_json::Value) -> Disclos
 fn generate_salt() -> String {
     use pqc_crypto_module::legacy::rng::OsRng;
     use rand_core::RngCore;
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 32];
     OsRng.fill_bytes(&mut buf);
     base64url_encode(&buf)
 }
@@ -699,6 +699,18 @@ mod tests {
             ],
             cnf: None,
             status: None,
+        }
+    }
+
+    #[test]
+    fn disclosure_salts_keep_128_bits_against_grover() {
+        let provider = SoftwareSigningProvider::generate();
+        let sd_jwt = issue_sd_jwt_vc(&test_claims(), &provider).unwrap();
+        for disclosure in &sd_jwt.disclosures {
+            let decoded: serde_json::Value =
+                serde_json::from_slice(&base64url_decode(disclosure).unwrap()).unwrap();
+            let salt = base64url_decode(decoded[0].as_str().unwrap()).unwrap();
+            assert_eq!(salt.len(), 32);
         }
     }
 

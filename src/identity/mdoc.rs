@@ -30,7 +30,7 @@ pub struct Mdoc {
 pub struct IssuerSignedItem {
     /// Digest ID (unique within namespace).
     pub digest_id: u32,
-    /// Random salt (hex, 16 bytes).
+    /// Random salt (hex, 32 bytes).
     pub random: String,
     /// Element identifier (e.g. "given_name", "birth_date").
     pub element_identifier: String,
@@ -156,7 +156,7 @@ pub fn verify_device_auth(
 fn generate_random() -> String {
     use pqc_crypto_module::legacy::rng::OsRng;
     use rand_core::RngCore;
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 32];
     OsRng.fill_bytes(&mut buf);
     hex::encode(buf)
 }
@@ -368,6 +368,15 @@ mod tests {
             valid_from: 1_700_000_000,
             valid_until: 2_000_000_000,
             device_key: Some("abcd1234".to_string()),
+        }
+    }
+
+    #[test]
+    fn element_salts_keep_128_bits_against_grover() {
+        let provider = SoftwareSigningProvider::generate();
+        let mdoc = issue_mdoc(&pid_params(), &provider).unwrap();
+        for item in mdoc.name_spaces.values().flatten() {
+            assert_eq!(hex::decode(&item.random).unwrap().len(), 32);
         }
     }
 
