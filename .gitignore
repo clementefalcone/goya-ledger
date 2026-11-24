@@ -60,6 +60,7 @@ blockchain_snapshots/
 
 # RocksDB / runtime data
 data/
+!crates/pqc_crypto_module/tests/data/
 
 # Claude Code project memory
 memory/
