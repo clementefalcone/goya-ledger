@@ -1406,6 +1406,12 @@ impl Node {
             }
 
             Message::StateRequest { from_height } => {
+                if !is_admitted_source(peers, source_peer.as_deref()) {
+                    log::warn!(
+                        "P2P state request from {source_peer:?} ignored: not an admitted validator"
+                    );
+                    return Ok(None);
+                }
                 // Respond with blocks starting at from_height, up to STATE_BATCH_SIZE.
                 if let Some(ref blk_store) = store {
                     let latest = blk_store.get_latest_height().unwrap_or(0);
@@ -2745,6 +2751,17 @@ impl Node {
     }
 }
 
+fn is_admitted_source(peers: &Mutex<HashSet<String>>, source_peer: Option<&str>) -> bool {
+    let Some((source_ip, _)) = source_peer.and_then(|address| address.rsplit_once(':')) else {
+        return false;
+    };
+    peers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|peer| peer.rsplit_once(':').is_some_and(|(ip, _)| ip == source_ip))
+}
+
 fn validate_bft_proposal(
     block: &crate::storage::traits::Block,
     proposed_hash: &[u8; 32],
@@ -3264,6 +3281,15 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn state_is_served_only_to_admitted_validator_addresses() {
+        let peers = Mutex::new(HashSet::from(["10.1.1.1:8081".to_string()]));
+
+        assert!(is_admitted_source(&peers, Some("10.1.1.1:53211")));
+        assert!(!is_admitted_source(&peers, Some("10.1.1.2:53211")));
+        assert!(!is_admitted_source(&peers, None));
+    }
+
     #[tokio::test]
     async fn silent_connection_is_closed_after_the_idle_timeout() {
         use tokio::io::AsyncReadExt;
@@ -3476,6 +3502,7 @@ mod tests {
             .port();
         let mut source = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
         source.store = Some(source_store);
+        source.peers.lock().unwrap().insert("127.0.0.1:1".into());
         let server = tokio::spawn(async move {
             let _ = source.start_server(port).await;
         });
