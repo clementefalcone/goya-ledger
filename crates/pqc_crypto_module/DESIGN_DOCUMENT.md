@@ -49,7 +49,7 @@ The boundary is defined as all Rust source files under `crates/pqc_crypto_module
 | `lib.rs` | Crate root; re-exports public modules |
 | `api.rs` | Public API entry point for all approved operations |
 | `mldsa.rs` | ML-DSA-65 key generation, signing, verification |
-| `mlkem.rs` | ML-KEM-768 key encapsulation (FIPS 203 via `pqcrypto-mlkem`) |
+| `mlkem.rs` | ML-KEM-768 key encapsulation (FIPS 203 via `aws-lc-rs`) |
 | `hashing.rs` | SHA3-256 hashing |
 | `rng.rs` | CSPRNG wrapper with continuous test |
 | `self_tests.rs` | Known Answer Tests |
@@ -118,8 +118,8 @@ Caller ──> api::sign_message(sk, msg)
               ├── mldsa::sign_message(sk, msg)
               │     ├── require_approved()  ──> [not Approved?] ──> Err
               │     └── sign_message_raw(sk, msg)
-              │           ├── pqcrypto_mldsa::mldsa65::SecretKey::from_bytes(sk)
-              │           ├── pqcrypto_mldsa::mldsa65::detached_sign(msg, sk)
+              │           ├── PqdsaKeyPair::from_raw_private_key(&ML_DSA_65_SIGNING, sk)
+              │           ├── PqdsaKeyPair::sign(msg, &mut sig)
               │           └── MldsaSignature(sig_bytes)
               │
               └── Result<MldsaSignature, CryptoError>
@@ -190,7 +190,7 @@ Contains non-approved algorithms (Ed25519, SHA-256, HMAC-SHA256) behind runtime 
 
 | Crate | Version | Purpose |
 |---|---|---|
-| `pqcrypto-mldsa` | 0.1.2 | ML-DSA-65 implementation |
+| `aws-lc-rs` | 1.19 | ML-DSA-65 and ML-KEM-768 implementation |
 | `pqcrypto-traits` | 0.3 | Traits for PQC types |
 | `sha3` | 0.10 | SHA3-256 |
 | `sha2` | 0.10 | SHA-256 (legacy only) |

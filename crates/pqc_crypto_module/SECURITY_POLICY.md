@@ -42,7 +42,7 @@ Files outside `src/` (tests, Cargo.toml, documentation) are outside the cryptogr
 | ML-KEM-768 | FIPS 203 | Key encapsulation | PK: 1184 B, SK: 2400 B, CT: 1088 B | SS: 32 B |
 | SHA3-256 | FIPS 202 | Hashing | N/A | 32 B |
 
-**Implementation note**: ML-KEM-768 is implemented via the `pqcrypto-mlkem` crate (v0.1.1), which wraps the reference C implementation of FIPS 203. Encapsulation produces a ciphertext and shared secret; decapsulation deterministically recovers the same shared secret. Invalid ciphertexts are handled via implicit rejection (different shared secret) or error return.
+**Implementation note**: ML-KEM-768 is implemented via `aws-lc-rs` 1.19 (AWS-LC). Encapsulation produces a ciphertext and shared secret; decapsulation deterministically recovers the same shared secret. Invalid ciphertexts are handled via implicit rejection (different shared secret) or error return.
 
 ## 4. Non-Approved Algorithms
 
@@ -164,7 +164,7 @@ See [SELF_TEST_DOCUMENTATION.md](SELF_TEST_DOCUMENTATION.md) for the complete se
 
 | Attack vector | Mitigation |
 |---|---|
-| Side-channel timing | ML-DSA and ML-KEM implementations from `pqcrypto` use constant-time reference code |
+| Side-channel timing | ML-DSA and ML-KEM come from AWS-LC, whose implementations are written to run in constant time |
 | Memory disclosure | Private keys and shared secrets implement `ZeroizeOnDrop` |
 | Algorithm downgrade | Runtime guard (`ensure_not_approved()`) + compile-time exclusion (`approved-only` feature) |
 | State manipulation | `AtomicU8` with `SeqCst` ordering; `Error` state is terminal |
@@ -260,14 +260,14 @@ The module includes test suites verified against official NIST and community-sta
 
 ### Deterministic Keygen Infrastructure
 
-The module includes a C FFI binding (`csrc/keypair_from_seed.c`) that implements FIPS 204 §5.1 `ML-DSA.KeyGen_internal(ξ)` — identical to PQClean's `crypto_sign_keypair()` but with the seed passed as a parameter instead of generated internally. This enables NIST ACVP Known Answer Testing and produces byte-exact output matching the NIST ACVP-Server published expected results.
+`generate_keypair_from_seed` implements FIPS 204 §5.1 `ML-DSA.KeyGen_internal(ξ)` through AWS-LC `PqdsaKeyPair::from_seed`. This enables NIST ACVP Known Answer Testing and produces byte-exact output matching the NIST ACVP-Server published expected results.
 
 ## 17. Future Validation Notes
 
 The following items are identified for resolution before formal CMVP submission:
 
-1. ~~**ML-KEM-768**~~: RESOLVED — implemented via `pqcrypto-mlkem` v0.1.1 with roundtrip verification.
-2. ~~**ACVP keygen vectors**~~: RESOLVED — 3 official NIST vectors, byte-exact match via `keypair_from_seed` FFI.
+1. ~~**ML-KEM-768**~~: RESOLVED — implemented via `aws-lc-rs` 1.19 with roundtrip verification.
+2. ~~**ACVP keygen vectors**~~: RESOLVED — 3 official NIST vectors, byte-exact match via AWS-LC `from_seed`.
 3. **DRBG**: The module delegates randomness to the OS CSPRNG via `getrandom` (Linux: CRNG backed by ChaCha20 since 4.8, CTR_DRBG in FIPS mode; macOS: `SecRandomCopyBytes` backed by Fortuna/CTR_DRBG). For FIPS 140-3 Level 1, this is acceptable when the operational environment runs on a FIPS-validated OS kernel (e.g., RHEL 9 with `fips=1`). A standalone SP 800-90A DRBG wrapper is not required at Level 1 for software-only modules but may be required at Level 2+. Decision: **defer standalone DRBG** until lab feedback; document OS entropy delegation.
 4. **Entropy source**: Randomness is sourced from `getrandom(2)` (Linux) or `SecRandomCopyBytes` (macOS). SP 800-90B compliance is inherited from the OS kernel's entropy subsystem. The module performs a continuous RNG test (SP 800-90B §4.3) at startup and rejects identical consecutive outputs. Documented in `rng.rs`.
 5. **Physical boundary**: Not applicable (software module), but the operational environment documentation may need expansion for the lab.

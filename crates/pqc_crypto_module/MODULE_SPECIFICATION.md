@@ -97,8 +97,8 @@ All approved operations are accessed exclusively through `pqc_crypto_module::api
 
 | Algorithm | Standard | Implementation | Key/Output Sizes |
 |---|---|---|---|
-| ML-DSA-65 | FIPS 204 | `pqcrypto-mldsa` v0.1.2 | PK: 1952 B, SK: 4032 B, Sig: 3309 B |
-| ML-KEM-768 | FIPS 203 | `pqcrypto-mlkem` v0.1.1 | PK: 1184 B, SK: 2400 B, CT: 1088 B, SS: 32 B |
+| ML-DSA-65 | FIPS 204 | `aws-lc-rs` v1.19 | PK: 1952 B, SK: 4032 B, Sig: 3309 B |
+| ML-KEM-768 | FIPS 203 | `aws-lc-rs` v1.19 | PK: 1184 B, SK: 2400 B, CT: 1088 B, SS: 32 B |
 | SHA3-256 | FIPS 202 | `sha3` v0.10 | Output: 32 B |
 
 ---
@@ -160,8 +160,7 @@ Implementation: AtomicU8 with SeqCst ordering.
 
 | Crate | Version | Purpose |
 |---|---|---|
-| `pqcrypto-mldsa` | 0.1.2 | ML-DSA-65 implementation |
-| `pqcrypto-mlkem` | 0.1.1 | ML-KEM-768 implementation |
+| `aws-lc-rs` | 1.19 | ML-DSA-65 and ML-KEM-768 implementation |
 | `pqcrypto-traits` | 0.3 | Trait interfaces for pqcrypto |
 | `sha3` | 0.10 | SHA3-256 implementation |
 | `sha2` | 0.10 | SHA-256 (legacy, non-approved) |

@@ -80,8 +80,7 @@ Direct dependencies (12 crates):
 
 | Crate | Version | Purpose |
 |---|---|---|
-| `pqcrypto-mldsa` | 0.1.2 | ML-DSA-65 (FIPS 204) |
-| `pqcrypto-mlkem` | 0.1.1 | ML-KEM-768 (FIPS 203) |
+| `aws-lc-rs` | 1.19 | ML-DSA-65 (FIPS 204), ML-KEM-768 (FIPS 203) |
 | `pqcrypto-traits` | 0.3 | PQC trait definitions |
 | `sha3` | 0.10 | SHA3-256 (FIPS 202) |
 | `sha2` | 0.10 | SHA-256 (non-approved, legacy) |

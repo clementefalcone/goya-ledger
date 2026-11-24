@@ -21,7 +21,7 @@
 
 ### ML-DSA-65 keypairs
 
-Generated via `api::generate_mldsa_keypair()`, which delegates to `pqcrypto_mldsa::mldsa65::keypair()`. The underlying implementation uses the OS-backed CSPRNG (`OsRng` via `getrandom`).
+Generated via `api::generate_mldsa_keypair()`, which delegates to `aws_lc_rs::signature::PqdsaKeyPair::generate(&ML_DSA_65_SIGNING)`. Randomness comes from the AWS-LC DRBG.
 
 - Requires `Approved` state (enforced by `require_approved()` guard).
 - Returns `MldsaKeyPair { public_key, private_key }`.
@@ -29,7 +29,7 @@ Generated via `api::generate_mldsa_keypair()`, which delegates to `pqcrypto_mlds
 
 ### ML-KEM-768 keypairs
 
-Generated via `api::generate_mlkem_keypair()`, which delegates to `pqcrypto_mlkem::mlkem768::keypair()`. The underlying implementation uses the reference C implementation of FIPS 203.
+Generated via `api::generate_mlkem_keypair()`, which delegates to `aws_lc_rs::kem::DecapsulationKey::generate(&ML_KEM_768)`.
 
 - Requires `Approved` state.
 - Returns `MlKemKeyPair { public_key, private_key }`.

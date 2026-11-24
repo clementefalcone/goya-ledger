@@ -68,7 +68,7 @@ These algorithms are outside the approved cryptographic boundary.
 
 ## 11. Future validation notes
 
-- ~~ML-KEM-768 placeholder~~: RESOLVED — implemented via `pqcrypto-mlkem` v0.1.1 with shared secret roundtrip verification.
+- ~~ML-KEM-768 placeholder~~: RESOLVED — implemented via `aws-lc-rs` 1.19 with shared secret roundtrip verification.
 - The RNG wraps `OsRng` (OS-backed CSPRNG). A DRBG with health tests may be required for full FIPS 140-3 compliance.
 - No physical security boundary is defined (software module only).
 - Algorithm agility is intentionally limited to approved algorithms within this module.

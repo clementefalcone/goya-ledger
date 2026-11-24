@@ -43,8 +43,8 @@ We are seeking a pre-assessment / gap analysis to identify any issues before for
 
 | Algorithm | Standard | Implementation | Sizes |
 |-----------|----------|----------------|-------|
-| ML-DSA-65 | FIPS 204 | PQClean (`pqcrypto-mldsa` 0.1.2) | pk: 1952B, sk: 4032B, sig: 3309B |
-| ML-KEM-768 | FIPS 203 | PQClean (`pqcrypto-mlkem` 0.1.1) | pk: 1184B, sk: 2400B, ct: 1088B, ss: 32B |
+| ML-DSA-65 | FIPS 204 | AWS-LC (`aws-lc-rs` 1.19) | pk: 1952B, sk: 4032B, sig: 3309B |
+| ML-KEM-768 | FIPS 203 | AWS-LC (`aws-lc-rs` 1.19) | pk: 1184B, sk: 2400B, ct: 1088B, ss: 32B |
 | SHA3-256 | FIPS 202 | `sha3` crate 0.10 | output: 32B |
 | HMAC-SHA3-256 | SP 800-185 | `hmac` 0.12 + `sha3` 0.10 | output: 32B |
 
@@ -67,10 +67,11 @@ All tests compare byte-exact output against NIST ACVP-Server published expected 
 
 ### ACVP Automation Infrastructure
 
-Deterministic keygen/signing FFI is built and tested:
-- `csrc/keypair_from_seed.c` — ML-DSA-65 `KeyGen_internal(ξ)` per FIPS 204 §5.1
-- `csrc/acvp_derand.c` — ML-DSA-65 `Sign_internal` with injected rnd
-- ML-KEM-768 `keypair_derand` / `enc_derand` — linked to PQClean's existing deterministic functions
+- ML-DSA-65 `KeyGen_internal(ξ)` per FIPS 204 §5.1 — `PqdsaKeyPair::from_seed` in AWS-LC, the production implementation
+- `csrc/acvp_derand.c` — ML-DSA-65 `Sign_internal` with injected rnd, from PQClean, built only with the `acvp` feature
+- ML-KEM-768 `keypair_derand` / `enc_derand` — PQClean, built only with the `acvp` feature
+
+AWS-LC does not expose deterministic signing or encapsulation. Those vectors run against PQClean, and the cross-implementation tests check that PQClean and AWS-LC agree.
 
 These enable automated ACVP testing harness integration.
 
@@ -113,8 +114,7 @@ crates/pqc_crypto_module/
 │   ├── errors.rs                Error types
 │   ├── legacy.rs                Non-approved (gated)
 │   └── lib.rs                   Crate root
-├── csrc/                     ← INSIDE boundary (ACVP FFI)
-│   ├── keypair_from_seed.c      Deterministic keygen
+├── csrc/                     ← OUTSIDE boundary (built only with the `acvp` test feature)
 │   └── acvp_derand.c            Deterministic signing
 ├── tests/                    ← OUTSIDE boundary
 └── *.md                      ← OUTSIDE boundary (documentation)
@@ -153,7 +153,7 @@ Continuous RNG test (SP 800-90B §4.3) runs at module startup. Two consecutive 3
 
 2. **Nightly toolchain**: The parent workspace requires nightly Rust. The module itself uses stable features only. Does the nightly compiler affect certification?
 
-3. **PQClean provenance**: The underlying C implementations come from PQClean (Bernstein/Lange/Schwabe). PQClean is not CMVP-validated. Does the lab require a specific implementation provenance, or is ACVP vector conformance sufficient?
+3. **Implementation provenance**: ML-DSA-65 and ML-KEM-768 come from AWS-LC through `aws-lc-rs`. The AWS-LC FIPS 3.0 module (CMVP #5298) covers ML-KEM only when built with the `fips` feature, which this module does not enable yet. No CMVP certificate covering AWS-LC ML-DSA is confirmed. Is ACVP vector conformance sufficient, or must the module embed a validated build?
 
 4. **Ed25519 in Cargo.toml**: Ed25519 is a dependency for legacy backward compatibility but is gated out in Approved mode and fully excluded with `--features approved-only`. Is the `approved-only` feature gate sufficient, or must Ed25519 be removed from `Cargo.toml` entirely?
 
