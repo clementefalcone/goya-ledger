@@ -151,11 +151,12 @@ pub enum Message {
         block_hash: [u8; 32],
         leader_id: String,
         /// Serialized block data (the full proposed block).
+        #[serde(with = "crate::storage::traits::vec_hex")]
         block_data: Vec<u8>,
         /// Serialized justify_qc (leader's high_qc). Empty if none.
-        #[serde(default)]
+        #[serde(default, with = "crate::storage::traits::vec_hex")]
         justify_qc: Vec<u8>,
-        #[serde(default)]
+        #[serde(default, with = "crate::storage::traits::vec_hex")]
         leader_signature: Vec<u8>,
     },
     /// Validator vote for a BFT phase (Prepare / PreCommit / Commit).
@@ -3302,6 +3303,43 @@ mod tests {
         server.abort();
 
         assert!(delivered.is_err(), "{delivered:?}");
+    }
+
+    #[test]
+    fn proposal_for_a_full_block_fits_in_one_p2p_message() {
+        let transaction = crate::storage::traits::Transaction {
+            id: "ledger-full-block".into(),
+            block_height: 1,
+            timestamp: 1,
+            input_did: "a".repeat(137),
+            output_recipient: "b".repeat(137),
+            amount: 0,
+            state: "c".repeat(24_000),
+            fee: 0,
+            payload: None,
+        };
+        let mut block = block_signed_by(trusted_provider());
+        block.transaction_data = vec![transaction; crate::mining::MAX_BLOCK_TRANSACTIONS];
+        let proposal = Message::BftProposal {
+            round: 1,
+            block_hash: [1u8; 32],
+            leader_id: "v0".into(),
+            block_data: serde_json::to_vec(&block).unwrap(),
+            justify_qc: Vec::new(),
+            leader_signature: vec![9u8; 3309],
+        };
+
+        let wire = serde_json::to_vec(&proposal).unwrap();
+        let decoded: Message = serde_json::from_slice(&wire).unwrap();
+
+        assert!(
+            wire.len() < crate::network_security::RateLimitConfig::default().message_size_limit,
+            "{} bytes",
+            wire.len()
+        );
+        assert!(
+            matches!(decoded, Message::BftProposal { block_data, .. } if block_data == serde_json::to_vec(&block).unwrap())
+        );
     }
 
     #[tokio::test]

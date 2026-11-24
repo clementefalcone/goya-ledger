@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const BLOCK_REWARD_ACCOUNT: &str = "block-rewards";
+pub const MAX_BLOCK_TRANSACTIONS: usize = 200;
 
 /// Configuration for the mining service.
 #[derive(Debug, Clone)]
@@ -279,7 +280,7 @@ fn produce_block(producer: &BlockProducer) -> Option<u64> {
         .pool
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .drain_for_block(50);
+        .drain_for_block(MAX_BLOCK_TRANSACTIONS);
     if transactions.is_empty() {
         return None;
     }

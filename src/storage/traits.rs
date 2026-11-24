@@ -54,7 +54,7 @@ pub struct Block {
     pub transaction_data: Vec<Transaction>,
 }
 
-mod vec_hex {
+pub(crate) mod vec_hex {
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(bytes: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {

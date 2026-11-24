@@ -315,7 +315,7 @@ fn build_proposal(
     let txs = tx_pool
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .drain_for_block(50);
+        .drain_for_block(crate::mining::MAX_BLOCK_TRANSACTIONS);
     if txs.is_empty() {
         return None;
     }
