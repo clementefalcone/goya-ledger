@@ -1,10 +1,8 @@
-//! Self-test validation tests.
-
 use pqc_crypto_module::api;
 use pqc_crypto_module::approved_mode;
 
 #[test]
-fn self_tests_pass_and_module_becomes_approved() {
+fn self_tests_approve_the_module_and_crypto_then_works() {
     approved_mode::__test_reset();
     assert_eq!(
         approved_mode::state(),
@@ -13,12 +11,6 @@ fn self_tests_pass_and_module_becomes_approved() {
 
     api::initialize_approved_mode().expect("self-tests must pass");
     assert_eq!(approved_mode::state(), approved_mode::ModuleState::Approved);
-}
-
-#[test]
-fn crypto_after_initialization_works() {
-    approved_mode::__test_reset();
-    api::initialize_approved_mode().unwrap();
 
     let kp = api::generate_mldsa_keypair().unwrap();
     let sig = api::sign_message(&kp.private_key, b"test").unwrap();
