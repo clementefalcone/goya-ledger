@@ -1,7 +1,7 @@
 use actix_web::{get, post, web, HttpRequest, HttpResponse};
 
 use crate::api::errors::{enforce_acl, ApiError, ApiResponse, ApiResult};
-use crate::api::handlers::chain::{compute_block_hash, hex_hash};
+use crate::api::handlers::chain::hex_hash;
 use crate::api::handlers::channels::{
     channel_id_from_req, enforce_channel_membership, get_channel_store,
 };
@@ -73,7 +73,7 @@ pub async fn get_block_by_hash(
     if has_genesis {
         for h in 0..=height {
             if let Ok(block) = store.read_block(h) {
-                let hash = hex_hash(&compute_block_hash(&block));
+                let hash = hex_hash(&crate::mining::block_hash(&block));
                 if hash == target_hash {
                     return Ok(HttpResponse::Ok().json(ApiResponse::success(block, trace_id)));
                 }

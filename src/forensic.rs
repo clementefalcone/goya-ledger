@@ -328,24 +328,13 @@ impl ForensicEngine {
 
 /// Verify integrity of a chain of blocks by checking hash linkage.
 pub fn verify_chain_integrity(blocks: &[crate::storage::traits::Block]) -> IntegrityResult {
-    use pqc_crypto_module::legacy::sha256::{Digest as _, Sha256};
-
     let mut mismatches = Vec::new();
 
     for i in 1..blocks.len() {
         let prev = &blocks[i - 1];
         let curr = &blocks[i];
 
-        // Verify parent_hash matches hash of previous block
-        let prev_data = format!(
-            "{}:{}:{}:{}",
-            prev.height,
-            prev.timestamp,
-            hex::encode(prev.parent_hash),
-            prev.proposer
-        );
-        let computed_hash = Sha256::digest(prev_data.as_bytes());
-        let computed_bytes: [u8; 32] = computed_hash.into();
+        let computed_bytes = crate::mining::block_hash(prev);
 
         if curr.parent_hash != computed_bytes {
             mismatches.push(ReplayMismatch {
@@ -648,6 +637,23 @@ mod tests {
         let blocks = vec![make_block(0, [0u8; 32])];
         let result = verify_chain_integrity(&blocks);
         assert_eq!(result.status, IntegrityStatus::Valid);
+    }
+
+    #[test]
+    fn integrity_follows_the_mining_hash_and_flags_an_altered_parent() {
+        let genesis = make_block(0, [0u8; 32]);
+        let child = make_block(1, crate::mining::block_hash(&genesis));
+        let mut altered_genesis = genesis.clone();
+        altered_genesis.transactions = vec!["forged".into()];
+
+        assert_eq!(
+            verify_chain_integrity(&[genesis, child.clone()]).status,
+            IntegrityStatus::Valid
+        );
+        assert_eq!(
+            verify_chain_integrity(&[altered_genesis, child]).status,
+            IntegrityStatus::Tampered
+        );
     }
 
     #[test]
