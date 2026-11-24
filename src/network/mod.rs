@@ -746,13 +746,14 @@ impl Node {
         bft_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::consensus::controller::BftEvent>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let peer_addr_str = format!("{}:{}", peer_addr.ip(), peer_addr.port());
+        let peer_ip = peer_addr.ip().to_string();
         let mut buffer = vec![0u8; p2p_handler_buffer_size()];
         let mut first_message = true;
 
         // Register peer with NetworkSecurityManager
         {
             let mut sec = net_security.lock().unwrap_or_else(|e| e.into_inner());
-            if let Err(e) = sec.register_peer(peer_addr_str.clone()) {
+            if let Err(e) = sec.register_peer(peer_ip.clone()) {
                 log::warn!("P2P connection rejected for {peer_addr_str}: {e}");
                 return Err(e.into());
             }
@@ -828,7 +829,7 @@ impl Node {
             // Per-peer rate limiting and reputation check
             {
                 let mut sec = net_security.lock().unwrap_or_else(|e| e.into_inner());
-                if let Err(e) = sec.check_rate_limit(&peer_addr_str, n) {
+                if let Err(e) = sec.check_rate_limit(&peer_ip, n) {
                     log::warn!("P2P rate limit for {peer_addr_str}: {e}");
                     break;
                 }
@@ -847,6 +848,14 @@ impl Node {
             }
             if let Ok(message) = parsed {
             accum.clear();
+                if let Err(e) = net_security
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .check_message_rate(&peer_ip)
+                {
+                    log::warn!("P2P message rate for {peer_addr_str}: {e}");
+                    break;
+                }
                 // Si es el primer mensaje y es Version, validar network_id y responder
                 if first_message {
                     if let Message::Version {
@@ -919,13 +928,13 @@ impl Node {
                 // Record valid message for reputation
                 {
                     let mut sec = net_security.lock().unwrap_or_else(|e| e.into_inner());
-                    sec.record_valid_message(&peer_addr_str, n);
+                    sec.record_valid_message(&peer_ip, n);
                 }
             } else {
                 // Failed to deserialize — penalize peer reputation
                 let mut sec = net_security.lock().unwrap_or_else(|e| e.into_inner());
-                sec.record_invalid_message(&peer_addr_str, 10);
-                if sec.peer_scores.get(&peer_addr_str).is_some_and(|s| s.is_banned()) {
+                sec.record_invalid_message(&peer_ip, 10);
+                if sec.peer_scores.get(&peer_ip).is_some_and(|s| s.is_banned()) {
                     log::warn!("P2P peer {peer_addr_str} banned after invalid messages");
                     break;
                 }
@@ -937,7 +946,7 @@ impl Node {
         // Always unregister peer on disconnect
         {
             let mut sec = net_security.lock().unwrap_or_else(|e| e.into_inner());
-            sec.unregister_peer(&peer_addr_str);
+            sec.unregister_peer(&peer_ip);
         }
 
         connection_result
@@ -3235,6 +3244,52 @@ mod tests {
             delivered,
             Ok(Some(crate::consensus::controller::BftEvent::Vote(ref v))) if v.round == 9
         ));
+    }
+
+    #[tokio::test]
+    async fn banned_sender_stays_banned_when_it_reconnects_from_a_new_port() {
+        use tokio::io::AsyncWriteExt;
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
+        node.bft_tx = Some(bft_tx);
+        let server = tokio::spawn(async move {
+            let _ = node.start_server(port).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let mut offender = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        offender.set_nodelay(true).unwrap();
+        for _ in 0..12 {
+            if offender.write_all(b"}").await.is_err() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let vote = Message::BftVote(crate::consensus::bft::types::VoteMessage {
+            block_hash: [4u8; 32],
+            round: 11,
+            phase: crate::consensus::bft::types::BftPhase::Prepare,
+            voter_id: "v3".into(),
+            signature: vec![7u8; 3309],
+        });
+        let mut reconnected = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let _ = reconnected
+            .write_all(&serde_json::to_vec(&vote).unwrap())
+            .await;
+
+        let delivered =
+            tokio::time::timeout(std::time::Duration::from_secs(1), bft_rx.recv()).await;
+        server.abort();
+
+        assert!(delivered.is_err(), "{delivered:?}");
     }
 
     #[tokio::test]

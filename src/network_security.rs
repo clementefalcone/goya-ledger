@@ -25,6 +25,7 @@ pub struct PeerScore {
     pub bytes_received: u64,
     pub is_blacklisted: bool,
     pub blacklist_reason: Option<String>,
+    pub banned_at: Option<u64>,
 }
 
 #[allow(dead_code)]
@@ -44,6 +45,7 @@ impl PeerScore {
             bytes_received: 0,
             is_blacklisted: false,
             blacklist_reason: None,
+            banned_at: None,
         }
     }
 
@@ -58,6 +60,19 @@ impl PeerScore {
     pub fn is_banned(&self) -> bool {
         self.score < 0 || self.is_blacklisted
     }
+
+    fn stamp_ban_time(&mut self) {
+        if self.is_banned() && self.banned_at.is_none() {
+            self.banned_at = Some(unix_now());
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /**
@@ -72,6 +87,7 @@ pub struct RateLimitConfig {
     pub message_size_limit: usize,
     pub ban_threshold_score: i32,
     pub suspect_threshold_score: i32,
+    pub ban_duration_seconds: u64,
 }
 
 impl Default for RateLimitConfig {
@@ -83,6 +99,7 @@ impl Default for RateLimitConfig {
             message_size_limit: 10_000_000, // 10MB max message
             ban_threshold_score: -50,
             suspect_threshold_score: 50,
+            ban_duration_seconds: 600,
         }
     }
 }
@@ -156,6 +173,15 @@ impl NetworkSecurityManager {
      * Register a new peer connection
      */
     pub fn register_peer(&mut self, address: String) -> Result<(), String> {
+        self.lift_expired_ban(&address);
+        if self
+            .peer_scores
+            .get(&address)
+            .is_some_and(|s| s.is_banned())
+        {
+            return Err(format!("Peer {address} is banned"));
+        }
+
         if self.active_connections >= self.config.max_concurrent_connections {
             return Err("Max concurrent connections reached".to_string());
         }
@@ -169,6 +195,18 @@ impl NetworkSecurityManager {
 
         self.active_connections += 1;
         Ok(())
+    }
+
+    fn lift_expired_ban(&mut self, address: &str) {
+        let ban_ends_at = self
+            .peer_scores
+            .get(address)
+            .and_then(|s| s.banned_at)
+            .map(|banned_at| banned_at + self.config.ban_duration_seconds);
+        if ban_ends_at.is_some_and(|ends_at| unix_now() >= ends_at) {
+            self.peer_scores.remove(address);
+            self.rate_limits.remove(address);
+        }
     }
 
     /**
@@ -224,7 +262,24 @@ impl NetworkSecurityManager {
         // Reset if needed
         rate_limit.reset_if_needed();
 
-        // Check message rate
+        // Check byte rate
+        if rate_limit.bytes_this_second + message_size as u64 > self.config.max_bytes_per_second {
+            self.penalize_peer(address, 5, Some("Rate limit exceeded: bytes".to_string()));
+            return Err("Rate limit exceeded: too many bytes".to_string());
+        }
+
+        // Update tracking
+        rate_limit.bytes_this_second += message_size as u64;
+
+        Ok(())
+    }
+
+    pub fn check_message_rate(&mut self, address: &str) -> Result<(), String> {
+        let rate_limit = self
+            .rate_limits
+            .entry(address.to_string())
+            .or_insert_with(|| PeerRateLimit::new(address.to_string()));
+        rate_limit.reset_if_needed();
         if rate_limit.messages_this_second >= self.config.max_messages_per_second {
             self.penalize_peer(
                 address,
@@ -233,17 +288,7 @@ impl NetworkSecurityManager {
             );
             return Err("Rate limit exceeded: too many messages".to_string());
         }
-
-        // Check byte rate
-        if rate_limit.bytes_this_second + message_size as u64 > self.config.max_bytes_per_second {
-            self.penalize_peer(address, 5, Some("Rate limit exceeded: bytes".to_string()));
-            return Err("Rate limit exceeded: too many bytes".to_string());
-        }
-
-        // Update tracking
         rate_limit.messages_this_second += 1;
-        rate_limit.bytes_this_second += message_size as u64;
-
         Ok(())
     }
 
@@ -280,6 +325,7 @@ impl NetworkSecurityManager {
                 score.is_blacklisted = true;
                 score.blacklist_reason = Some(format!("Score dropped to {}", score.score));
             }
+            score.stamp_ban_time();
         }
     }
 
@@ -296,6 +342,7 @@ impl NetworkSecurityManager {
             if score.score <= self.config.ban_threshold_score {
                 score.is_blacklisted = true;
             }
+            score.stamp_ban_time();
         }
     }
 
@@ -308,6 +355,7 @@ impl NetworkSecurityManager {
             score.is_blacklisted = true;
             score.blacklist_reason = Some(reason);
             score.score = self.config.ban_threshold_score - 100;
+            score.stamp_ban_time();
         }
     }
 
@@ -449,5 +497,41 @@ mod tests {
 
         let result = manager.register_peer("127.0.0.1:8083".to_string());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn banned_peer_cannot_reconnect_until_the_ban_expires() {
+        let mut manager = NetworkSecurityManager::with_defaults();
+        manager.register_peer("10.0.0.7".to_string()).unwrap();
+        manager.blacklist_peer("10.0.0.7", "invalid messages".to_string());
+
+        assert!(manager.register_peer("10.0.0.7".to_string()).is_err());
+
+        let ban_length = manager.config.ban_duration_seconds;
+        if let Some(score) = manager.peer_scores.get_mut("10.0.0.7") {
+            score.banned_at = Some(unix_now() - ban_length);
+        }
+
+        assert!(manager.register_peer("10.0.0.7".to_string()).is_ok());
+        assert!(manager.check_rate_limit("10.0.0.7", 1000).is_ok());
+    }
+
+    #[test]
+    fn message_rate_counts_messages_not_reads() {
+        let mut manager = NetworkSecurityManager::with_defaults();
+        manager.register_peer("10.0.0.8".to_string()).unwrap();
+        if let Some(window) = manager.rate_limits.get_mut("10.0.0.8") {
+            window.last_reset = u64::MAX;
+        }
+        let limit = manager.config.max_messages_per_second;
+
+        for _ in 0..limit * 3 {
+            assert!(manager.check_rate_limit("10.0.0.8", 1000).is_ok());
+        }
+        for _ in 0..limit {
+            assert!(manager.check_message_rate("10.0.0.8").is_ok());
+        }
+
+        assert!(manager.check_message_rate("10.0.0.8").is_err());
     }
 }
