@@ -147,7 +147,7 @@ pub async fn run_bft_loop(
                         early_votes.clear();
                         decided = decided || replay_ready_votes(&node, &signer, &node_id, &mut manager).await;
                         if decided {
-                            if let Some(blk) = pending_block.take() {
+                            if let Some(blk) = certified_block(pending_block.take(), manager.highest_commit_qc(), &book.bodies) {
                                 commit_block(blk, &manager, &store, &node, &tx_pool).await;
                             }
                             advance_round(&mut manager, &mut pending_block, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
@@ -166,7 +166,7 @@ pub async fn run_bft_loop(
                         let decided = handle_action(&action, &node, &signer, &node_id, &mut manager).await
                             || replay_ready_votes(&node, &signer, &node_id, &mut manager).await;
                         if decided {
-                            if let Some(blk) = pending_block.take() {
+                            if let Some(blk) = certified_block(pending_block.take(), manager.highest_commit_qc(), &book.bodies) {
                                 commit_block(blk, &manager, &store, &node, &tx_pool).await;
                             }
                             advance_round(&mut manager, &mut pending_block, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
@@ -288,6 +288,24 @@ impl ProposalBook {
         };
         self.bodies.retain(|_, block| block.height > tip);
     }
+}
+
+fn certified_block(
+    pending: Option<Block>,
+    commit_qc: Option<&QuorumCertificate>,
+    bodies: &HashMap<[u8; 32], Block>,
+) -> Option<Block> {
+    let certified_hash = commit_qc?.block_hash;
+    let block = pending
+        .filter(|block| crate::mining::block_hash(block) == certified_hash)
+        .or_else(|| bodies.get(&certified_hash).cloned());
+    if block.is_none() {
+        log::warn!(
+            "BFT: decided block {} has no known body; state sync will fetch it",
+            hex::encode(certified_hash)
+        );
+    }
+    block
 }
 
 fn reproposable_block(
@@ -720,6 +738,61 @@ mod tests {
         fixture.mining.mine_block("other", vec![]).unwrap();
 
         assert!(fixture.reproposal_for(&stale).is_none());
+    }
+
+    fn commit_qc_for(block: &Block) -> QuorumCertificate {
+        QuorumCertificate {
+            block_hash: block_hash(block),
+            round: 3,
+            phase: BftPhase::Commit,
+            votes: vec![],
+        }
+    }
+
+    #[test]
+    fn commits_the_certified_block_when_the_leader_equivocates() {
+        let mut fixture = Fixture::with_genesis();
+        let certified = fixture.propose();
+        let equivocation = fixture
+            .mining
+            .build_block(
+                "leader",
+                vec![Transaction {
+                    id: "equivocation".into(),
+                    block_height: 0,
+                    timestamp: 0,
+                    input_did: "did:goya:a".into(),
+                    output_recipient: "did:goya:a".into(),
+                    amount: 0,
+                    state: "pending".into(),
+                    fee: 0,
+                    payload: None,
+                }],
+            )
+            .unwrap();
+        fixture
+            .proposals
+            .insert(block_hash(&equivocation), equivocation.clone());
+
+        let committed = certified_block(
+            Some(equivocation),
+            Some(&commit_qc_for(&certified)),
+            &fixture.proposals,
+        )
+        .unwrap();
+
+        assert_eq!(block_hash(&committed), block_hash(&certified));
+    }
+
+    #[test]
+    fn commits_nothing_without_the_certified_body() {
+        let fixture = Fixture::with_genesis();
+        let unknown = fixture.mining.build_block("leader", vec![]).unwrap();
+
+        assert!(
+            certified_block(None, Some(&commit_qc_for(&unknown)), &fixture.proposals).is_none()
+        );
+        assert!(certified_block(Some(unknown), None, &fixture.proposals).is_none());
     }
 
     #[test]
