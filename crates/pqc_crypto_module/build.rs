@@ -2,6 +2,12 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rerun-if-changed=csrc/");
+    println!("cargo:rerun-if-changed=build.rs");
+    if env::var_os("CARGO_FEATURE_ACVP").is_none() {
+        return;
+    }
+
     let internals_include =
         env::var("DEP_PQCRYPTO_INTERNALS_INCLUDEPATH").expect("pqcrypto-internals include path");
 
@@ -10,15 +16,11 @@ fn main() {
     let mldsa_common = mldsa_src.join("pqclean/common");
 
     cc::Build::new()
-        .file("csrc/keypair_from_seed.c")
         .file("csrc/acvp_derand.c")
         .include(&internals_include)
         .include(&mldsa_common)
         .include(&mldsa_clean)
         .compile("goya_acvp");
-
-    println!("cargo:rerun-if-changed=csrc/");
-    println!("cargo:rerun-if-changed=build.rs");
 }
 
 fn find_pkg_src(prefix: &str) -> PathBuf {

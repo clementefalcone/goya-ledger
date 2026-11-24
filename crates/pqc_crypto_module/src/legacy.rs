@@ -120,9 +120,3 @@ pub mod rng {
     pub use rand::RngCore;
     pub use rand_core;
 }
-
-/// Legacy ML-DSA direct access (non-approved outside module boundary).
-pub mod mldsa_raw {
-    pub use pqcrypto_mldsa::mldsa65;
-    pub use pqcrypto_traits::sign::{DetachedSignature, PublicKey, SecretKey};
-}

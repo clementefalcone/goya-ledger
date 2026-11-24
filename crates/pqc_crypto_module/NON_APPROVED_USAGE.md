@@ -99,7 +99,6 @@ The `legacy` module also re-exports type-level definitions from the underlying c
 | `legacy::sha256` | `Sha256`, `Digest` |
 | `legacy::hmac` | `Hmac`, `Mac`, `HmacSha256` |
 | `legacy::rng` | `OsRng`, `Rng`, `RngCore`, `SliceRandom`, `rand_core` |
-| `legacy::mldsa_raw` | `mldsa65`, `DetachedSignature`, `PublicKey`, `SecretKey` |
 
 These re-exports provide type definitions needed for pattern matching and struct fields in legacy code paths. They do **not** bypass the runtime guard — actual cryptographic operations must go through the guarded functions.
 

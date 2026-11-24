@@ -1,7 +1,9 @@
-//! ML-DSA-65 signing and verification (aligned with FIPS 204).
+//! ML-DSA-65 signing and verification (FIPS 204), backed by AWS-LC.
 
-use pqcrypto_mldsa::mldsa65;
-use pqcrypto_traits::sign::{DetachedSignature, PublicKey, SecretKey};
+use aws_lc_rs::encoding::AsRawBytes;
+use aws_lc_rs::signature::{
+    KeyPair, PqdsaKeyPair, UnparsedPublicKey, ML_DSA_65, ML_DSA_65_SIGNING,
+};
 
 use crate::approved_mode::require_approved;
 use crate::errors::CryptoError;
@@ -15,13 +17,25 @@ pub fn generate_keypair() -> Result<MldsaKeyPair, CryptoError> {
 
 /// Internal keygen without approved-mode check (for self-tests).
 pub fn generate_keypair_raw() -> MldsaKeyPair {
-    let (pk, sk) = mldsa65::keypair();
-    let private_key = MldsaPrivateKey(sk.as_bytes().to_vec());
+    let key_pair =
+        PqdsaKeyPair::generate(&ML_DSA_65_SIGNING).expect("AWS-LC ML-DSA-65 key generation failed");
+    exported_key_pair(&key_pair).expect("AWS-LC ML-DSA-65 key export failed")
+}
+
+fn exported_key_pair(key_pair: &PqdsaKeyPair) -> Result<MldsaKeyPair, CryptoError> {
+    let private_key = MldsaPrivateKey(
+        key_pair
+            .private_key()
+            .as_raw_bytes()
+            .map_err(|_| CryptoError::InvalidKey("ML-DSA-65 private key export failed".into()))?
+            .as_ref()
+            .to_vec(),
+    );
     private_key.mlock();
-    MldsaKeyPair {
-        public_key: MldsaPublicKey(pk.as_bytes().to_vec()),
+    Ok(MldsaKeyPair {
+        public_key: MldsaPublicKey(key_pair.public_key().as_ref().to_vec()),
         private_key,
-    }
+    })
 }
 
 /// Sign a message with ML-DSA-65. Requires approved mode.
@@ -38,10 +52,14 @@ pub fn sign_message_raw(
     private_key: &MldsaPrivateKey,
     message: &[u8],
 ) -> Result<MldsaSignature, CryptoError> {
-    let sk = mldsa65::SecretKey::from_bytes(&private_key.0)
+    let key_pair = PqdsaKeyPair::from_raw_private_key(&ML_DSA_65_SIGNING, &private_key.0)
         .map_err(|e| CryptoError::InvalidKey(format!("ML-DSA-65 secret key: {e}")))?;
-    let sig = mldsa65::detached_sign(message, &sk);
-    Ok(MldsaSignature(sig.as_bytes().to_vec()))
+    let mut signature = vec![0u8; ML_DSA_65_SIGNING.signature_len()];
+    let length = key_pair
+        .sign(message, &mut signature)
+        .map_err(|_| CryptoError::InvalidSignature)?;
+    signature.truncate(length);
+    Ok(MldsaSignature(signature))
 }
 
 /// Verify a signature with ML-DSA-65. Requires approved mode.
@@ -60,153 +78,140 @@ pub fn verify_signature_raw(
     message: &[u8],
     signature: &MldsaSignature,
 ) -> Result<(), CryptoError> {
-    let pk = mldsa65::PublicKey::from_bytes(&public_key.0)
-        .map_err(|_| CryptoError::InvalidKey("invalid ML-DSA-65 public key".into()))?;
-    let sig = mldsa65::DetachedSignature::from_bytes(&signature.0)
-        .map_err(|_| CryptoError::InvalidSignature)?;
-    mldsa65::verify_detached_signature(&sig, message, &pk)
+    if public_key.0.len() != 1952 {
+        return Err(CryptoError::InvalidKey(
+            "invalid ML-DSA-65 public key".into(),
+        ));
+    }
+    UnparsedPublicKey::new(&ML_DSA_65, &public_key.0)
+        .verify(message, &signature.0)
         .map_err(|_| CryptoError::VerificationFailed)
-}
-
-// ── ACVP deterministic keygen (FIPS 204 §5.1) ─────────────────────
-
-extern "C" {
-    fn goya_mldsa65_keypair_from_seed(
-        pk: *mut u8,
-        sk: *mut u8,
-        seed: *const u8,
-    ) -> std::os::raw::c_int;
-
-    fn goya_mldsa65_sign_internal_derand(
-        sig: *mut u8,
-        siglen: *mut usize,
-        m: *const u8,
-        mlen: usize,
-        sk: *const u8,
-        rnd: *const u8,
-    ) -> std::os::raw::c_int;
-
-    fn goya_mldsa65_sign_external_derand(
-        sig: *mut u8,
-        siglen: *mut usize,
-        m: *const u8,
-        mlen: usize,
-        ctx: *const u8,
-        ctxlen: usize,
-        sk: *const u8,
-        rnd: *const u8,
-    ) -> std::os::raw::c_int;
 }
 
 /// Deterministic ML-DSA-65 keygen from a 32-byte seed (FIPS 204 §5.1).
 /// For ACVP/CMVP testing only — production uses randomized keygen.
 #[doc(hidden)]
 pub fn generate_keypair_from_seed(seed: &[u8; 32]) -> Result<MldsaKeyPair, CryptoError> {
-    let mut pk = vec![0u8; 1952];
-    let mut sk = vec![0u8; 4032];
-    // SAFETY: pk (1952 B) and sk (4032 B) are pre-allocated to spec sizes.
-    // seed is a valid 32-byte slice. PQClean's keypair_from_seed writes
-    // exactly pk_len + sk_len bytes and returns 0 on success.
-    let ret =
-        unsafe { goya_mldsa65_keypair_from_seed(pk.as_mut_ptr(), sk.as_mut_ptr(), seed.as_ptr()) };
-    if ret != 0 {
-        // Transition to error state rather than panicking — FIPS 140-3 fail-closed.
-        crate::approved_mode::set_state(crate::approved_mode::ModuleState::Error);
-        return Err(CryptoError::InvalidKey(
-            "keypair_from_seed: FFI returned non-zero".into(),
-        ));
-    }
-    let private_key = MldsaPrivateKey(sk);
-    private_key.mlock();
-    Ok(MldsaKeyPair {
-        public_key: MldsaPublicKey(pk),
-        private_key,
-    })
+    let key_pair = PqdsaKeyPair::from_seed(&ML_DSA_65_SIGNING, seed)
+        .map_err(|e| CryptoError::InvalidKey(format!("ML-DSA-65 seed: {e}")))?;
+    exported_key_pair(&key_pair)
 }
 
-/// Deterministic ML-DSA-65 internal signing with injected randomness.
-/// Uses FIPS 204 §5.1 Sign_internal: mu = H(tr || msg), no domain separator.
-/// For ACVP/CMVP testing only — production uses randomized signing.
-#[doc(hidden)]
-pub fn sign_message_derand(
-    private_key: &MldsaPrivateKey,
-    message: &[u8],
-    rnd: &[u8; 32],
-) -> Result<MldsaSignature, CryptoError> {
-    let mut sig = vec![0u8; 3309];
-    let mut siglen: usize = 0;
-    // SAFETY: sig is pre-allocated to 3309 B (max ML-DSA-65 sig size).
-    // siglen is a valid mutable usize pointer. message, private_key, and rnd
-    // are valid slices of correct lengths. PQClean writes at most 3309 B to sig.
-    let ret = unsafe {
-        goya_mldsa65_sign_internal_derand(
-            sig.as_mut_ptr(),
-            &mut siglen,
-            message.as_ptr(),
-            message.len(),
-            private_key.0.as_ptr(),
-            rnd.as_ptr(),
-        )
-    };
-    if ret != 0 {
-        return Err(CryptoError::InvalidKey("sign_derand failed".into()));
+#[cfg(feature = "acvp")]
+mod pqclean_derand {
+    extern crate pqcrypto_mldsa;
+
+    use super::*;
+
+    extern "C" {
+        fn goya_mldsa65_sign_internal_derand(
+            sig: *mut u8,
+            siglen: *mut usize,
+            m: *const u8,
+            mlen: usize,
+            sk: *const u8,
+            rnd: *const u8,
+        ) -> std::os::raw::c_int;
+
+        fn goya_mldsa65_sign_external_derand(
+            sig: *mut u8,
+            siglen: *mut usize,
+            m: *const u8,
+            mlen: usize,
+            ctx: *const u8,
+            ctxlen: usize,
+            sk: *const u8,
+            rnd: *const u8,
+        ) -> std::os::raw::c_int;
     }
-    if siglen != 3309 {
-        return Err(CryptoError::InvalidSignature);
+
+    /// Deterministic ML-DSA-65 internal signing with injected randomness.
+    /// Uses FIPS 204 §5.1 Sign_internal: mu = H(tr || msg), no domain separator.
+    /// For ACVP/CMVP testing only — production uses randomized signing.
+    #[doc(hidden)]
+    pub fn sign_message_derand(
+        private_key: &MldsaPrivateKey,
+        message: &[u8],
+        rnd: &[u8; 32],
+    ) -> Result<MldsaSignature, CryptoError> {
+        let mut sig = vec![0u8; 3309];
+        let mut siglen: usize = 0;
+        // SAFETY: sig is pre-allocated to 3309 B (max ML-DSA-65 sig size).
+        // siglen is a valid mutable usize pointer. message, private_key, and rnd
+        // are valid slices of correct lengths. PQClean writes at most 3309 B to sig.
+        let ret = unsafe {
+            goya_mldsa65_sign_internal_derand(
+                sig.as_mut_ptr(),
+                &mut siglen,
+                message.as_ptr(),
+                message.len(),
+                private_key.0.as_ptr(),
+                rnd.as_ptr(),
+            )
+        };
+        if ret != 0 {
+            return Err(CryptoError::InvalidKey("sign_derand failed".into()));
+        }
+        if siglen != 3309 {
+            return Err(CryptoError::InvalidSignature);
+        }
+        Ok(MldsaSignature(sig))
     }
-    Ok(MldsaSignature(sig))
+
+    /// External mode signing with context and injected randomness (FIPS 204 §5.2).
+    /// mu = H(tr || 0x00 || ctxlen || ctx || msg).
+    /// For ACVP/CMVP testing only.
+    #[doc(hidden)]
+    pub fn sign_message_external_derand(
+        private_key: &MldsaPrivateKey,
+        message: &[u8],
+        context: &[u8],
+        rnd: &[u8; 32],
+    ) -> Result<MldsaSignature, CryptoError> {
+        if context.len() > 255 {
+            return Err(CryptoError::InvalidKey("context too long".into()));
+        }
+        let mut sig = vec![0u8; 3309];
+        let mut siglen: usize = 0;
+        // SAFETY: sig pre-allocated to 3309 B. context length validated ≤255 above.
+        // All pointer/length pairs (message, context, private_key, rnd) are valid
+        // slices. PQClean writes at most 3309 B to sig.
+        let ret = unsafe {
+            goya_mldsa65_sign_external_derand(
+                sig.as_mut_ptr(),
+                &mut siglen,
+                message.as_ptr(),
+                message.len(),
+                context.as_ptr(),
+                context.len(),
+                private_key.0.as_ptr(),
+                rnd.as_ptr(),
+            )
+        };
+        if ret != 0 {
+            return Err(CryptoError::InvalidKey(
+                "sign_external_derand failed".into(),
+            ));
+        }
+        if siglen != 3309 {
+            return Err(CryptoError::InvalidSignature);
+        }
+        Ok(MldsaSignature(sig))
+    }
+
+    /// Deterministic internal signing (rnd = all zeros). FIPS 204 §5.1.
+    /// For ACVP/CMVP testing only.
+    #[doc(hidden)]
+    pub fn sign_message_deterministic(
+        private_key: &MldsaPrivateKey,
+        message: &[u8],
+    ) -> Result<MldsaSignature, CryptoError> {
+        sign_message_derand(private_key, message, &[0u8; 32])
+    }
 }
 
-/// External mode signing with context and injected randomness (FIPS 204 §5.2).
-/// mu = H(tr || 0x00 || ctxlen || ctx || msg).
-/// For ACVP/CMVP testing only.
-#[doc(hidden)]
-pub fn sign_message_external_derand(
-    private_key: &MldsaPrivateKey,
-    message: &[u8],
-    context: &[u8],
-    rnd: &[u8; 32],
-) -> Result<MldsaSignature, CryptoError> {
-    if context.len() > 255 {
-        return Err(CryptoError::InvalidKey("context too long".into()));
-    }
-    let mut sig = vec![0u8; 3309];
-    let mut siglen: usize = 0;
-    // SAFETY: sig pre-allocated to 3309 B. context length validated ≤255 above.
-    // All pointer/length pairs (message, context, private_key, rnd) are valid
-    // slices. PQClean writes at most 3309 B to sig.
-    let ret = unsafe {
-        goya_mldsa65_sign_external_derand(
-            sig.as_mut_ptr(),
-            &mut siglen,
-            message.as_ptr(),
-            message.len(),
-            context.as_ptr(),
-            context.len(),
-            private_key.0.as_ptr(),
-            rnd.as_ptr(),
-        )
-    };
-    if ret != 0 {
-        return Err(CryptoError::InvalidKey(
-            "sign_external_derand failed".into(),
-        ));
-    }
-    if siglen != 3309 {
-        return Err(CryptoError::InvalidSignature);
-    }
-    Ok(MldsaSignature(sig))
-}
-
-/// Deterministic internal signing (rnd = all zeros). FIPS 204 §5.1.
-/// For ACVP/CMVP testing only.
-#[doc(hidden)]
-pub fn sign_message_deterministic(
-    private_key: &MldsaPrivateKey,
-    message: &[u8],
-) -> Result<MldsaSignature, CryptoError> {
-    sign_message_derand(private_key, message, &[0u8; 32])
-}
+#[cfg(feature = "acvp")]
+pub use pqclean_derand::*;
 
 /// Internal mode verification: mu = H(tr || msg), no domain separator.
 /// For ACVP/CMVP testing only. Uses PQClean's verify directly since

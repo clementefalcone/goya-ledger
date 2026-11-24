@@ -1,9 +1,6 @@
-//! ML-KEM-768 key encapsulation (FIPS 203).
-//!
-//! Uses `pqcrypto-mlkem` for the underlying ML-KEM-768 implementation.
+//! ML-KEM-768 key encapsulation (FIPS 203), backed by AWS-LC.
 
-use pqcrypto_mlkem::mlkem768;
-use pqcrypto_traits::kem::{Ciphertext, PublicKey, SecretKey, SharedSecret};
+use aws_lc_rs::kem::{Ciphertext, DecapsulationKey, EncapsulationKey, ML_KEM_768};
 
 use crate::approved_mode::require_approved;
 use crate::errors::CryptoError;
@@ -22,11 +19,26 @@ pub fn generate_keypair() -> Result<MlKemKeyPair, CryptoError> {
 }
 
 pub(crate) fn generate_keypair_raw() -> Result<MlKemKeyPair, CryptoError> {
-    let (pk, sk) = mlkem768::keypair();
-    let private_key = MlKemPrivateKey(sk.as_bytes().to_vec());
+    let key_failure = |_| CryptoError::InvalidKey("ML-KEM-768 key generation failed".into());
+    let decapsulation_key = DecapsulationKey::generate(&ML_KEM_768).map_err(key_failure)?;
+    let private_key = MlKemPrivateKey(
+        decapsulation_key
+            .key_bytes()
+            .map_err(key_failure)?
+            .as_ref()
+            .to_vec(),
+    );
     private_key.mlock();
+    let public_key = MlKemPublicKey(
+        decapsulation_key
+            .encapsulation_key()
+            .and_then(|key| key.key_bytes())
+            .map_err(key_failure)?
+            .as_ref()
+            .to_vec(),
+    );
     Ok(MlKemKeyPair {
-        public_key: MlKemPublicKey(pk.as_bytes().to_vec()),
+        public_key,
         private_key,
     })
 }
@@ -42,12 +54,14 @@ pub fn encapsulate(
 pub fn encapsulate_raw(
     public_key: &MlKemPublicKey,
 ) -> Result<(MlKemCiphertext, MlKemSharedSecret), CryptoError> {
-    let pk = mlkem768::PublicKey::from_bytes(public_key.as_bytes())
+    let encapsulation_key = EncapsulationKey::new(&ML_KEM_768, public_key.as_bytes())
         .map_err(|_| CryptoError::InvalidKey("invalid ML-KEM-768 public key".into()))?;
-    let (ss, ct) = mlkem768::encapsulate(&pk);
-    let shared = MlKemSharedSecret(ss.as_bytes().to_vec());
+    let (ciphertext, secret) = encapsulation_key
+        .encapsulate()
+        .map_err(|_| CryptoError::InvalidKey("ML-KEM-768 encapsulation failed".into()))?;
+    let shared = MlKemSharedSecret(secret.as_ref().to_vec());
     shared.mlock();
-    Ok((MlKemCiphertext(ct.as_bytes().to_vec()), shared))
+    Ok((MlKemCiphertext(ciphertext.as_ref().to_vec()), shared))
 }
 
 /// Decapsulate: recover the shared secret from a ciphertext and private key.
@@ -63,96 +77,98 @@ pub fn decapsulate_raw(
     private_key: &MlKemPrivateKey,
     ciphertext: &MlKemCiphertext,
 ) -> Result<MlKemSharedSecret, CryptoError> {
-    let sk = mlkem768::SecretKey::from_bytes(&private_key.0)
+    let decapsulation_key = DecapsulationKey::new(&ML_KEM_768, &private_key.0)
         .map_err(|_| CryptoError::InvalidKey("invalid ML-KEM-768 private key".into()))?;
-    let ct = mlkem768::Ciphertext::from_bytes(ciphertext.as_bytes())
+    if ciphertext.as_bytes().len() != 1088 {
+        return Err(CryptoError::InvalidKey(
+            "invalid ML-KEM-768 ciphertext".into(),
+        ));
+    }
+    let secret = decapsulation_key
+        .decapsulate(Ciphertext::from(ciphertext.as_bytes()))
         .map_err(|_| CryptoError::InvalidKey("invalid ML-KEM-768 ciphertext".into()))?;
-    let ss = mlkem768::decapsulate(&ct, &sk);
-    let shared = MlKemSharedSecret(ss.as_bytes().to_vec());
+    let shared = MlKemSharedSecret(secret.as_ref().to_vec());
     shared.mlock();
     Ok(shared)
 }
 
-// ── ACVP deterministic variants (FIPS 203) ────────────────────────
+#[cfg(feature = "acvp")]
+mod pqclean_derand {
+    extern crate pqcrypto_mlkem;
 
-// PQClean symbol names vary by arch
-#[cfg(target_arch = "aarch64")]
-extern "C" {
-    #[link_name = "PQCLEAN_MLKEM768_AARCH64_keypair_derand"]
-    fn mlkem768_keypair_derand(pk: *mut u8, sk: *mut u8, coins: *const u8) -> std::os::raw::c_int;
+    use super::*;
 
-    #[link_name = "PQCLEAN_MLKEM768_AARCH64_enc_derand"]
-    fn mlkem768_enc_derand(
-        ct: *mut u8,
-        ss: *mut u8,
-        pk: *const u8,
-        coins: *const u8,
-    ) -> std::os::raw::c_int;
-}
+    extern "C" {
+        #[link_name = "PQCLEAN_MLKEM768_CLEAN_crypto_kem_keypair_derand"]
+        fn mlkem768_keypair_derand(
+            pk: *mut u8,
+            sk: *mut u8,
+            coins: *const u8,
+        ) -> std::os::raw::c_int;
 
-#[cfg(not(target_arch = "aarch64"))]
-extern "C" {
-    #[link_name = "PQCLEAN_MLKEM768_CLEAN_crypto_kem_keypair_derand"]
-    fn mlkem768_keypair_derand(pk: *mut u8, sk: *mut u8, coins: *const u8) -> std::os::raw::c_int;
-
-    #[link_name = "PQCLEAN_MLKEM768_CLEAN_crypto_kem_enc_derand"]
-    fn mlkem768_enc_derand(
-        ct: *mut u8,
-        ss: *mut u8,
-        pk: *const u8,
-        coins: *const u8,
-    ) -> std::os::raw::c_int;
-}
-
-/// Deterministic ML-KEM-768 keygen from 64 bytes of coins (d || z).
-/// For ACVP/CMVP testing only.
-#[doc(hidden)]
-pub fn generate_keypair_derand(coins: &[u8; 64]) -> Result<MlKemKeyPair, CryptoError> {
-    let mut pk = vec![0u8; 1184];
-    let mut sk = vec![0u8; 2400];
-    // SAFETY: pk (1184 B) and sk (2400 B) pre-allocated to FIPS 203 spec sizes.
-    // coins is a valid 64-byte slice. PQClean writes exactly pk_len + sk_len bytes.
-    let ret = unsafe { mlkem768_keypair_derand(pk.as_mut_ptr(), sk.as_mut_ptr(), coins.as_ptr()) };
-    if ret != 0 {
-        return Err(CryptoError::InvalidKey(
-            "mlkem keypair_derand failed".into(),
-        ));
+        #[link_name = "PQCLEAN_MLKEM768_CLEAN_crypto_kem_enc_derand"]
+        fn mlkem768_enc_derand(
+            ct: *mut u8,
+            ss: *mut u8,
+            pk: *const u8,
+            coins: *const u8,
+        ) -> std::os::raw::c_int;
     }
-    let private_key = MlKemPrivateKey(sk);
-    private_key.mlock();
-    Ok(MlKemKeyPair {
-        public_key: MlKemPublicKey(pk),
-        private_key,
-    })
+
+    /// Deterministic ML-KEM-768 keygen from 64 bytes of coins (d || z).
+    /// For ACVP/CMVP testing only.
+    #[doc(hidden)]
+    pub fn generate_keypair_derand(coins: &[u8; 64]) -> Result<MlKemKeyPair, CryptoError> {
+        let mut pk = vec![0u8; 1184];
+        let mut sk = vec![0u8; 2400];
+        // SAFETY: pk (1184 B) and sk (2400 B) pre-allocated to FIPS 203 spec sizes.
+        // coins is a valid 64-byte slice. PQClean writes exactly pk_len + sk_len bytes.
+        let ret =
+            unsafe { mlkem768_keypair_derand(pk.as_mut_ptr(), sk.as_mut_ptr(), coins.as_ptr()) };
+        if ret != 0 {
+            return Err(CryptoError::InvalidKey(
+                "mlkem keypair_derand failed".into(),
+            ));
+        }
+        let private_key = MlKemPrivateKey(sk);
+        private_key.mlock();
+        Ok(MlKemKeyPair {
+            public_key: MlKemPublicKey(pk),
+            private_key,
+        })
+    }
+
+    /// Deterministic ML-KEM-768 encapsulation from 32 bytes of coins (m).
+    /// For ACVP/CMVP testing only.
+    #[doc(hidden)]
+    pub fn encapsulate_derand(
+        public_key: &MlKemPublicKey,
+        coins: &[u8; 32],
+    ) -> Result<(MlKemCiphertext, MlKemSharedSecret), CryptoError> {
+        let mut ct = vec![0u8; 1088];
+        let mut ss = vec![0u8; 32];
+        // SAFETY: ct (1088 B) and ss (32 B) pre-allocated to FIPS 203 spec sizes.
+        // public_key is validated by caller. coins is a valid 32-byte slice.
+        // PQClean writes exactly ct_len + ss_len bytes.
+        let ret = unsafe {
+            mlkem768_enc_derand(
+                ct.as_mut_ptr(),
+                ss.as_mut_ptr(),
+                public_key.as_bytes().as_ptr(),
+                coins.as_ptr(),
+            )
+        };
+        if ret != 0 {
+            return Err(CryptoError::InvalidKey("mlkem enc_derand failed".into()));
+        }
+        let shared = MlKemSharedSecret(ss);
+        shared.mlock();
+        Ok((MlKemCiphertext(ct), shared))
+    }
 }
 
-/// Deterministic ML-KEM-768 encapsulation from 32 bytes of coins (m).
-/// For ACVP/CMVP testing only.
-#[doc(hidden)]
-pub fn encapsulate_derand(
-    public_key: &MlKemPublicKey,
-    coins: &[u8; 32],
-) -> Result<(MlKemCiphertext, MlKemSharedSecret), CryptoError> {
-    let mut ct = vec![0u8; 1088];
-    let mut ss = vec![0u8; 32];
-    // SAFETY: ct (1088 B) and ss (32 B) pre-allocated to FIPS 203 spec sizes.
-    // public_key is validated by caller. coins is a valid 32-byte slice.
-    // PQClean writes exactly ct_len + ss_len bytes.
-    let ret = unsafe {
-        mlkem768_enc_derand(
-            ct.as_mut_ptr(),
-            ss.as_mut_ptr(),
-            public_key.as_bytes().as_ptr(),
-            coins.as_ptr(),
-        )
-    };
-    if ret != 0 {
-        return Err(CryptoError::InvalidKey("mlkem enc_derand failed".into()));
-    }
-    let shared = MlKemSharedSecret(ss);
-    shared.mlock();
-    Ok((MlKemCiphertext(ct), shared))
-}
+#[cfg(feature = "acvp")]
+pub use pqclean_derand::*;
 
 #[cfg(test)]
 mod tests {

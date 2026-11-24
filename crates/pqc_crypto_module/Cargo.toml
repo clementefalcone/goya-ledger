@@ -6,10 +6,11 @@ description = "FIPS-oriented post-quantum cryptographic module for Cerulean Ledg
 license = "MIT"
 
 [dependencies]
-pqcrypto-mldsa = { version = "0.1.2", default-features = false, features = ["std"] }
-pqcrypto-mlkem = { version = "0.1.1", default-features = false, features = ["std"] }
+aws-lc-rs = "1.19"
+pqcrypto-mldsa = { version = "0.1.2", default-features = false, features = ["std"], optional = true }
+pqcrypto-mlkem = { version = "0.1.1", default-features = false, features = ["std"], optional = true }
 pqcrypto-sphincsplus = { version = "0.7", default-features = false, features = ["std"] }
-pqcrypto-internals = "0.2"
+pqcrypto-internals = { version = "0.2", optional = true }
 pqcrypto-traits = "0.3"
 sha3 = "0.10"
 sha2 = "0.10"
@@ -34,9 +35,22 @@ cc = "1.0"
 [features]
 default = []
 approved-only = []
+acvp = ["dep:pqcrypto-mldsa", "dep:pqcrypto-mlkem", "dep:pqcrypto-internals"]
 
 [dev-dependencies]
 tempfile = "3.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 ml-dsa = "0.1"
+
+[[test]]
+name = "acvp_full"
+required-features = ["acvp"]
+
+[[test]]
+name = "acvp_tier1"
+required-features = ["acvp"]
+
+[[test]]
+name = "cross_impl"
+required-features = ["acvp"]
