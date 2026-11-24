@@ -1,112 +1,53 @@
 # Security Audit Package
 
-Prepared for external security auditors. Last updated: 2026-04-13.
+Prepared for an external security audit. Last updated: 2026-11-24.
 
-## Project Overview
+## System
 
-rust-bc is a permissioned blockchain node written in Rust with Fabric-inspired architecture. It supports ERC-20/ERC-721 tokens, WASM chaincode, W3C DIDs, post-quantum cryptography (ML-DSA-65), and Raft consensus.
+Goya is a post-quantum verification ledger written in Rust. Mainnet runs four ML-DSA-65 validators under HotStuff BFT (quorum 3 of 4). Platforms register DIDs, notarize documents and issue credentials through an HTTP API; any verifier checks them without trusting the node.
 
-**Codebase:** ~25K lines of Rust, 992 unit tests, 104 E2E assertions, 28 recovery tests, 15 fuzz targets.
+## Scope, by priority
 
-## Scope for Audit
+| Area | Files | Question for the auditor |
+|---|---|---|
+| BFT consensus | `src/consensus/bft/`, `src/consensus/controller.rs` | Can a Byzantine validator, or a network adversary, fork the chain, stall a correct quorum, or get a vote counted twice? |
+| P2P | `src/network/mod.rs`, `src/network_security.rs` | Can an outsider join, impersonate a validator, exhaust memory or connections, or get an honest validator banned? |
+| Block validation and state sync | `src/ordering/mod.rs`, `src/mining.rs` | Can a peer make a node persist a block that a quorum did not sign, or diverge its state? |
+| Crypto module | `crates/pqc_crypto_module/` | Correct use of AWS-LC ML-DSA-65 and ML-KEM-768, key handling and zeroization, and the module boundary enforced by `tests/crypto_boundary.rs` |
+| Write authorization | `src/api/handlers/` (identities, notarize, credentials) | Can a write be accepted without the key holder's signature, or replayed? |
 
-### Critical paths (priority)
-| Area | Files | Why |
-|------|-------|-----|
-| ACL enforcement | `src/api/errors.rs` | All auth decisions flow through `enforce_acl()` |
-| Transaction validation | `src/transaction_validation.rs` | Replay, double-spend, timestamp drift |
-| P2P message handling | `src/network/mod.rs` | Message parsing, peer auth, state sync |
-| Chaincode sandbox | `src/chaincode/executor.rs` | Wasmtime fuel/memory limits, host functions |
-| Cryptographic signing | `src/identity/signing.rs` | Ed25519 + ML-DSA-65, key management |
-| Smart contracts | `src/smart_contracts.rs` | ERC-20/721 logic, overflow protection |
-| Input validation | `src/api/handlers/validation.rs` | XSS, null bytes, field length limits |
+Out of scope: the Tauri desktop app, EVM, bridge and governance modules, which mainnet does not expose.
 
-### Infrastructure
-| Area | Files |
-|------|-------|
-| TLS/mTLS | `src/tls.rs`, `src/pki.rs` |
-| Checkpoint integrity | `src/checkpoint.rs` (HMAC-SHA256) |
-| Rate limiting | `src/middleware.rs`, `src/api/rate_limit.rs` |
-| Network security | `src/network_security.rs` |
-| Storage | `src/storage/adapters.rs` (RocksDB) |
+## Evidence already produced
 
-## Internal Audit Results
+| Artifact | Where |
+|---|---|
+| Lean 4 proofs, including HotStuff no-fork (58 theorems and lemmas; they cover models, not the Rust code) | `formal/` |
+| Seven-validator testnet across three continents: faults, partitions, a Byzantine validator, load | [TESTNET-2026-11.md](../benchmarks/TESTNET-2026-11.md) |
+| Quantum threat lab | [QUANTUM-LAB.md](QUANTUM-LAB.md) |
+| NIST ACVP, KAT and Wycheproof vectors, plus cross-checks against two independent ML-DSA implementations | `crates/pqc_crypto_module/tests/` |
+| Mainnet operations | [MAINNET-VALIDATORS.md](../../api/MAINNET-VALIDATORS.md) |
 
-Full report: `docs/SECURITY-AUDIT.md`
-
-| Finding | Severity | Status |
-|---------|----------|--------|
-| Legacy routes without ACL | CRITICAL | FIXED |
-| Header spoofing in strict mode | CRITICAL | FIXED |
-| Rate limiter dead code | HIGH | FIXED |
-| Weak double-spend heuristic | HIGH | FIXED |
-| In-memory replay prevention | HIGH | FIXED (RocksDB persisted) |
-| Network security dead code | HIGH | FIXED (integrated into P2P) |
-| Debug logging in production | MEDIUM | FIXED |
-| No HMAC on checkpoints | MEDIUM | FIXED |
-| No Wasm hash verification | MEDIUM | FIXED |
-| JWT announced but unused | MEDIUM | DOCUMENTED |
-
-## Testing Artifacts
-
-| Test suite | Command | Assertions |
-|-----------|---------|-----------|
-| Unit tests | `cargo test --lib` | 992 |
-| Integration | `cargo test --test store_blocks_api_test` | 4 |
-| E2E (Docker) | `./scripts/e2e-test.sh` | 104 |
-| Recovery | `./scripts/recovery-test.sh` | 28 |
-| Fuzz (proptest) | `cargo test --test fuzz_tests` | 15 targets, ~27K cases |
-| Stress | `./scripts/stress-test.sh` | 4 phases |
-| Load | `./scripts/load-test.sh` | Sustained throughput |
-
-## Stress Test Results
-
-| Phase | Result |
-|-------|--------|
-| Throughput ceiling | 147 tx/s at concurrency 10 |
-| 500 concurrent connections | 100% success |
-| 5MB payload | Correctly rejected |
-| XSS / null bytes / huge ID | Correctly rejected |
-| Node survives all malformed input | Yes |
-
-## Fuzzing Results
-
-15 proptest targets, ~27K generated inputs:
-- 0 panics in JSON deserialization
-- 0 panics in smart contract operations
-- 0 panics in storage roundtrips
-- 1 integer overflow found and fixed (`validate_timestamp`, `saturating_add`)
-
-## Dependency Audit
+Gate run before every release, on cloud builders:
 
 ```bash
-cargo audit              # Known CVEs
-cargo deny check         # License + advisory
-cargo tree -d            # Duplicate dependencies
-```
-
-Key dependencies:
-- `wasmtime` v36 (15 CVEs fixed from v21)
-- `rustls` (no OpenSSL)
-- `ed25519-dalek` with `ZeroizeOnDrop`
-- `sha2`, `hmac` for integrity
-- `rocksdb` for persistence
-
-## How to Run
-
-```bash
-# Full test suite
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --test crypto_boundary
 cargo test --lib
-cargo test --test fuzz_tests
-cargo test --test store_blocks_api_test
-
-# Docker network
-docker compose up -d
-./scripts/e2e-test.sh
-./scripts/recovery-test.sh
-./scripts/stress-test.sh
-./scripts/load-test.sh --duration 60 --rate 100
-
-# Clippy (zero warnings required)
-cargo clippy -- -D warnings
+cargo test --doc
+cargo test --test bft_e2e --test bft_mldsa65_e2e
+cargo test -p pqc_crypto_module --features acvp
 ```
+
+## Known limitations
+
+- All four validators are operated by Goya.
+- The validator set is static configuration; changing it needs a coordinated restart.
+- Validator keys are files on disk, not in an HSM or KMS.
+- P2P traffic is authenticated by signed handshakes but not encrypted.
+- ML-DSA runs on AWS-LC, but no FIPS 140-3 certificate covers its ML-DSA yet.
+
+## Candidate auditors
+
+Rust and consensus specialists to request quotes from: Informal Systems, Trail of Bits, NCC Group, Zellic, Least Authority.
