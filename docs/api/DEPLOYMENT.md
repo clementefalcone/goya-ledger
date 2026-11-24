@@ -81,6 +81,8 @@ docker compose up -d
 
 ## Production checklist
 
+Mainnet validators, their monitoring, backups and set changes are in [MAINNET-VALIDATORS.md](MAINNET-VALIDATORS.md).
+
 ### Security
 
 - [ ] Replace self-signed TLS certificates with CA-issued ones
