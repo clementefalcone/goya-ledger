@@ -213,6 +213,8 @@ pub const PULL_INTERVAL_MS: u64 = 10000;
 /// Maximum number of blocks returned in a single `StateResponse`.
 pub const STATE_BATCH_SIZE: usize = 50;
 
+pub const STATE_RESPONSE_BYTE_BUDGET: usize = 4 * 1024 * 1024;
+
 /// Liveness status of a peer in the membership table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerStatus {

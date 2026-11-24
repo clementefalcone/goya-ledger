@@ -1404,11 +1404,18 @@ impl Node {
                 if let Some(ref blk_store) = store {
                     let latest = blk_store.get_latest_height().unwrap_or(0);
                     let mut blocks = Vec::new();
+                    let mut response_bytes = 0;
                     for h in from_height..=latest {
                         if blocks.len() >= gossip::STATE_BATCH_SIZE {
                             break;
                         }
                         if let Ok(block) = blk_store.read_block(h) {
+                            response_bytes += serde_json::to_vec(&block).map_or(0, |b| b.len());
+                            if !blocks.is_empty()
+                                && response_bytes > gossip::STATE_RESPONSE_BYTE_BUDGET
+                            {
+                                break;
+                            }
                             blocks.push(block);
                         }
                     }
@@ -2240,7 +2247,8 @@ impl Node {
             .as_ref()
             .and_then(|s| s.get_latest_height().ok())
             .unwrap_or(0);
-        self.request_state_sync(address, my_height).await
+        self.request_state_sync(address, my_height).await?;
+        Ok(())
     }
 
     /// Pull-based state sync: request blocks from `from_height` via `StateRequest`.
@@ -2248,7 +2256,7 @@ impl Node {
         &self,
         address: &str,
         from_height: u64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<usize, Box<dyn std::error::Error>> {
         let msg = Message::StateRequest { from_height };
         let resp = self
             .send_and_wait(address, msg, std::time::Duration::from_secs(30))
@@ -2256,6 +2264,7 @@ impl Node {
             .map_err(|e| -> Box<dyn std::error::Error> {
                 Box::new(std::io::Error::other(e.to_string()))
             })?;
+        let mut written = 0;
         if let Message::StateResponse { blocks } = resp {
             if let Some(s) = &self.store {
                 let trusted_signers =
@@ -2265,14 +2274,12 @@ impl Node {
                         log::warn!("state sync from {address} stopped: {e}");
                         break;
                     }
+                    written += 1;
                 }
-                println!(
-                    "✅ State sync from {address}: {} blocks written",
-                    blocks.len()
-                );
+                println!("✅ State sync from {address}: {written} blocks written");
             }
         }
-        Ok(())
+        Ok(written)
     }
 
     /// Broadcast a committed DLT block to all connected peers.
@@ -2709,17 +2716,22 @@ impl Node {
                     None => continue,
                 };
 
-                // Determine local height.
-                let local_height = store.get_latest_height().unwrap_or(0);
-
                 let peers: Vec<String> = {
                     let g = node.peers.lock().unwrap_or_else(|e| e.into_inner());
                     g.iter().cloned().collect()
                 };
 
                 for peer_addr in &peers {
-                    if let Err(e) = node.request_state_sync(peer_addr, local_height + 1).await {
-                        log::debug!("pull sync from {peer_addr} skipped: {e}");
+                    loop {
+                        let local_height = store.get_latest_height().unwrap_or(0);
+                        match node.request_state_sync(peer_addr, local_height + 1).await {
+                            Ok(written) if written > 0 => continue,
+                            Ok(_) => break,
+                            Err(e) => {
+                                log::debug!("pull sync from {peer_addr} skipped: {e}");
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -3370,6 +3382,53 @@ mod tests {
         sync.abort();
 
         assert_eq!(store.read_block(7).unwrap().height, 7);
+    }
+
+    #[tokio::test]
+    async fn pull_sync_catches_up_a_long_chain_without_waiting_for_the_next_tick() {
+        let signer = trusted_provider();
+        let source_store: Arc<dyn crate::storage::traits::BlockStore> =
+            Arc::new(crate::storage::MemoryStore::new());
+        let mut parent_hash = [0u8; 32];
+        for height in 1..=120u64 {
+            let svc = crate::ordering::service::OrderingService::with_config(10, 500)
+                .with_signing_provider(signer.clone());
+            svc.submit_tx(transaction(&format!("tx-{height}"), None))
+                .unwrap();
+            let block = svc.cut_block(height, parent_hash, "ord").unwrap().unwrap();
+            parent_hash = crate::mining::block_hash(&block);
+            crate::mining::persist_block(source_store.as_ref(), &block).unwrap();
+        }
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut source = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
+        source.store = Some(source_store);
+        let server = tokio::spawn(async move {
+            let _ = source.start_server(port).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let store: Arc<dyn crate::storage::traits::BlockStore> =
+            Arc::new(crate::storage::MemoryStore::new());
+        let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
+        node.store = Some(store.clone());
+        node.signing_provider = Some(signer);
+        node.peers
+            .lock()
+            .unwrap()
+            .insert(format!("127.0.0.1:{port}"));
+
+        let sync = node.start_pull_sync_loop(60_000);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while store.read_block(120).is_err() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        sync.abort();
+        server.abort();
+
+        assert_eq!(store.get_latest_height().unwrap(), 120);
     }
 
     #[tokio::test]
