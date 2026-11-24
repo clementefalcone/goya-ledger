@@ -10,9 +10,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let split = data[0] as usize % data.len().max(1);
-    let message = &data[1..split.min(data.len())];
-    let fuzzed_sig = &data[split.min(data.len())..];
+    let split = 1 + data[0] as usize % (data.len() - 1);
+    let message = &data[1..split];
+    let fuzzed_sig = &data[split..];
 
     let _ = PROVIDER.verify(message, fuzzed_sig);
 
@@ -25,7 +25,7 @@ fuzz_target!(|data: &[u8]| {
         if !valid_sig.is_empty() {
             let mut corrupted = valid_sig.clone();
             let flip_pos = data[0] as usize % corrupted.len();
-            corrupted[flip_pos] ^= data.last().copied().unwrap_or(0xFF);
+            corrupted[flip_pos] ^= data.last().copied().unwrap_or(0xFF).max(1);
             let result = PROVIDER.verify(b"test", &corrupted);
             match result {
                 Ok(valid) => assert!(!valid, "bitflipped signature must not verify"),
