@@ -244,6 +244,7 @@ pub struct Node {
 const GOSSIP_FANOUT: usize = 3;
 
 const PEER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const PEER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 const PEER_ANNOUNCEMENT_MAX_AGE_SECS: u64 = 300;
 
@@ -789,7 +790,11 @@ impl Node {
         let connection_result: Result<(), Box<dyn std::error::Error>> = async {
         let mut accum = Vec::new();
         loop {
-            let n = stream.read(&mut buffer).await?;
+            let Ok(read) = tokio::time::timeout(PEER_IDLE_TIMEOUT, stream.read(&mut buffer)).await else {
+                log::info!("P2P connection from {peer_addr_str} idle for {PEER_IDLE_TIMEOUT:?}; closing");
+                break;
+            };
+            let n = read?;
             if n == 0 {
                 // EOF — try to parse whatever we accumulated before exiting.
                 if !accum.is_empty() {
@@ -3257,6 +3262,33 @@ mod tests {
             delivered,
             Ok(Some(crate::consensus::controller::BftEvent::Vote(ref v))) if v.round == 9
         ));
+    }
+
+    #[tokio::test]
+    async fn silent_connection_is_closed_after_the_idle_timeout() {
+        use tokio::io::AsyncReadExt;
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
+        let server = tokio::spawn(async move {
+            let _ = node.start_server(port).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let mut silent = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+
+        let closed = tokio::time::timeout(
+            PEER_IDLE_TIMEOUT + std::time::Duration::from_secs(3),
+            silent.read(&mut [0u8; 1]),
+        )
+        .await;
+        server.abort();
+
+        assert!(matches!(closed, Ok(Ok(0)) | Ok(Err(_))), "{closed:?}");
     }
 
     #[tokio::test]

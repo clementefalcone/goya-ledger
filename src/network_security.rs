@@ -88,6 +88,7 @@ pub struct RateLimitConfig {
     pub ban_threshold_score: i32,
     pub suspect_threshold_score: i32,
     pub ban_duration_seconds: u64,
+    pub max_connections_per_peer: usize,
 }
 
 impl Default for RateLimitConfig {
@@ -95,11 +96,12 @@ impl Default for RateLimitConfig {
         RateLimitConfig {
             max_messages_per_second: 100,
             max_bytes_per_second: 10_000_000, // 10MB/s
-            max_concurrent_connections: 100,
+            max_concurrent_connections: 256,
             message_size_limit: 10_000_000, // 10MB max message
             ban_threshold_score: -50,
             suspect_threshold_score: 50,
             ban_duration_seconds: 600,
+            max_connections_per_peer: 16,
         }
     }
 }
@@ -153,6 +155,7 @@ pub struct NetworkSecurityManager {
     pub peer_scores: HashMap<String, PeerScore>,
     pub rate_limits: HashMap<String, PeerRateLimit>,
     pub active_connections: usize,
+    pub connections_by_peer: HashMap<String, usize>,
 }
 
 impl NetworkSecurityManager {
@@ -162,6 +165,7 @@ impl NetworkSecurityManager {
             peer_scores: HashMap::new(),
             rate_limits: HashMap::new(),
             active_connections: 0,
+            connections_by_peer: HashMap::new(),
         }
     }
 
@@ -185,6 +189,14 @@ impl NetworkSecurityManager {
         if self.active_connections >= self.config.max_concurrent_connections {
             return Err("Max concurrent connections reached".to_string());
         }
+        let peer_connections = self.connections_by_peer.entry(address.clone()).or_insert(0);
+        if *peer_connections >= self.config.max_connections_per_peer {
+            return Err(format!(
+                "Peer {address} already holds {} connections",
+                self.config.max_connections_per_peer
+            ));
+        }
+        *peer_connections += 1;
 
         if !self.peer_scores.contains_key(&address) {
             self.peer_scores
@@ -212,9 +224,15 @@ impl NetworkSecurityManager {
     /**
      * Unregister a peer connection
      */
-    pub fn unregister_peer(&mut self, _address: &str) {
+    pub fn unregister_peer(&mut self, address: &str) {
         if self.active_connections > 0 {
             self.active_connections -= 1;
+        }
+        if let Some(count) = self.connections_by_peer.get_mut(address) {
+            *count -= 1;
+            if *count == 0 {
+                self.connections_by_peer.remove(address);
+            }
         }
     }
 
@@ -514,6 +532,20 @@ mod tests {
 
         assert!(manager.register_peer("10.0.0.7".to_string()).is_ok());
         assert!(manager.check_rate_limit("10.0.0.7", 1000).is_ok());
+    }
+
+    #[test]
+    fn one_peer_cannot_take_every_connection_slot() {
+        let mut manager = NetworkSecurityManager::with_defaults();
+        let cap = manager.config.max_connections_per_peer;
+        for _ in 0..cap {
+            manager.register_peer("10.0.0.9".to_string()).unwrap();
+        }
+
+        assert!(manager.register_peer("10.0.0.9".to_string()).is_err());
+        assert!(manager.register_peer("10.0.0.10".to_string()).is_ok());
+        manager.unregister_peer("10.0.0.9");
+        assert!(manager.register_peer("10.0.0.9".to_string()).is_ok());
     }
 
     #[test]
