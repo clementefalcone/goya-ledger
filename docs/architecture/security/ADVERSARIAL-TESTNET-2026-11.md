@@ -91,7 +91,7 @@ The structural fix is unpredictable leader election (VRF sortition), so the adve
 ## Open
 
 - An honest validator still crossed the 100 msg/s limit 41 times in one run, without being banned (message kind now logged for the next pass).
-- Consensus messages (`BftVote`, `BftTimeout`) are queued unauthenticated to an unbounded channel; defended in practice by per-IP limits, not by design.
+- Consensus messages (`BftVote`, `BftTimeout`) now require an admitted source before queueing (`aef6a90`, deployed to mainnet 2026-11-25 via rolling upgrade); a non-validator can no longer force verifications. Residual: the channel is still unbounded, so an already-admitted (compromised) validator could flood it — bounding the channel is the remaining defense-in-depth step.
 - Leader rotation is predictable, enabling targeted leader isolation; structural fix is VRF sortition.
 - A validator that is admitted can repeat `StateRequest` up to 5/s per IP; still unbounded in total across a session.
 - Validators are bounded by 64 connections per IP and do not count toward the global cap. A compromised validator could use that room.
