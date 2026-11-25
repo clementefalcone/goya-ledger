@@ -48,10 +48,50 @@ Two of these defects were regressions introduced earlier in the same campaign (`
 
 Every commit was checked on a cloud builder: clippy with `-D warnings` and 3087–3089 lib tests. The final tree also passed fmt, doc tests, `crypto_boundary`, `bft_e2e` (21), `bft_mldsa65_e2e` (11) and the `pqc_crypto_module` suites with `acvp`.
 
+## Deep adversarial pass, 2026-11-25
+
+A second, instrumented pass ran on a fresh 7-node testnet (no Byzantine validator; faults only) to measure the open items and probe attacks the first campaign did not cover.
+
+### Write failures within budget were an ack artifact, not lost data
+
+Instrumented chaos (15 min, one honest fault at a time, 4 writers) recorded the DID of every failed write and checked afterwards whether it had committed:
+
+| Metric | Value |
+|---|---|
+| Acknowledged writes | 539 |
+| Failed writes (HTTP) | 41 |
+| Of those, committed anyway | 40 |
+| Truly lost | 1 (of 580 = 0.17%) |
+| Forks | 0 |
+
+The "46% failure" from the first campaign was writes whose HTTP ack did not arrive within 30 s while the write committed. It measured the ack, not the commit. This run is not a clean comparison to the 46% figure — it had no Byzantine validator and only one fault at a time — but the instrumentation finding stands: a failed ack is not a lost write. Fixes `314a007`, `f3e4600`, `718ec77` also landed from this pass (hex signatures, state-request cap, unadmitted buffer cap).
+
+### Consensus-message flood (timeout bomb): real in code, defended in practice
+
+`BftVote` and `BftTimeout` are forwarded to an unbounded channel with no signature check and no admitted-source check; processing one timeout forces up to ~12 ML-DSA verifications (its vote, a timeout certificate, and a high QC). A flood should pin CPU, grow the queue, and starve real consensus.
+
+Attempted: a 20-IP swarm (`swarm-bomb`) and a paced single IP. Result: v0 held at ≤18% CPU (≤45% paced), RSS stable at ~100 MB, chain advancing, all nodes in lockstep. The per-IP limits from the first campaign (16 connections, 100 msg/s, 10 MB/s) plus TCP read backpressure (~2–6 msg/s per connection) throttled the attack below the level where verification amplification bites. Not disproven: a large botnet (hundreds of distinct IPs) multiplies the per-IP throughput, and the unbounded channel is a latent memory risk. Fix still warranted as defense in depth: admit-check consensus messages before queueing and bound the channel.
+
+### Leader decapitation halts liveness within the fault budget
+
+Leader selection is round-robin and fully predictable: `leader = validators[round % n]`. An adversary that isolates (iptables DROP on 8081) the current leader each round halts the chain while a quorum of honest nodes is up.
+
+| Metric | Value |
+|---|---|
+| Nodes isolated at a time | 2 (within f = 2) |
+| Nodes reachable | 5 of 7 (quorum available) |
+| Chain | frozen at height 309 |
+| Forks | 0 (safety held) |
+| On heal | advanced to 310, consistent hash |
+
+Two *targeted* crashes defeat liveness where two *arbitrary* crashes would not: targeted leader isolation effectively erases the crash-fault tolerance, because the one node that must drive each round is always the one removed. It is self-reinforcing — once blocks stop, view-change backoff escalates to 30 s, slowing rounds and making the attacker's timing trivial. Isolation here used root control of the nodes; a real attacker needs an on-path network position (ISP, BGP, or a host near a validator) to drop the leader's P2P in real time, and the predictable schedule makes that cheap once the position exists. Independent validators across providers (operational decentralization) raise the cost of selectively partitioning the exact leader.
+
+The structural fix is unpredictable leader election (VRF sortition), so the adversary cannot know which node to target before its proposal is already propagating. This is a consensus-core change and needs a VRF primitive the module does not yet have.
+
 ## Open
 
-- Within the fault budget, 46% of writes still fail. The writer picks any honest node, including the one under fault, and waits 30 s for inclusion while view-change backoff can reach 30 s. The split between these two causes was not measured.
-- An honest validator still crossed the 100 msg/s limit 41 times in one run, without being banned.
-- BFT timeout messages are about 130 KB, because signatures inside them serialize as JSON number arrays.
-- A validator that is admitted can repeat `StateRequest` without limit.
+- An honest validator still crossed the 100 msg/s limit 41 times in one run, without being banned (message kind now logged for the next pass).
+- Consensus messages (`BftVote`, `BftTimeout`) are queued unauthenticated to an unbounded channel; defended in practice by per-IP limits, not by design.
+- Leader rotation is predictable, enabling targeted leader isolation; structural fix is VRF sortition.
+- A validator that is admitted can repeat `StateRequest` up to 5/s per IP; still unbounded in total across a session.
 - Validators are bounded by 64 connections per IP and do not count toward the global cap. A compromised validator could use that room.
