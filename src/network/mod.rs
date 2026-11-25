@@ -851,7 +851,7 @@ impl Node {
             let parsed = serde_json::from_slice::<Message>(&accum);
             if parsed.as_ref().is_err_and(|e| e.is_eof()) {
                 let sec = net_security.lock().unwrap_or_else(|e| e.into_inner());
-                if let Err(e) = sec.validate_message_size(accum.len()) {
+                if let Err(e) = sec.validate_message_size_for(accum.len(), is_validator) {
                     log::warn!("P2P message from {peer_addr_str} dropped: {e}");
                     break;
                 }

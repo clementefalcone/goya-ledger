@@ -91,6 +91,7 @@ pub struct RateLimitConfig {
     pub max_connections_per_peer: usize,
     pub max_connections_per_validator: usize,
     pub max_state_requests_per_second: u32,
+    pub max_unadmitted_message_bytes: usize,
 }
 
 impl Default for RateLimitConfig {
@@ -106,6 +107,7 @@ impl Default for RateLimitConfig {
             max_connections_per_peer: 16,
             max_connections_per_validator: 64,
             max_state_requests_per_second: 5,
+            max_unadmitted_message_bytes: 262_144,
         }
     }
 }
@@ -258,11 +260,17 @@ impl NetworkSecurityManager {
      * Validate incoming message size
      */
     pub fn validate_message_size(&self, size: usize) -> Result<(), String> {
-        if size > self.config.message_size_limit {
-            return Err(format!(
-                "Message size {} exceeds limit {}",
-                size, self.config.message_size_limit
-            ));
+        self.validate_message_size_for(size, true)
+    }
+
+    pub fn validate_message_size_for(&self, size: usize, is_admitted: bool) -> Result<(), String> {
+        let limit = if is_admitted {
+            self.config.message_size_limit
+        } else {
+            self.config.max_unadmitted_message_bytes
+        };
+        if size > limit {
+            return Err(format!("Message size {size} exceeds limit {limit}"));
         }
         Ok(())
     }
@@ -513,6 +521,25 @@ mod tests {
         let manager = NetworkSecurityManager::with_defaults();
         let result = manager.validate_message_size(100_000_000);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn unadmitted_peers_may_not_buffer_large_messages() {
+        let manager = NetworkSecurityManager::with_defaults();
+        let full_block = 5 * 1024 * 1024;
+        let unadmitted_cap = manager.config.max_unadmitted_message_bytes;
+
+        assert!(unadmitted_cap < full_block);
+        assert!(manager.validate_message_size_for(full_block, true).is_ok());
+        assert!(manager
+            .validate_message_size_for(full_block, false)
+            .is_err());
+        assert!(manager
+            .validate_message_size_for(unadmitted_cap, false)
+            .is_ok());
+        assert!(manager
+            .validate_message_size_for(unadmitted_cap + 1, false)
+            .is_err());
     }
 
     #[test]
