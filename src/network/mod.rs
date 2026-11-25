@@ -166,6 +166,37 @@ pub enum Message {
     BftTimeout(crate::consensus::bft::types::TimeoutMessage),
 }
 
+impl Message {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Message::Ping => "Ping",
+            Message::Pong => "Pong",
+            Message::GetPeers => "GetPeers",
+            Message::Peers(_) => "Peers",
+            Message::Version { .. } => "Version",
+            Message::GetContracts => "GetContracts",
+            Message::GetContractsSince { .. } => "GetContractsSince",
+            Message::Contracts(_) => "Contracts",
+            Message::NewContract(_) => "NewContract",
+            Message::UpdateContract(_) => "UpdateContract",
+            Message::SubmitTransaction(_) => "SubmitTransaction",
+            Message::OrderedBlock(_) => "OrderedBlock",
+            Message::RaftMessage(_) => "RaftMessage",
+            Message::Alive(_) => "Alive",
+            Message::StateRequest { .. } => "StateRequest",
+            Message::StateResponse { .. } => "StateResponse",
+            Message::ProposalRequest { .. } => "ProposalRequest",
+            Message::ProposalResponse { .. } => "ProposalResponse",
+            Message::PrivateDataPush { .. } => "PrivateDataPush",
+            Message::PrivateDataAck { .. } => "PrivateDataAck",
+            Message::BftProposal { .. } => "BftProposal",
+            Message::BftVote(_) => "BftVote",
+            Message::BftQuorumCertificate(_) => "BftQuorumCertificate",
+            Message::BftTimeout(_) => "BftTimeout",
+        }
+    }
+}
+
 /**
  * Nodo en la red P2P
  */
@@ -864,7 +895,10 @@ impl Node {
                     .unwrap_or_else(|e| e.into_inner())
                     .check_message_rate(&peer_ip)
                 {
-                    log::warn!("P2P message rate for {peer_addr_str}: {e}");
+                    log::warn!(
+                        "P2P message rate for {peer_addr_str} on {}: {e}",
+                        message.kind()
+                    );
                     break;
                 }
                 if matches!(message, Message::StateRequest { .. }) {
