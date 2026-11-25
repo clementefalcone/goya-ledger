@@ -43,7 +43,30 @@ pub struct VoteMessage {
     pub voter_id: String,
     /// Cryptographic signature over `(phase || block_hash || round)`.
     /// Variable-length: Ed25519 = 64 bytes, ML-DSA-65 = 3309 bytes.
+    #[serde(with = "hex_signature")]
     pub signature: Vec<u8>,
+}
+
+mod hex_signature {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredSignature {
+        Hex(String),
+        Bytes(Vec<u8>),
+    }
+
+    pub fn serialize<S: Serializer>(signature: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(signature))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        match StoredSignature::deserialize(d)? {
+            StoredSignature::Hex(text) => hex::decode(text).map_err(serde::de::Error::custom),
+            StoredSignature::Bytes(bytes) => Ok(bytes),
+        }
+    }
 }
 
 /// Domain separator prefix for BFT vote signing payloads.
@@ -58,6 +81,7 @@ const TIMEOUT_DOMAIN: &[u8] = b"GOYA-BFT-TIMEOUT-V1";
 pub struct TimeoutVote {
     pub round: u64,
     pub voter_id: String,
+    #[serde(with = "hex_signature")]
     pub signature: Vec<u8>,
 }
 
@@ -337,6 +361,71 @@ mod tests {
         ];
         let qc = QuorumCertificate::new(BftPhase::Prepare, block_hash(1), 0, votes).unwrap();
         assert_eq!(qc.voter_count(), 2);
+    }
+
+    #[test]
+    fn a_timeout_with_ml_dsa_signatures_travels_as_hex() {
+        let signature = vec![0xABu8; 3309];
+        let timeout = |voter: &str| TimeoutVote {
+            round: 9,
+            voter_id: voter.into(),
+            signature: signature.clone(),
+        };
+        let votes = ["v1", "v2", "v3", "v4", "v5"];
+        let mut qc_votes: Vec<VoteMessage> = votes.iter().map(|v| vote(1, 8, v)).collect();
+        qc_votes
+            .iter_mut()
+            .for_each(|v| v.signature = signature.clone());
+        let message = TimeoutMessage {
+            vote: timeout("v0"),
+            high_qc: Some(
+                QuorumCertificate::new(BftPhase::Prepare, block_hash(1), 8, qc_votes).unwrap(),
+            ),
+            round_certificate: votes.iter().map(|v| timeout(v)).collect(),
+        };
+
+        let wire = serde_json::to_string(&message).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&wire).unwrap();
+
+        assert_eq!(json["vote"]["signature"], hex::encode(&signature));
+        assert_eq!(
+            json["round_certificate"][0]["signature"],
+            hex::encode(&signature)
+        );
+        assert_eq!(
+            json["high_qc"]["votes"][0]["signature"],
+            hex::encode(&signature)
+        );
+        assert!(
+            wire.len() < 80_000,
+            "timeout message is {} bytes",
+            wire.len()
+        );
+        assert_eq!(
+            serde_json::from_str::<TimeoutMessage>(&wire).unwrap(),
+            message
+        );
+    }
+
+    #[test]
+    fn a_qc_stored_with_signatures_as_byte_arrays_still_reads() {
+        let hash = vec![1u8; 32];
+        let stored = serde_json::json!({
+            "block_hash": hash,
+            "round": 8,
+            "phase": "Commit",
+            "votes": [{
+                "block_hash": hash,
+                "round": 8,
+                "phase": "Commit",
+                "voter_id": "v1",
+                "signature": [171, 205, 239],
+            }],
+        });
+
+        let qc: QuorumCertificate = serde_json::from_value(stored).unwrap();
+
+        assert_eq!(qc.votes[0].signature, vec![0xAB, 0xCD, 0xEF]);
     }
 
     // --- BftPhase domain separation ---
