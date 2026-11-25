@@ -89,6 +89,7 @@ pub struct RateLimitConfig {
     pub suspect_threshold_score: i32,
     pub ban_duration_seconds: u64,
     pub max_connections_per_peer: usize,
+    pub max_connections_per_validator: usize,
 }
 
 impl Default for RateLimitConfig {
@@ -102,6 +103,7 @@ impl Default for RateLimitConfig {
             suspect_threshold_score: 50,
             ban_duration_seconds: 600,
             max_connections_per_peer: 16,
+            max_connections_per_validator: 64,
         }
     }
 }
@@ -177,6 +179,19 @@ impl NetworkSecurityManager {
      * Register a new peer connection
      */
     pub fn register_peer(&mut self, address: String) -> Result<(), String> {
+        if self.active_connections >= self.config.max_concurrent_connections {
+            return Err("Max concurrent connections reached".to_string());
+        }
+        self.register_with_cap(address, self.config.max_connections_per_peer)?;
+        self.active_connections += 1;
+        Ok(())
+    }
+
+    pub fn register_validator(&mut self, address: String) -> Result<(), String> {
+        self.register_with_cap(address, self.config.max_connections_per_validator)
+    }
+
+    fn register_with_cap(&mut self, address: String, cap: usize) -> Result<(), String> {
         self.lift_expired_ban(&address);
         if self
             .peer_scores
@@ -186,15 +201,9 @@ impl NetworkSecurityManager {
             return Err(format!("Peer {address} is banned"));
         }
 
-        if self.active_connections >= self.config.max_concurrent_connections {
-            return Err("Max concurrent connections reached".to_string());
-        }
         let peer_connections = self.connections_by_peer.entry(address.clone()).or_insert(0);
-        if *peer_connections >= self.config.max_connections_per_peer {
-            return Err(format!(
-                "Peer {address} already holds {} connections",
-                self.config.max_connections_per_peer
-            ));
+        if *peer_connections >= cap {
+            return Err(format!("Peer {address} already holds {cap} connections"));
         }
         *peer_connections += 1;
 
@@ -204,8 +213,6 @@ impl NetworkSecurityManager {
             self.rate_limits
                 .insert(address.clone(), PeerRateLimit::new(address));
         }
-
-        self.active_connections += 1;
         Ok(())
     }
 
@@ -225,9 +232,15 @@ impl NetworkSecurityManager {
      * Unregister a peer connection
      */
     pub fn unregister_peer(&mut self, address: &str) {
-        if self.active_connections > 0 {
-            self.active_connections -= 1;
-        }
+        self.active_connections = self.active_connections.saturating_sub(1);
+        self.release_connection(address);
+    }
+
+    pub fn unregister_validator(&mut self, address: &str) {
+        self.release_connection(address);
+    }
+
+    fn release_connection(&mut self, address: &str) {
         if let Some(count) = self.connections_by_peer.get_mut(address) {
             *count -= 1;
             if *count == 0 {
@@ -546,6 +559,32 @@ mod tests {
         assert!(manager.register_peer("10.0.0.10".to_string()).is_ok());
         manager.unregister_peer("10.0.0.9");
         assert!(manager.register_peer("10.0.0.9".to_string()).is_ok());
+    }
+
+    #[test]
+    fn validators_get_room_for_bursts_that_strangers_do_not() {
+        let mut manager = NetworkSecurityManager::with_defaults();
+        for _ in 0..manager.config.max_connections_per_peer {
+            manager.register_peer("10.0.0.11".to_string()).unwrap();
+        }
+
+        assert!(manager.register_peer("10.0.0.11".to_string()).is_err());
+        assert!(manager.register_validator("10.0.0.11".to_string()).is_ok());
+    }
+
+    #[test]
+    fn strangers_filling_every_slot_do_not_lock_out_validators() {
+        let mut manager = NetworkSecurityManager::with_defaults();
+        manager.config.max_concurrent_connections = 2;
+        manager.register_peer("10.0.0.21".to_string()).unwrap();
+        manager.register_peer("10.0.0.22".to_string()).unwrap();
+
+        assert!(manager.register_peer("10.0.0.23".to_string()).is_err());
+        assert!(manager.register_validator("10.0.0.30".to_string()).is_ok());
+        manager.unregister_validator("10.0.0.30");
+        assert_eq!(manager.active_connections, 2);
+        manager.unregister_peer("10.0.0.21");
+        assert!(manager.register_peer("10.0.0.23".to_string()).is_ok());
     }
 
     #[test]

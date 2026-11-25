@@ -752,10 +752,15 @@ impl Node {
         let mut buffer = vec![0u8; p2p_handler_buffer_size()];
         let mut first_message = true;
 
-        // Register peer with NetworkSecurityManager
+        let is_validator = is_admitted_source(&peers, Some(&peer_addr_str));
         {
             let mut sec = net_security.lock().unwrap_or_else(|e| e.into_inner());
-            if let Err(e) = sec.register_peer(peer_ip.clone()) {
+            let registered = if is_validator {
+                sec.register_validator(peer_ip.clone())
+            } else {
+                sec.register_peer(peer_ip.clone())
+            };
+            if let Err(e) = registered {
                 log::warn!("P2P connection rejected for {peer_addr_str}: {e}");
                 return Err(e.into());
             }
@@ -952,7 +957,11 @@ impl Node {
         // Always unregister peer on disconnect
         {
             let mut sec = net_security.lock().unwrap_or_else(|e| e.into_inner());
-            sec.unregister_peer(&peer_ip);
+            if is_validator {
+                sec.unregister_validator(&peer_ip);
+            } else {
+                sec.unregister_peer(&peer_ip);
+            }
         }
 
         connection_result
