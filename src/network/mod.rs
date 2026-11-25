@@ -867,6 +867,16 @@ impl Node {
                     log::warn!("P2P message rate for {peer_addr_str}: {e}");
                     break;
                 }
+                if matches!(message, Message::StateRequest { .. }) {
+                    if let Err(e) = net_security
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .check_state_request(&peer_ip)
+                    {
+                        log::warn!("P2P state request from {peer_addr_str} refused: {e}");
+                        break;
+                    }
+                }
                 // Si es el primer mensaje y es Version, validar network_id y responder
                 if first_message {
                     if let Message::Version {

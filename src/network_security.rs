@@ -90,6 +90,7 @@ pub struct RateLimitConfig {
     pub ban_duration_seconds: u64,
     pub max_connections_per_peer: usize,
     pub max_connections_per_validator: usize,
+    pub max_state_requests_per_second: u32,
 }
 
 impl Default for RateLimitConfig {
@@ -104,6 +105,7 @@ impl Default for RateLimitConfig {
             ban_duration_seconds: 600,
             max_connections_per_peer: 16,
             max_connections_per_validator: 64,
+            max_state_requests_per_second: 5,
         }
     }
 }
@@ -116,6 +118,7 @@ impl Default for RateLimitConfig {
 pub struct PeerRateLimit {
     pub address: String,
     pub messages_this_second: u32,
+    pub state_requests_this_second: u32,
     pub bytes_this_second: u64,
     pub last_reset: u64,
 }
@@ -130,6 +133,7 @@ impl PeerRateLimit {
         PeerRateLimit {
             address,
             messages_this_second: 0,
+            state_requests_this_second: 0,
             bytes_this_second: 0,
             last_reset: now,
         }
@@ -143,6 +147,7 @@ impl PeerRateLimit {
 
         if now > self.last_reset {
             self.messages_this_second = 0;
+            self.state_requests_this_second = 0;
             self.bytes_this_second = 0;
             self.last_reset = now;
         }
@@ -320,6 +325,22 @@ impl NetworkSecurityManager {
             return Err("Rate limit exceeded: too many messages".to_string());
         }
         rate_limit.messages_this_second += 1;
+        Ok(())
+    }
+
+    pub fn check_state_request(&mut self, address: &str) -> Result<(), String> {
+        let rate_limit = self
+            .rate_limits
+            .entry(address.to_string())
+            .or_insert_with(|| PeerRateLimit::new(address.to_string()));
+        rate_limit.reset_if_needed();
+        if rate_limit.state_requests_this_second >= self.config.max_state_requests_per_second {
+            return Err(format!(
+                "{address} exceeded {} state requests per second",
+                self.config.max_state_requests_per_second
+            ));
+        }
+        rate_limit.state_requests_this_second += 1;
         Ok(())
     }
 
@@ -604,5 +625,25 @@ mod tests {
         }
 
         assert!(manager.check_message_rate("10.0.0.8").is_err());
+    }
+
+    #[test]
+    fn state_requests_from_one_validator_are_capped_per_second() {
+        let mut manager = NetworkSecurityManager::with_defaults();
+        manager.register_validator("10.0.0.40".to_string()).unwrap();
+        manager.register_validator("10.0.0.41".to_string()).unwrap();
+        manager
+            .rate_limits
+            .values_mut()
+            .for_each(|window| window.last_reset = u64::MAX);
+        let limit = manager.config.max_state_requests_per_second;
+
+        for _ in 0..limit {
+            assert!(manager.check_state_request("10.0.0.40").is_ok());
+        }
+
+        assert!(manager.check_state_request("10.0.0.40").is_err());
+        assert!(manager.check_state_request("10.0.0.41").is_ok());
+        assert_eq!(manager.peer_scores["10.0.0.40"].score, 100);
     }
 }
