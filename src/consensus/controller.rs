@@ -42,6 +42,16 @@ pub enum BftEvent {
     Transaction(Transaction),
 }
 
+const EARLY_PROPOSAL_WINDOW: u64 = 2;
+
+fn take_ready_proposal(
+    early_proposals: &mut std::collections::BTreeMap<u64, BftEvent>,
+    current_round: u64,
+) -> Option<BftEvent> {
+    *early_proposals = early_proposals.split_off(&current_round);
+    early_proposals.remove(&current_round)
+}
+
 fn is_authentic_proposal(
     verifier: &impl SignatureVerifier,
     round_leader: &str,
@@ -85,6 +95,8 @@ pub async fn run_bft_loop(
     let mut pending_block: Option<Block> = None;
     // Buffer votes that arrive before the proposal for the current round.
     let mut early_votes: Vec<VoteMessage> = Vec::new();
+    let mut early_proposals: std::collections::BTreeMap<u64, BftEvent> =
+        std::collections::BTreeMap::new();
 
     let action = manager.start();
     handle_action(&action, &node, &signer, &node_id, &mut manager).await;
@@ -110,111 +122,210 @@ pub async fn run_bft_loop(
     tokio::pin!(timeout);
 
     loop {
-        tokio::select! {
-            Some(event) = rx.recv() => {
-                match event {
-                    BftEvent::Proposal { round, block_hash, leader_id, block, justify_qc, leader_signature } => {
-                        if round < manager.current_round() {
-                            continue;
-                        }
-                        if !is_authentic_proposal(&proposal_verifier, manager.leader_for_round(round), round, &block_hash, &leader_id, &leader_signature) {
-                            log::warn!("BFT: rejected proposal from {leader_id} in round {round}: not signed by the round's leader {}", manager.leader_for_round(round));
-                            continue;
-                        }
-                        if !manager.enter_justified_round(round, justify_qc.as_ref()) {
-                            log::warn!("BFT: rejected proposal from {leader_id} in round {round}: no QC or timeout quorum justifies leaving round {}", manager.current_round());
-                            continue;
-                        }
-                        if crate::mining::block_hash(&block) != block_hash {
-                            log::warn!("BFT: rejected proposal from {leader_id} in round {round}: block body does not hash to {}", hex::encode(block_hash));
-                            continue;
-                        }
-                        book.record(&block);
+        let event = match take_ready_proposal(&mut early_proposals, manager.current_round()) {
+            Some(held) => held,
+            None => tokio::select! {
+                Some(event) = rx.recv() => event,
+                _ = wake.notified() => {
+                    if manager.is_current_leader() && pending_block.is_none() {
+                        try_mine_and_propose(&mut manager, &mut pending_block, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
+                    }
+                    continue;
+                }
+                _ = &mut timeout => {
+                    let round = manager.current_round();
+                    let vote = TimeoutVote {
+                        round,
+                        voter_id: node_id.clone(),
+                        signature: signer.sign(&timeout_signing_payload(round, &node_id)).unwrap_or_default(),
+                    };
+                    let message = manager.timeout_message(vote);
+                    node.broadcast_message(&crate::network::Message::BftTimeout(message.clone())).await;
+                    manager.record_local_timeout();
+                    if manager.process_timeout_message(&message) {
+                        enter_round_after_timeout(&mut manager, &mut pending_block, &mut early_votes, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
+                    } else {
                         reset_timeout(&mut timeout, &manager);
-                        pending_block = Some(block);
-                        let action = manager.process_event(RoundEvent::Proposal { block_hash, leader_id, justify_qc });
-                        let mut decided = handle_action(&action, &node, &signer, &node_id, &mut manager).await;
-                        // Replay votes that arrived before this proposal.
-                        if !decided {
-                            for buffered in early_votes.drain(..) {
-                                let a = manager.process_event(RoundEvent::Vote(buffered));
-                                if handle_action(&a, &node, &signer, &node_id, &mut manager).await {
-                                    decided = true;
-                                    break;
-                                }
-                            }
-                        }
-                        early_votes.clear();
-                        decided = decided || replay_ready_votes(&node, &signer, &node_id, &mut manager).await;
-                        if decided {
-                            if let Some(blk) = certified_block(pending_block.take(), manager.highest_commit_qc(), &book.bodies) {
-                                commit_block(blk, &manager, &store, &node, &tx_pool).await;
-                            }
-                            advance_round(&mut manager, &mut pending_block, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
-                        } else {
-                            reset_timeout(&mut timeout, &manager);
-                        }
                     }
-                    BftEvent::Vote(vote) => {
-                        // Buffer votes that arrive before the proposal for this round.
-                        if vote.round == manager.current_round() && pending_block.is_none() {
-                            log::debug!("BFT: buffering early vote from {} phase={:?} round={}", vote.voter_id, vote.phase, vote.round);
-                            early_votes.push(vote);
-                            continue;
-                        }
-                        let action = manager.process_event(RoundEvent::Vote(vote));
-                        let decided = handle_action(&action, &node, &signer, &node_id, &mut manager).await
-                            || replay_ready_votes(&node, &signer, &node_id, &mut manager).await;
-                        if decided {
-                            if let Some(blk) = certified_block(pending_block.take(), manager.highest_commit_qc(), &book.bodies) {
-                                commit_block(blk, &manager, &store, &node, &tx_pool).await;
-                            }
-                            advance_round(&mut manager, &mut pending_block, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
-                        } else {
-                            reset_timeout(&mut timeout, &manager);
-                        }
-                    }
-                    BftEvent::Timeout(message) => {
-                        let sender_is_behind = manager.is_behind(&message);
-                        if manager.process_timeout_message(&message) {
-                            enter_round_after_timeout(&mut manager, &mut pending_block, &mut early_votes, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
-                        } else if sender_is_behind {
-                            if let Some(own) = manager.own_timeout().cloned() {
-                                node.broadcast_message(&crate::network::Message::BftTimeout(manager.timeout_message(own))).await;
-                            }
-                        }
-                    }
-                    BftEvent::Transaction(tx) => {
-                        let id = tx.id.clone();
-                        if let Err(reason) = tx_pool.lock().unwrap_or_else(|e| e.into_inner()).add(tx) {
-                            log::debug!("BFT: gossiped transaction {id} not queued: {reason}");
-                            continue;
-                        }
-                        if manager.is_current_leader() && pending_block.is_none() {
-                            try_mine_and_propose(&mut manager, &mut pending_block, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
-                        }
-                    }
+                    continue;
                 }
-            }
-            _ = wake.notified() => {
-                if manager.is_current_leader() && pending_block.is_none() {
-                    try_mine_and_propose(&mut manager, &mut pending_block, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
+            },
+        };
+        match event {
+            BftEvent::Proposal {
+                round,
+                block_hash,
+                leader_id,
+                block,
+                justify_qc,
+                leader_signature,
+            } => {
+                if round < manager.current_round() {
+                    continue;
                 }
-            }
-            _ = &mut timeout => {
-                let round = manager.current_round();
-                let vote = TimeoutVote {
+                if !is_authentic_proposal(
+                    &proposal_verifier,
+                    manager.leader_for_round(round),
                     round,
-                    voter_id: node_id.clone(),
-                    signature: signer.sign(&timeout_signing_payload(round, &node_id)).unwrap_or_default(),
-                };
-                let message = manager.timeout_message(vote);
-                node.broadcast_message(&crate::network::Message::BftTimeout(message.clone())).await;
-                manager.record_local_timeout();
-                if manager.process_timeout_message(&message) {
-                    enter_round_after_timeout(&mut manager, &mut pending_block, &mut early_votes, &mut timeout, &node_id, &node, &signer, &mining_service, &tx_pool, &mut book).await;
+                    &block_hash,
+                    &leader_id,
+                    &leader_signature,
+                ) {
+                    log::warn!("BFT: rejected proposal from {leader_id} in round {round}: not signed by the round's leader {}", manager.leader_for_round(round));
+                    continue;
+                }
+                if !manager.enter_justified_round(round, justify_qc.as_ref()) {
+                    if round <= manager.current_round() + EARLY_PROPOSAL_WINDOW {
+                        log::info!("BFT: holding proposal from {leader_id} for round {round} until this node leaves round {}", manager.current_round());
+                        early_proposals.insert(
+                            round,
+                            BftEvent::Proposal {
+                                round,
+                                block_hash,
+                                leader_id,
+                                block,
+                                justify_qc,
+                                leader_signature,
+                            },
+                        );
+                    } else {
+                        log::warn!("BFT: rejected proposal from {leader_id} in round {round}: no QC or timeout quorum justifies leaving round {}", manager.current_round());
+                    }
+                    continue;
+                }
+                if crate::mining::block_hash(&block) != block_hash {
+                    log::warn!("BFT: rejected proposal from {leader_id} in round {round}: block body does not hash to {}", hex::encode(block_hash));
+                    continue;
+                }
+                book.record(&block);
+                reset_timeout(&mut timeout, &manager);
+                pending_block = Some(block);
+                let action = manager.process_event(RoundEvent::Proposal {
+                    block_hash,
+                    leader_id,
+                    justify_qc,
+                });
+                let mut decided =
+                    handle_action(&action, &node, &signer, &node_id, &mut manager).await;
+                // Replay votes that arrived before this proposal.
+                if !decided {
+                    for buffered in early_votes.drain(..) {
+                        let a = manager.process_event(RoundEvent::Vote(buffered));
+                        if handle_action(&a, &node, &signer, &node_id, &mut manager).await {
+                            decided = true;
+                            break;
+                        }
+                    }
+                }
+                early_votes.clear();
+                decided =
+                    decided || replay_ready_votes(&node, &signer, &node_id, &mut manager).await;
+                if decided {
+                    if let Some(blk) = certified_block(
+                        pending_block.take(),
+                        manager.highest_commit_qc(),
+                        &book.bodies,
+                    ) {
+                        commit_block(blk, &manager, &store, &node, &tx_pool).await;
+                    }
+                    advance_round(
+                        &mut manager,
+                        &mut pending_block,
+                        &mut timeout,
+                        &node_id,
+                        &node,
+                        &signer,
+                        &mining_service,
+                        &tx_pool,
+                        &mut book,
+                    )
+                    .await;
                 } else {
                     reset_timeout(&mut timeout, &manager);
+                }
+            }
+            BftEvent::Vote(vote) => {
+                // Buffer votes that arrive before the proposal for this round.
+                if vote.round == manager.current_round() && pending_block.is_none() {
+                    log::debug!(
+                        "BFT: buffering early vote from {} phase={:?} round={}",
+                        vote.voter_id,
+                        vote.phase,
+                        vote.round
+                    );
+                    early_votes.push(vote);
+                    continue;
+                }
+                let action = manager.process_event(RoundEvent::Vote(vote));
+                let decided = handle_action(&action, &node, &signer, &node_id, &mut manager).await
+                    || replay_ready_votes(&node, &signer, &node_id, &mut manager).await;
+                if decided {
+                    if let Some(blk) = certified_block(
+                        pending_block.take(),
+                        manager.highest_commit_qc(),
+                        &book.bodies,
+                    ) {
+                        commit_block(blk, &manager, &store, &node, &tx_pool).await;
+                    }
+                    advance_round(
+                        &mut manager,
+                        &mut pending_block,
+                        &mut timeout,
+                        &node_id,
+                        &node,
+                        &signer,
+                        &mining_service,
+                        &tx_pool,
+                        &mut book,
+                    )
+                    .await;
+                } else {
+                    reset_timeout(&mut timeout, &manager);
+                }
+            }
+            BftEvent::Timeout(message) => {
+                let sender_is_behind = manager.is_behind(&message);
+                if manager.process_timeout_message(&message) {
+                    enter_round_after_timeout(
+                        &mut manager,
+                        &mut pending_block,
+                        &mut early_votes,
+                        &mut timeout,
+                        &node_id,
+                        &node,
+                        &signer,
+                        &mining_service,
+                        &tx_pool,
+                        &mut book,
+                    )
+                    .await;
+                } else if sender_is_behind {
+                    if let Some(own) = manager.own_timeout().cloned() {
+                        node.broadcast_message(&crate::network::Message::BftTimeout(
+                            manager.timeout_message(own),
+                        ))
+                        .await;
+                    }
+                }
+            }
+            BftEvent::Transaction(tx) => {
+                let id = tx.id.clone();
+                if let Err(reason) = tx_pool.lock().unwrap_or_else(|e| e.into_inner()).add(tx) {
+                    log::debug!("BFT: gossiped transaction {id} not queued: {reason}");
+                    continue;
+                }
+                if manager.is_current_leader() && pending_block.is_none() {
+                    try_mine_and_propose(
+                        &mut manager,
+                        &mut pending_block,
+                        &node_id,
+                        &node,
+                        &signer,
+                        &mining_service,
+                        &tx_pool,
+                        &mut book,
+                    )
+                    .await;
                 }
             }
         }
@@ -613,6 +724,33 @@ mod tests {
     use crate::mining::{block_hash, MiningConfig};
     use crate::storage::{BlockStore, MemoryStore};
     use std::collections::HashMap;
+
+    #[test]
+    fn held_proposal_is_released_on_reaching_its_round_and_stale_ones_are_dropped() {
+        let held = |round| {
+            (
+                round,
+                BftEvent::Transaction(Transaction {
+                    id: format!("round-{round}"),
+                    block_height: 0,
+                    timestamp: 0,
+                    input_did: String::new(),
+                    output_recipient: String::new(),
+                    amount: 0,
+                    state: String::new(),
+                    fee: 0,
+                    payload: None,
+                }),
+            )
+        };
+        let mut early = std::collections::BTreeMap::from([held(4), held(6), held(7)]);
+
+        let released = take_ready_proposal(&mut early, 6);
+
+        assert!(matches!(released, Some(BftEvent::Transaction(ref tx)) if tx.id == "round-6"));
+        assert_eq!(early.keys().copied().collect::<Vec<_>>(), vec![7]);
+        assert!(take_ready_proposal(&mut early, 6).is_none());
+    }
 
     #[test]
     fn proposal_replayed_with_another_round_is_not_authentic() {
