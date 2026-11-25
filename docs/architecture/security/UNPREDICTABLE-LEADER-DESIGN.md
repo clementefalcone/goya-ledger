@@ -62,3 +62,46 @@ Open question for phase 0: what is the per-round beacon? It must be agreed by al
 - **Phase 3 — re-attack and measure.** Rerun the decapitator against the upgraded testnet. Success criterion: the attacker can no longer halt the chain with f targeted isolations and is forced to f + 1 (quorum loss). Record before/after, as with the campaign.
 
 Each phase ends with a gate and, from phase 2 on, a re-attack. Nothing merges to mainnet until phase 3 shows the measured improvement, and only then with all validators upgrading together.
+
+## Phase 0 findings (go / no-go)
+
+Run 2026-11-25. Research pass plus a code analysis of Goya's per-round state. A first-hand benchmark on Graviton was prepared but not run (see "measurement" below).
+
+### Scheme reality
+
+- The concrete fit is the LB-VRF family (lattice VRF, Module-SIS/LWE), which reuses the lattice assumptions Goya already depends on.
+- The only Rust implementation (`zhenfeizhang/lb-vrf`) is research/prototype: it implements the **one-time** scheme; the **many-time** scheme is an open TODO in the repo ("decide which long-term signature scheme… implement scheme"). It carries no clear license and open tasks for zeroization and tests.
+- LB-VRF is **k-time**: a key pair yields a fixed number of outputs (published variants: 8, 16, 128, 256). A consensus that runs forever would exhaust a key and needs a key-rotation / re-registration protocol layered on top — itself new, validator-set-coupled work.
+- Published cost (authors' hardware, x86): 84-byte output, ~5 KB proof, ~3 ms evaluate, ~1 ms verify. The research is moving fast — ring VRFs (2026), Qelect SSLE (2025), key-homomorphic/aggregate VRFs (2024) — so a better-fitting, maintained scheme may arrive.
+
+### The beacon is the real blocker
+
+A VRF sortition still needs a per-round **beacon**: a value that is (a) agreed by all honest nodes, (b) unpredictable before the round, and (c) still produced **during a stall**, when no blocks commit. Analysis of Goya's code:
+
+- The only per-round artifact that forms during a stall is the timeout certificate. In `round_manager.rs` it is built from `self.timeouts.values()` — each node's own subset of collected timeout votes. Different nodes hold different subsets, so the certificate's bytes, and any hash of them, **differ across nodes**. It is not canonical.
+- A beacon derived from the last committed block is fixed during a stall, so it re-opens the attack exactly when it matters.
+- Making the beacon work therefore needs either a canonicalized timeout certificate (deterministic quorum selection and ordering) or a threshold-randomness primitive — design work *beyond* the VRF, and the harder half.
+
+### The margin at Goya's n
+
+At n = 4-7 an unpredictable leader only forces the attacker from f targeted isolations up to f + 1 (quorum loss): a one-node margin at n = 7, and almost nothing at the mainnet n = 4. The payoff scales with n (see §3). Growing the independently-operated validator set is the larger near-term lever.
+
+### Measurement
+
+A benchmark of the prototype one-time scheme on a t4g (Graviton2, the mainnet hardware) was scripted but not executed; running external, unreviewed crypto on a fresh cloud node needs explicit approval. The go/no-go does not hinge on it, since the blockers below are independent of raw speed. If the VRF path is later taken, a first-hand Graviton benchmark is the first task of phase 1.
+
+### Decision: no-go on shipping a lattice VRF sortition now
+
+Three independent blockers, none about speed:
+
+1. No production, many-time lattice VRF exists in Rust; the only implementation is prototype and one-time.
+2. The per-round beacon that survives a stall is an unsolved design problem that likely needs another primitive or a consensus-level canonicalization.
+3. At the current validator count the cryptographic fix buys a one-node margin; the larger lever is growing n.
+
+Recommended instead, in order:
+
+- **Near term:** pursue operational decentralization — more validators, run by independent operators across different providers/regions — which raises both the quorum-loss threshold and the cost of selectively partitioning the exact leader. This is the larger lever and needs no new cryptography.
+- **Track:** the fast-moving post-quantum VRF / SSLE research, and revisit this path when n is large enough to justify it and a maintained many-time scheme exists.
+- **Do not** ship a home-made VRF or a beacon hack presented as a fix; both would be the kind of half-measure this project's standard rejects.
+
+This keeps the finding honest: the decapitation weakness is real and documented, the structural fix is a genuine research-grade project gated on a larger validator set, and the actionable near-term defense is decentralization, not a patch.
