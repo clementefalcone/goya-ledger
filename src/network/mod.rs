@@ -1710,6 +1710,10 @@ impl Node {
                 Ok(None)
             }
             Message::BftVote(ref vote) => {
+                if !is_admitted_source(peers, source_peer.as_deref()) {
+                    log::warn!("BFT vote from {source_peer:?} dropped: not an admitted validator");
+                    return Ok(None);
+                }
                 log::info!(
                     "BFT: received vote phase={:?} voter={} round={}",
                     vote.phase,
@@ -1722,6 +1726,12 @@ impl Node {
                 Ok(None)
             }
             Message::BftTimeout(ref message) => {
+                if !is_admitted_source(peers, source_peer.as_deref()) {
+                    log::warn!(
+                        "BFT timeout from {source_peer:?} dropped: not an admitted validator"
+                    );
+                    return Ok(None);
+                }
                 if let Some(tx) = bft_tx {
                     let _ = tx.send(crate::consensus::controller::BftEvent::Timeout(
                         message.clone(),
@@ -3315,6 +3325,10 @@ mod tests {
         let (bft_tx, mut bft_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
         node.bft_tx = Some(bft_tx);
+        node.peers
+            .lock()
+            .unwrap()
+            .insert("127.0.0.1:8081".to_string());
         let server = tokio::spawn(async move {
             let _ = node.start_server(port).await;
         });
@@ -3344,6 +3358,45 @@ mod tests {
             delivered,
             Ok(Some(crate::consensus::controller::BftEvent::Vote(ref v))) if v.round == 9
         ));
+    }
+
+    #[tokio::test]
+    async fn a_vote_from_an_unadmitted_source_never_reaches_consensus() {
+        use tokio::io::AsyncWriteExt;
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
+        node.bft_tx = Some(bft_tx);
+        let server = tokio::spawn(async move {
+            let _ = node.start_server(port).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let vote = Message::BftVote(crate::consensus::bft::types::VoteMessage {
+            block_hash: [3u8; 32],
+            round: 9,
+            phase: crate::consensus::bft::types::BftPhase::Prepare,
+            voter_id: "v2".into(),
+            signature: vec![7u8; 3309],
+        });
+        let payload = serde_json::to_vec(&vote).unwrap();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream.set_nodelay(true).unwrap();
+        stream.write_all(&payload).await.unwrap();
+
+        let delivered =
+            tokio::time::timeout(std::time::Duration::from_millis(800), bft_rx.recv()).await;
+        server.abort();
+
+        assert!(
+            delivered.is_err(),
+            "unadmitted vote must not reach consensus: {delivered:?}"
+        );
     }
 
     #[test]
