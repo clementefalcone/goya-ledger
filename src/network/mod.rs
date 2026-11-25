@@ -1416,10 +1416,10 @@ impl Node {
 
             Message::StateRequest { from_height } => {
                 if !is_admitted_source(peers, source_peer.as_deref()) {
-                    log::warn!(
-                        "P2P state request from {source_peer:?} ignored: not an admitted validator"
-                    );
-                    return Ok(None);
+                    return Err(format!(
+                        "P2P state request from {source_peer:?} refused: not an admitted validator"
+                    )
+                    .into());
                 }
                 // Respond with blocks starting at from_height, up to STATE_BATCH_SIZE.
                 if let Some(ref blk_store) = store {
@@ -1696,6 +1696,35 @@ impl Node {
      * Conecta a un peer
      */
     pub async fn connect_to_peer(&self, address: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let their_count = self.announce_to(address).await?;
+        println!("📡 Peer agregado en connect_to_peer: {address}");
+
+        let my_count = self
+            .store
+            .as_ref()
+            .and_then(|s| s.get_latest_height().ok())
+            .map(|h| (h + 1) as usize)
+            .unwrap_or(0);
+
+        if their_count > my_count {
+            println!(
+                "📥 Requesting state sync from {address} (them: {their_count}, us: {my_count})"
+            );
+            self.request_state_sync(address, my_count as u64).await?;
+        }
+
+        if self.contract_manager.is_some() {
+            println!("📋 Sincronizando contratos desde {address}...");
+            if let Err(e) = self.request_contracts(address).await {
+                eprintln!("⚠️  Error sincronizando contratos desde {address}: {e}");
+            }
+        }
+
+        println!("✅ Conectado a peer: {address}");
+        Ok(())
+    }
+
+    async fn announce_to(&self, address: &str) -> Result<usize, Box<dyn std::error::Error>> {
         let chain_tip = if let Some(s) = &self.store {
             let h = s.get_latest_height().unwrap_or(0);
             let hash = s
@@ -1753,31 +1782,7 @@ impl Node {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(address.to_string());
-        println!("📡 Peer agregado en connect_to_peer: {address}");
-
-        let my_count = self
-            .store
-            .as_ref()
-            .and_then(|s| s.get_latest_height().ok())
-            .map(|h| (h + 1) as usize)
-            .unwrap_or(0);
-
-        if their_count > my_count {
-            println!(
-                "📥 Requesting state sync from {address} (them: {their_count}, us: {my_count})"
-            );
-            self.request_state_sync(address, my_count as u64).await?;
-        }
-
-        if self.contract_manager.is_some() {
-            println!("📋 Sincronizando contratos desde {address}...");
-            if let Err(e) = self.request_contracts(address).await {
-                eprintln!("⚠️  Error sincronizando contratos desde {address}: {e}");
-            }
-        }
-
-        println!("✅ Conectado a peer: {address}");
-        Ok(())
+        Ok(their_count)
     }
 
     /**
@@ -2279,12 +2284,19 @@ impl Node {
         from_height: u64,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let msg = Message::StateRequest { from_height };
-        let resp = self
-            .send_and_wait(address, msg, std::time::Duration::from_secs(30))
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error> {
-                Box::new(std::io::Error::other(e.to_string()))
-            })?;
+        let timeout = std::time::Duration::from_secs(30);
+        let resp = match self.send_and_wait(address, msg.clone(), timeout).await {
+            Ok(resp) => resp,
+            Err(refused) => {
+                log::info!("state request to {address} refused ({refused}); announcing again");
+                self.announce_to(address).await?;
+                self.send_and_wait(address, msg, timeout).await.map_err(
+                    |e| -> Box<dyn std::error::Error> {
+                        Box::new(std::io::Error::other(e.to_string()))
+                    },
+                )?
+            }
+        };
         let mut written = 0;
         if let Message::StateResponse { blocks } = resp {
             if let Some(s) = &self.store {
@@ -3535,6 +3547,51 @@ mod tests {
         server.abort();
 
         assert_eq!(store.get_latest_height().unwrap(), 120);
+    }
+
+    #[tokio::test]
+    async fn a_restarted_validator_serves_sync_once_the_lagging_one_announces_again() {
+        let signer = trusted_provider();
+        let source_store: Arc<dyn crate::storage::traits::BlockStore> =
+            Arc::new(crate::storage::MemoryStore::new());
+        let mut parent_hash = [0u8; 32];
+        for height in 1..=5u64 {
+            let svc = crate::ordering::service::OrderingService::with_config(10, 500)
+                .with_signing_provider(signer.clone());
+            svc.submit_tx(transaction(&format!("tx-{height}"), None))
+                .unwrap();
+            let block = svc.cut_block(height, parent_hash, "ord").unwrap().unwrap();
+            parent_hash = crate::mining::block_hash(&block);
+            crate::mining::persist_block(source_store.as_ref(), &block).unwrap();
+        }
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut restarted = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
+        restarted.store = Some(source_store);
+        restarted.signing_provider = Some(signer.clone());
+        restarted.announce_address = Some(format!("127.0.0.1:{port}"));
+        let server = tokio::spawn(async move {
+            let _ = restarted.start_server(port).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let store: Arc<dyn crate::storage::traits::BlockStore> =
+            Arc::new(crate::storage::MemoryStore::new());
+        let mut lagging = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
+        lagging.store = Some(store.clone());
+        lagging.signing_provider = Some(signer);
+        lagging.announce_address = Some("127.0.0.1:1".into());
+
+        let written = lagging
+            .request_state_sync(&format!("127.0.0.1:{port}"), 1)
+            .await
+            .unwrap();
+        server.abort();
+
+        assert_eq!(written, 5);
+        assert_eq!(store.get_latest_height().unwrap(), 5);
     }
 
     #[tokio::test]
