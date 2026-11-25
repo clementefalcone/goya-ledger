@@ -18,7 +18,7 @@ fn file_contains(path: &str, needle: &str) -> bool {
 fn fips140_fsm_states_and_transitions() {
     use pqc_crypto_module::approved_mode::*;
 
-    __test_reset();
+    let _state = __test_reset();
     assert_eq!(state(), ModuleState::Uninitialized);
 
     assert!(is_valid_transition(
@@ -70,7 +70,7 @@ fn fips140_fsm_states_and_transitions() {
 
 #[test]
 fn fips140_power_up_self_tests() {
-    pqc_crypto_module::approved_mode::__test_reset();
+    let _state = pqc_crypto_module::approved_mode::__test_reset();
     let result = pqc_crypto_module::api::initialize_approved_mode();
     assert!(
         result.is_ok(),
@@ -85,7 +85,7 @@ fn fips140_power_up_self_tests() {
 
 #[test]
 fn fips140_crypto_rejected_before_initialization() {
-    pqc_crypto_module::approved_mode::__test_reset();
+    let _state = pqc_crypto_module::approved_mode::__test_reset();
 
     let result = pqc_crypto_module::api::generate_mldsa_keypair();
     assert!(
@@ -105,7 +105,7 @@ fn fips140_crypto_rejected_before_initialization() {
 fn fips140_error_state_is_terminal() {
     use pqc_crypto_module::approved_mode::*;
 
-    __test_reset();
+    let _state = __test_reset();
     set_state(ModuleState::Error);
 
     assert!(!is_valid_transition(
@@ -126,14 +126,12 @@ fn fips140_error_state_is_terminal() {
         require_approved().is_err(),
         "FIPS 140-3: Error state must reject all crypto"
     );
-
-    __test_reset();
-    pqc_crypto_module::api::initialize_approved_mode().ok();
 }
 
 #[test]
 fn fips140_zeroization() {
-    pqc_crypto_module::api::initialize_approved_mode().ok();
+    let _state = pqc_crypto_module::approved_mode::__test_reset();
+    pqc_crypto_module::api::initialize_approved_mode().unwrap();
 
     let kp = pqc_crypto_module::api::generate_mldsa_keypair().unwrap();
     assert_eq!(
@@ -152,7 +150,8 @@ fn fips140_zeroization() {
 
 #[test]
 fn fips140_algorithm_self_tests_kat() {
-    pqc_crypto_module::api::initialize_approved_mode().ok();
+    let _state = pqc_crypto_module::approved_mode::__test_reset();
+    pqc_crypto_module::api::initialize_approved_mode().unwrap();
 
     let kp = pqc_crypto_module::api::generate_mldsa_keypair().unwrap();
     let sig = pqc_crypto_module::mldsa::sign_message_raw(&kp.private_key, b"fips-kat").unwrap();
@@ -183,7 +182,8 @@ fn fips140_crypto_boundary_enforced() {
 
 #[test]
 fn fips140_approved_algorithms_only() {
-    pqc_crypto_module::api::initialize_approved_mode().ok();
+    let _state = pqc_crypto_module::approved_mode::__test_reset();
+    pqc_crypto_module::api::initialize_approved_mode().unwrap();
 
     assert_eq!(
         pqc_crypto_module::api::generate_mldsa_keypair()
@@ -428,7 +428,8 @@ fn qtsp_eidas_article_45i_qualified_electronic_ledger() {
 
 #[test]
 fn qtsp_signing_algorithms_compliant() {
-    pqc_crypto_module::api::initialize_approved_mode().ok();
+    let _state = pqc_crypto_module::approved_mode::__test_reset();
+    pqc_crypto_module::api::initialize_approved_mode().unwrap();
 
     use rust_bc::identity::signing::*;
 

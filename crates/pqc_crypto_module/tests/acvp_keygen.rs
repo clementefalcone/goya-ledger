@@ -9,16 +9,11 @@
 
 use pqc_crypto_module::mldsa::generate_keypair_from_seed;
 
-use std::sync::Mutex;
-
 use pqc_crypto_module::api;
 use pqc_crypto_module::approved_mode;
 
-static LOCK: Mutex<()> = Mutex::new(());
-
 fn init() -> std::sync::MutexGuard<'static, ()> {
-    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    approved_mode::__test_reset();
+    let guard = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
     guard
 }

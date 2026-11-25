@@ -3,7 +3,7 @@ use pqc_crypto_module::approved_mode;
 
 #[test]
 fn self_tests_approve_the_module_and_crypto_then_works() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     assert_eq!(
         approved_mode::state(),
         approved_mode::ModuleState::Uninitialized

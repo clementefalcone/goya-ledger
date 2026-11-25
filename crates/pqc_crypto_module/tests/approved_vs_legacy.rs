@@ -3,15 +3,10 @@
 //! Legacy APIs must be BLOCKED when the module is in Approved mode.
 //! Approved APIs must NOT expose legacy types.
 
-use std::sync::Mutex;
-
 use pqc_crypto_module::api;
 use pqc_crypto_module::approved_mode;
 use pqc_crypto_module::errors::CryptoError;
 use pqc_crypto_module::legacy;
-
-/// Global lock to serialize tests that touch the module state.
-static STATE_LOCK: Mutex<()> = Mutex::new(());
 
 // ═══════════════════════════════════════════════════════════════════
 // 1. Legacy APIs fail in Approved mode
@@ -19,8 +14,7 @@ static STATE_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn legacy_ed25519_verify_fails_in_approved_mode() {
-    let _lock = STATE_LOCK.lock().unwrap();
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     let result = legacy::legacy_ed25519_verify(&[0u8; 32], b"test", &[0u8; 64]);
@@ -32,7 +26,7 @@ fn legacy_ed25519_verify_fails_in_approved_mode() {
 
 #[test]
 fn legacy_sha256_fails_in_approved_mode() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     let result = legacy::legacy_sha256(b"test");
@@ -44,7 +38,7 @@ fn legacy_sha256_fails_in_approved_mode() {
 
 #[test]
 fn legacy_hmac_sha256_fails_in_approved_mode() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     let result = legacy::legacy_hmac_sha256(b"key", b"data");
@@ -56,7 +50,7 @@ fn legacy_hmac_sha256_fails_in_approved_mode() {
 
 #[test]
 fn legacy_ed25519_sign_fails_in_approved_mode() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     let sk = pqc_crypto_module::legacy::ed25519::SigningKey::from_bytes(&[1u8; 32]);
@@ -73,7 +67,7 @@ fn legacy_ed25519_sign_fails_in_approved_mode() {
 
 #[test]
 fn legacy_sha256_works_before_approved_mode() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     // Module NOT initialized — legacy should work
 
     let result = legacy::legacy_sha256(b"test");
@@ -83,7 +77,7 @@ fn legacy_sha256_works_before_approved_mode() {
 
 #[test]
 fn legacy_ed25519_verify_works_before_approved_mode() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
 
     // Generate a valid Ed25519 signature
     use pqc_crypto_module::legacy::ed25519::{Signer, SigningKey};
@@ -105,7 +99,7 @@ fn legacy_ed25519_verify_works_before_approved_mode() {
 
 #[test]
 fn approved_api_does_not_expose_legacy() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     // The approved API only returns ML-DSA types, not Ed25519.
@@ -125,7 +119,7 @@ fn approved_api_does_not_expose_legacy() {
 
 #[test]
 fn mldsa_failure_does_not_fallback_to_ed25519() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     // Bad key — must fail, not fallback to Ed25519
@@ -143,7 +137,7 @@ fn mldsa_failure_does_not_fallback_to_ed25519() {
 
 #[test]
 fn sha3_failure_does_not_fallback_to_sha256() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     // SHA3 works in approved mode
@@ -162,7 +156,7 @@ fn sha3_failure_does_not_fallback_to_sha256() {
 
 #[test]
 fn approved_mode_allows_only_mldsa_sha3_mlkem() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     // Approved APIs work
@@ -198,13 +192,13 @@ fn approved_mode_allows_only_mldsa_sha3_mlkem() {
 
 #[test]
 fn ensure_not_approved_passes_before_init() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     assert!(legacy::ensure_not_approved().is_ok());
 }
 
 #[test]
 fn ensure_not_approved_fails_after_init() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
     assert!(matches!(
         legacy::ensure_not_approved(),

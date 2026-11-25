@@ -8,7 +8,7 @@ fn no_ed25519_available_in_approved_api() {
     // The public API only exposes ML-DSA. There is no Ed25519 function.
     // This test verifies at the type level — if someone tried to add
     // an Ed25519 function, this file would need to be updated.
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     // Only ML-DSA keygen is available
@@ -19,7 +19,7 @@ fn no_ed25519_available_in_approved_api() {
 #[test]
 fn no_sha256_available_in_approved_api() {
     // The public API only exposes SHA3-256. There is no SHA-256 function.
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     let _h = api::sha3_256(b"test").unwrap();
@@ -34,7 +34,7 @@ fn no_sha256_available_in_approved_api() {
 
 #[test]
 fn no_classical_fallback_on_mldsa_failure() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     // Provide an invalid key — must fail, not fallback to Ed25519
@@ -57,7 +57,7 @@ fn no_classical_fallback_on_mldsa_failure() {
 
 #[test]
 fn signature_sizes_are_pqc_only() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     let kp = api::generate_mldsa_keypair().unwrap();

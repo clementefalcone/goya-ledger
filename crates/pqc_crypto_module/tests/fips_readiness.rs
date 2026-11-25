@@ -4,14 +4,10 @@
 //! approved-mode enforcement, fail-closed on self-test failure, legacy
 //! blocking, state transitions, and API cleanliness.
 
-use std::sync::Mutex;
-
 use pqc_crypto_module::api;
 use pqc_crypto_module::approved_mode::{self, ModuleState};
 use pqc_crypto_module::errors::CryptoError;
 use pqc_crypto_module::legacy;
-
-static LOCK: Mutex<()> = Mutex::new(());
 
 // ═══════════════════════════════════════════════════════════════════
 // 1. Module cannot operate before Approved mode
@@ -19,8 +15,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn module_rejects_all_operations_before_initialization() {
-    let _lock = LOCK.lock().unwrap();
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
 
     assert_eq!(approved_mode::state(), ModuleState::Uninitialized);
 
@@ -45,8 +40,7 @@ fn module_rejects_all_operations_before_initialization() {
 
 #[test]
 fn initialization_runs_self_tests_and_approves() {
-    let _lock = LOCK.lock().unwrap();
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
 
     assert_eq!(approved_mode::state(), ModuleState::Uninitialized);
     api::initialize_approved_mode().unwrap();
@@ -59,8 +53,7 @@ fn initialization_runs_self_tests_and_approves() {
 
 #[test]
 fn all_approved_operations_work_after_init() {
-    let _lock = LOCK.lock().unwrap();
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     // ML-DSA sign/verify
@@ -88,8 +81,7 @@ fn all_approved_operations_work_after_init() {
 
 #[test]
 fn legacy_apis_blocked_in_approved_mode() {
-    let _lock = LOCK.lock().unwrap();
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     assert!(matches!(
@@ -112,8 +104,7 @@ fn legacy_apis_blocked_in_approved_mode() {
 
 #[test]
 fn approved_api_returns_only_pqc_types() {
-    let _lock = LOCK.lock().unwrap();
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     let kp = api::generate_mldsa_keypair().unwrap();
@@ -136,8 +127,7 @@ fn approved_api_returns_only_pqc_types() {
 
 #[test]
 fn state_transitions_follow_finite_state_model() {
-    let _lock = LOCK.lock().unwrap();
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
 
     // Start: Uninitialized
     assert_eq!(approved_mode::state(), ModuleState::Uninitialized);
@@ -156,8 +146,7 @@ fn state_transitions_follow_finite_state_model() {
 
 #[test]
 fn error_state_rejects_all_operations() {
-    let _lock = LOCK.lock().unwrap();
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
 
     // Force Error state
     approved_mode::set_state(ModuleState::Error);
@@ -184,8 +173,7 @@ fn error_state_rejects_all_operations() {
 
 #[test]
 fn crypto_failures_return_errors_not_panics() {
-    let _lock = LOCK.lock().unwrap();
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     // Invalid key → error, not panic

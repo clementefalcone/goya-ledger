@@ -5,6 +5,7 @@
 //! reject calls unless state is `Approved`.
 
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::errors::CryptoError;
 
@@ -73,9 +74,16 @@ pub fn reset_for_testing() {
 }
 
 // Also expose for integration tests via a public function gated on test builds.
+static TEST_STATE_LOCK: Mutex<()> = Mutex::new(());
+
 #[doc(hidden)]
-pub fn __test_reset() {
+#[must_use = "hold the guard for the whole test so no other test changes the module state"]
+pub fn __test_reset() -> MutexGuard<'static, ()> {
+    let guard = TEST_STATE_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     MODULE_STATE.store(0, Ordering::SeqCst);
+    guard
 }
 
 #[cfg(test)]

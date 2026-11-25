@@ -5,7 +5,7 @@ use pqc_crypto_module::approved_mode;
 
 #[test]
 fn mldsa_private_key_zeroizes_on_drop() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     let kp = api::generate_mldsa_keypair().unwrap();
@@ -25,7 +25,7 @@ fn mldsa_private_key_zeroizes_on_drop() {
 
 #[test]
 fn mldsa_private_key_debug_is_redacted() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     let kp = api::generate_mldsa_keypair().unwrap();
@@ -42,7 +42,7 @@ fn mldsa_private_key_debug_is_redacted() {
 
 #[test]
 fn mlkem_private_key_debug_is_redacted() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     let kp = api::generate_mlkem_keypair().unwrap();
@@ -52,7 +52,7 @@ fn mlkem_private_key_debug_is_redacted() {
 
 #[test]
 fn mlkem_shared_secret_debug_is_redacted() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     let kp = api::generate_mlkem_keypair().unwrap();

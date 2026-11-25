@@ -7,7 +7,7 @@ use pqc_crypto_module::types::*;
 
 #[test]
 fn sign_before_init_fails() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     let dummy_key = MldsaPrivateKey(vec![0u8; 4032]);
     let result = api::sign_message(&dummy_key, b"test");
     assert!(
@@ -18,7 +18,7 @@ fn sign_before_init_fails() {
 
 #[test]
 fn verify_before_init_fails() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     let dummy_pk = MldsaPublicKey(vec![0u8; 1952]);
     let dummy_sig = MldsaSignature(vec![0u8; 3309]);
     let result = api::verify_signature(&dummy_pk, b"test", &dummy_sig);
@@ -27,28 +27,28 @@ fn verify_before_init_fails() {
 
 #[test]
 fn hash_before_init_fails() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     let result = api::sha3_256(b"test");
     assert!(matches!(result, Err(CryptoError::ModuleNotInitialized)));
 }
 
 #[test]
 fn keygen_before_init_fails() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     let result = api::generate_mldsa_keypair();
     assert!(matches!(result, Err(CryptoError::ModuleNotInitialized)));
 }
 
 #[test]
 fn random_bytes_before_init_fails() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     let result = api::random_bytes(32);
     assert!(matches!(result, Err(CryptoError::ModuleNotInitialized)));
 }
 
 #[test]
 fn mlkem_before_init_fails() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     let dummy_pk = MlKemPublicKey(vec![0u8; 32]);
     let result = api::mlkem_encapsulate(&dummy_pk);
     assert!(matches!(result, Err(CryptoError::ModuleNotInitialized)));
@@ -56,7 +56,7 @@ fn mlkem_before_init_fails() {
 
 #[test]
 fn full_api_works_after_init() {
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
 
     // ML-DSA

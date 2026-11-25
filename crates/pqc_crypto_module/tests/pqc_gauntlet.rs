@@ -12,18 +12,15 @@
 //! - Timing baseline for side-channel awareness
 //! - Entropy quality (chi-squared, byte distribution)
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::MutexGuard;
 use std::time::Instant;
 
 use pqc_crypto_module::api;
 use pqc_crypto_module::approved_mode;
 use pqc_crypto_module::types::*;
 
-static LOCK: Mutex<()> = Mutex::new(());
-
 fn init() -> MutexGuard<'static, ()> {
-    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    approved_mode::__test_reset();
+    let guard = approved_mode::__test_reset();
     api::initialize_approved_mode().unwrap();
     guard
 }
@@ -750,8 +747,7 @@ fn mldsa65_private_key_has_sufficient_entropy() {
 
 #[test]
 fn all_apis_reject_in_error_state() {
-    let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    approved_mode::__test_reset();
+    let _state = approved_mode::__test_reset();
     approved_mode::set_state(approved_mode::ModuleState::Error);
 
     assert!(
@@ -765,10 +761,6 @@ fn all_apis_reject_in_error_state() {
     assert!(api::sha3_256(b"x").is_err(), "sha3_256 must reject");
     assert!(api::random_bytes(32).is_err(), "random_bytes must reject");
     // hmac_sha3_256 intentionally does NOT require approved mode (utility hash)
-
-    // Restore Approved state so other tests aren't affected
-    approved_mode::__test_reset();
-    api::initialize_approved_mode().unwrap();
 }
 
 // ═══════════════════════════════════════════════════════════════════
