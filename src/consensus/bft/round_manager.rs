@@ -384,8 +384,9 @@ impl<V: SignatureVerifier + Clone> RoundManager<V> {
         message.vote.round.max(certified).max(qc_round) < self.current_round
     }
 
-    pub fn own_timeout(&self) -> Option<&TimeoutVote> {
-        self.timeouts.get(&self.node_id)
+    pub fn catch_up_message(&self) -> Option<TimeoutMessage> {
+        let message = self.timeout_message(self.timeouts.get(&self.node_id)?.clone());
+        (!self.is_behind(&message)).then_some(message)
     }
 
     pub fn record_local_timeout(&mut self) {
@@ -1947,6 +1948,36 @@ mod timeout_certificate_tests {
             high_qc: None,
             round_certificate: Vec::new(),
         }));
+    }
+
+    #[test]
+    fn validators_in_the_same_round_do_not_answer_each_other_forever() {
+        let in_round_ten = || {
+            let mut m = manager(AcceptAllVerifier);
+            m.process_timeout_vote(&timeout(5, "v0"));
+            assert!(m.enter_justified_round(10, Some(&prepare_qc(9))));
+            m
+        };
+        let first = in_round_ten();
+        let second = in_round_ten();
+
+        let stale = first.timeout_message(timeout(5, "v0"));
+        assert!(second.is_behind(&stale));
+        assert!(first.catch_up_message().is_none());
+    }
+
+    #[test]
+    fn a_validator_that_certified_its_round_can_help_a_lagging_one() {
+        let mut ahead = manager(AcceptAllVerifier);
+        for voter in ["v0", "v1", "v2"] {
+            ahead.process_timeout_vote(&timeout(9, voter));
+        }
+        let help = ahead
+            .catch_up_message()
+            .expect("own timeout proves round 10");
+        let mut lagging = manager(AcceptAllVerifier);
+        assert!(lagging.process_timeout_message(&help));
+        assert_eq!(lagging.current_round(), 10);
     }
 
     #[test]

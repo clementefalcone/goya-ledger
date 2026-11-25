@@ -300,11 +300,9 @@ pub async fn run_bft_loop(
                     )
                     .await;
                 } else if sender_is_behind {
-                    if let Some(own) = manager.own_timeout().cloned() {
-                        node.broadcast_message(&crate::network::Message::BftTimeout(
-                            manager.timeout_message(own),
-                        ))
-                        .await;
+                    if let Some(help) = manager.catch_up_message() {
+                        node.broadcast_message(&crate::network::Message::BftTimeout(help))
+                            .await;
                     }
                 }
             }
