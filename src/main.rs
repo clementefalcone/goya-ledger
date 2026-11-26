@@ -86,8 +86,8 @@ use storage::BlockStore;
 #[cfg(feature = "rocksdb-storage")]
 use storage::RocksDbBlockStore;
 use tls::{
-    load_client_config_from_env, load_tls_config_from_env, reload_tls_config,
-    tls_reload_params_from_env,
+    load_p2p_client_config_from_env, load_p2p_tls_config_from_env, load_tls_config_from_env,
+    reload_tls_config, tls_reload_params_from_env,
 };
 use transaction_validation::TransactionValidator;
 
@@ -280,7 +280,7 @@ async fn async_main_inner() -> std::io::Result<()> {
     node_arc.set_transaction_validator(transaction_validator.clone());
 
     // Configurar TLS para conexiones P2P salientes
-    let tls_client_cfg = match load_client_config_from_env() {
+    let tls_client_cfg = match load_p2p_client_config_from_env() {
         Ok(Some(cfg)) => {
             println!("🔐 TLS P2P saliente habilitado");
             Some(Arc::new(cfg))
@@ -321,7 +321,7 @@ async fn async_main_inner() -> std::io::Result<()> {
         node_for_server.set_tls_connector(tokio_rustls::TlsConnector::from(Arc::clone(cfg)));
     }
     // Configure TLS acceptor for incoming P2P connections
-    if let Ok(Some(server_cfg)) = load_tls_config_from_env() {
+    if let Ok(Some(server_cfg)) = load_p2p_tls_config_from_env() {
         node_for_server.set_tls_acceptor(tokio_rustls::TlsAcceptor::from(Arc::new(server_cfg)));
     }
     // Compartir los mismos recursos compartidos

@@ -96,13 +96,24 @@ pub enum TlsConfigError {
 /// - `TLS_OCSP_STAPLE_PATH` — ruta a un fichero DER con la respuesta OCSP
 ///   pre-firmada; si está definido, el staple se adjunta al handshake TLS.
 pub fn load_tls_config_from_env() -> Result<Option<ServerConfig>, TlsConfigError> {
+    server_config_from_env(env_flag_true("TLS_MUTUAL"))
+}
+
+pub fn load_p2p_tls_config_from_env() -> Result<Option<ServerConfig>, TlsConfigError> {
+    server_config_from_env(env_flag_true("P2P_TLS_MUTUAL"))
+}
+
+fn env_flag_true(name: &str) -> bool {
+    std::env::var(name)
+        .unwrap_or_default()
+        .to_lowercase()
+        .trim()
+        == "true"
+}
+
+fn server_config_from_env(mtls: bool) -> Result<Option<ServerConfig>, TlsConfigError> {
     let cert_path = std::env::var("TLS_CERT_PATH").ok();
     let key_path = std::env::var("TLS_KEY_PATH").ok();
-
-    let mutual = std::env::var("TLS_MUTUAL")
-        .unwrap_or_default()
-        .to_lowercase();
-    let mtls = mutual.trim() == "true";
 
     match (cert_path, key_path) {
         (Some(cert), Some(key)) => {
@@ -368,6 +379,14 @@ pub fn build_client_config_mtls(
 /// - `TLS_CA_CERT_PATH` → sobrescribe las raíces WebPKI con una CA personalizada.
 /// - `TLS_PINNED_CERTS` → fingerprints SHA-256 del cert del servidor (hex, separados por coma).
 pub fn load_client_config_from_env() -> Result<Option<ClientConfig>, TlsConfigError> {
+    client_config_from_env(env_flag_true("TLS_MUTUAL"))
+}
+
+pub fn load_p2p_client_config_from_env() -> Result<Option<ClientConfig>, TlsConfigError> {
+    client_config_from_env(env_flag_true("P2P_TLS_MUTUAL"))
+}
+
+fn client_config_from_env(mtls: bool) -> Result<Option<ClientConfig>, TlsConfigError> {
     let cert_path = std::env::var("TLS_CERT_PATH").ok();
     let key_path = std::env::var("TLS_KEY_PATH").ok();
 
@@ -375,11 +394,6 @@ pub fn load_client_config_from_env() -> Result<Option<ClientConfig>, TlsConfigEr
     if !tls_enabled {
         return Ok(None);
     }
-
-    let mutual = std::env::var("TLS_MUTUAL")
-        .unwrap_or_default()
-        .to_lowercase();
-    let mtls = mutual.trim() == "true";
 
     let pins = CertPinConfig::from_env().map_err(TlsConfigError::PinConfig)?;
 
@@ -1072,6 +1086,66 @@ mod tests {
         std::env::remove_var("TLS_MUTUAL");
         std::env::remove_var("TLS_CA_CERT_PATH");
         assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn p2p_mutual_tls_is_independent_of_api_mutual_flag() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cert = write_temp(TEST_CERT_PEM);
+        let key = write_temp(TEST_KEY_PEM);
+        std::env::set_var("TLS_CERT_PATH", cert.path());
+        std::env::set_var("TLS_KEY_PATH", key.path());
+        std::env::remove_var("TLS_MUTUAL");
+        std::env::set_var("P2P_TLS_MUTUAL", "true");
+        std::env::remove_var("TLS_CA_CERT_PATH");
+        std::env::remove_var("TLS_PINNED_CERTS");
+        let p2p = load_p2p_tls_config_from_env();
+        let api = load_tls_config_from_env();
+        std::env::remove_var("TLS_CERT_PATH");
+        std::env::remove_var("TLS_KEY_PATH");
+        std::env::remove_var("P2P_TLS_MUTUAL");
+        assert!(matches!(p2p, Err(TlsConfigError::MtlsMissingCa)));
+        assert!(api.unwrap().is_some());
+    }
+
+    #[test]
+    fn api_mutual_tls_does_not_force_p2p_mutual() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cert = write_temp(TEST_CERT_PEM);
+        let key = write_temp(TEST_KEY_PEM);
+        std::env::set_var("TLS_CERT_PATH", cert.path());
+        std::env::set_var("TLS_KEY_PATH", key.path());
+        std::env::set_var("TLS_MUTUAL", "true");
+        std::env::remove_var("P2P_TLS_MUTUAL");
+        std::env::remove_var("TLS_CA_CERT_PATH");
+        std::env::remove_var("TLS_PINNED_CERTS");
+        let api = load_tls_config_from_env();
+        let p2p = load_p2p_tls_config_from_env();
+        std::env::remove_var("TLS_CERT_PATH");
+        std::env::remove_var("TLS_KEY_PATH");
+        std::env::remove_var("TLS_MUTUAL");
+        assert!(matches!(api, Err(TlsConfigError::MtlsMissingCa)));
+        assert!(p2p.unwrap().is_some());
+    }
+
+    #[test]
+    fn p2p_client_mutual_is_independent_of_api_mutual_flag() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cert = write_temp(TEST_CERT_PEM);
+        let key = write_temp(TEST_KEY_PEM);
+        std::env::set_var("TLS_CERT_PATH", cert.path());
+        std::env::set_var("TLS_KEY_PATH", key.path());
+        std::env::remove_var("TLS_MUTUAL");
+        std::env::set_var("P2P_TLS_MUTUAL", "true");
+        std::env::remove_var("TLS_CA_CERT_PATH");
+        std::env::remove_var("TLS_PINNED_CERTS");
+        let p2p = load_p2p_client_config_from_env();
+        let api = load_client_config_from_env();
+        std::env::remove_var("TLS_CERT_PATH");
+        std::env::remove_var("TLS_KEY_PATH");
+        std::env::remove_var("P2P_TLS_MUTUAL");
+        assert!(matches!(p2p, Err(TlsConfigError::MtlsMissingCa)));
+        assert!(api.unwrap().is_some());
     }
 
     // ── Certificate pinning unit tests ────────────────────────────────────
