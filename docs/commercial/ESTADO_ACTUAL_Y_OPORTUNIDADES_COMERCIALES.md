@@ -57,9 +57,9 @@
 
 - **Comunicación entre nodos**: Protocolo TCP robusto
 - **Sincronización automática**: Los nodos se sincronizan automáticamente
-- **Broadcast de bloques**: Propagación automática de bloques minados
+- **Broadcast de bloques**: Propagación automática de bloques decididos por consenso
 - **Broadcast de transacciones**: Propagación de transacciones al mempool
-- **Consenso distribuido**: Regla de cadena más larga para resolver conflictos
+- **Consenso BFT**: HotStuff — cada bloque se certifica por quórum, sin bifurcaciones que resolver
 - **Auto-discovery**: Descubrimiento automático de peers
 - **Network ID**: Separación de mainnet/testnet
 - **Bootstrap nodes**: Nodos de arranque para nuevos nodos
