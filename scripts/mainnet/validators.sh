@@ -195,9 +195,9 @@ rollback() {
 
 heights() {
   local id
-  printf 'v0 %s\n' "$("${SSH[@]}" "$VPS_HOST" 'curl -fsS -m 5 127.0.0.1:8080/api/v1/chain/info')"
+  printf 'v0 %s\n' "$("${SSH[@]}" "$VPS_HOST" 'curl -fsSk -m 5 https://127.0.0.1:8080/api/v1/chain/info || curl -fsS -m 5 http://127.0.0.1:8080/api/v1/chain/info')"
   for id in $(node_ids); do
-    printf '%s %s\n' "$id" "$("${SSH[@]}" "$(host_of "$id")" 'curl -fsS -m 5 127.0.0.1:8080/api/v1/chain/info' || echo unreachable)"
+    printf '%s %s\n' "$id" "$("${SSH[@]}" "$(host_of "$id")" 'curl -fsSk -m 5 https://127.0.0.1:8080/api/v1/chain/info || curl -fsS -m 5 http://127.0.0.1:8080/api/v1/chain/info' || echo unreachable)"
   done
 }
 
@@ -280,7 +280,7 @@ install_ops() {
     command -v aws >/dev/null || sudo snap install aws-cli --classic >/dev/null
     sudo tee /usr/local/bin/goya-heartbeat >/dev/null <<'SCRIPT'
 #!/bin/sh
-curl -fsS -m 5 127.0.0.1:$API_PORT/api/v1/health >/dev/null &&
+{ curl -fsSk -m 5 https://127.0.0.1:$API_PORT/api/v1/health || curl -fsS -m 5 http://127.0.0.1:$API_PORT/api/v1/health; } >/dev/null &&
   aws cloudwatch put-metric-data --region $OPS_REGION --namespace Goya --metric-name Healthy --dimensions Node=$id --value 1
 SCRIPT
     sudo tee /usr/local/bin/goya-backup >/dev/null <<'SCRIPT'

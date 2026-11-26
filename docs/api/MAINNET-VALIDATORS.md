@@ -97,8 +97,29 @@ representable. Adding an external validator today is the manual env edit plus
 coordinated restart above. The minimal fix is to let the node set carry a
 static external entry (`id ip arch public_key`) that bypasses the AWS lookups.
 
+## Post-quantum TLS (mesh encryption)
+
+All validator traffic rides a hybrid post-quantum TLS channel
+(X25519+ML-KEM-768 key exchange, `TLS_PQC_KEM=true`). Certificates are
+issued by `scripts/mainnet/mesh-ca.sh`: a private CA plus one EC cert per
+validator carrying its public IP as an IP SAN (the P2P client verifies peers
+by IP). The post-quantum protection is in the key exchange; the classical
+certificate signature only authenticates a live handshake.
+
+The same `TLS_CERT_PATH`/`TLS_KEY_PATH` enable TLS on both the P2P listener
+and the API, so the API serves **HTTPS** once TLS is on — health checks and
+`heights` try `https -k` first. `TLS_MUTUAL` is false: the channel is
+encrypted and server-authenticated against the CA, while validator identity
+stays enforced by the ML-DSA-signed `Version` handshake and admitted-source
+checks. Setting `TLS_MUTUAL=true` would also require a client certificate on
+the API and lock out plain callers, so it is left off.
+
+Certs and key live in `/var/lib/goya/tls` (owned by the `goya` user so the
+service can read them; `/etc/goya` is not traversable by that user). To roll
+the mesh off, remove the `TLS_*` lines from each `env` and restart.
+
 ## Not yet covered
 
 - Validator keys are files on disk (600, dedicated user, encrypted volume on AWS). Moving them to AWS KMS, which signs ML-DSA, needs a new signing provider.
-- P2P traffic is authenticated by signed handshakes but not encrypted. Blocks are public; mutual TLS between validators is the next step.
+- The TLS channel is encrypted and server-authenticated but not certificate-mutual; decoupling P2P TLS from the API would allow full mutual-cert TLS on the mesh without locking the API.
 - All four validators are operated by Goya; the section above is the path to the first independent one.
