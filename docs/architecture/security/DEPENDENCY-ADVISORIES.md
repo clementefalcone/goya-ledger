@@ -32,7 +32,7 @@ deployed node.
 
 | Advisory | Crate | Status |
 |---|---|---|
-| RUSTSEC-2023-0071 | rsa 0.9.10 | Marvin timing side-channel. Direct dependency — the one actionable item; tracked follow-up to bump to >=0.10 or remove the usage. |
+| RUSTSEC-2023-0071 | rsa 0.9.10 | Marvin timing side-channel on RSA private-key operations observable over the network. Direct dependency, but the vulnerable path is not reachable in the deployed node: every RSA signing and key-generation call site is test-gated, there is no RSA decryption anywhere, and production only ever verifies RSA signatures (public key, no secret, no timing leak). The node's own TSA, OCSP and certificates sign with ECDSA-P256, not RSA. The fix (rsa 0.10) forces sha2 0.10→0.11 across the whole crypto surface — a disproportionate migration for an unreachable path — so rsa stays at 0.9 and this advisory stays acknowledged. |
 | RUSTSEC-2026-0387 | crypto-bigint 0.5.5 | Timing variability. Transitive under k256 (EVM secp256k1); fix needs k256 to move to crypto-bigint 0.7. |
 | RUSTSEC-2026-0258 | h2 0.3.27 | Unbounded empty DATA frames (DoS). Transitive under actix-web; no actix release on h2 0.4. Mitigated by the API rate limits. |
 | RUSTSEC-2026-0594 | cookie 0.16.2 | Private-cookie nonce repeat on fork. Transitive under actix-web; the API does not issue private session cookies (DID/token auth). |
