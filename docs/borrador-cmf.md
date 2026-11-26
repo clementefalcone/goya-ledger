@@ -38,7 +38,7 @@ Consideramos que la existencia de estas implementaciones podría contribuir a qu
 
 El documento plantea consolidar la desmaterialización de los valores, eliminando la necesidad de emitir o mantener títulos físicos cuando la propiedad ya se acredita mediante anotaciones en cuenta.
 
-En este contexto, un registro distribuido con consenso BFT (Byzantine Fault Tolerant) ofrece una alternativa técnica para representar la propiedad de instrumentos desmaterializados con garantías formales de integridad: cada anotación es inmutable, ordenada por consenso, y verificable por cualquier participante autorizado sin depender de un único punto de control.
+En este contexto, un registro distribuido con consenso BFT (Byzantine Fault Tolerant) ofrece una alternativa técnica para representar la propiedad de instrumentos desmaterializados con garantías formales de integridad: cada anotación es inmutable, ordenada por consenso, y verificable de forma independiente por cualquier participante autorizado. La operación del registro puede distribuirse entre múltiples validadores independientes, reduciendo la dependencia de un único punto de control a medida que se incorporan operadores independientes.
 
 Goya Ledger implementa este modelo mediante un protocolo de consenso basado en HotStuff con Delegated Proof of Stake, verificado formalmente en Lean 4 para la propiedad de no-bifurcación (no_fork). El sistema de credenciales verificables (SD-JWT VC con divulgación selectiva) permite representar la titularidad con la granularidad que requiere la interacción entre emisores, depositarios y reguladores.
 
