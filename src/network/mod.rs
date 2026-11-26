@@ -3438,6 +3438,88 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    #[tokio::test]
+    async fn validators_exchange_p2p_over_mutual_tls_and_reject_plaintext() {
+        use tokio::io::AsyncWriteExt;
+        crate::tls::install_crypto_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let ca = crate::pki::CaHierarchy::generate().unwrap();
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, ca.chain_pem()).unwrap();
+        let (server_crt, server_key) = (dir.path().join("a.crt"), dir.path().join("a.key"));
+        ca.sign_node_cert("node-a", 30)
+            .unwrap()
+            .save(&server_crt, &server_key)
+            .unwrap();
+        let (client_crt, client_key) = (dir.path().join("b.crt"), dir.path().join("b.key"));
+        ca.sign_node_cert("node-b", 30)
+            .unwrap()
+            .save(&client_crt, &client_key)
+            .unwrap();
+
+        let server_cfg =
+            crate::tls::build_server_config_mtls(&server_crt, &server_key, &ca_path).unwrap();
+        let client_cfg =
+            crate::tls::build_client_config_mtls(&client_crt, &client_key, &ca_path).unwrap();
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::channel(256);
+        let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
+        node.bft_tx = Some(bft_tx);
+        node.peers
+            .lock()
+            .unwrap()
+            .insert("127.0.0.1:8081".to_string());
+        node.set_tls_acceptor(TlsAcceptor::from(Arc::new(server_cfg)));
+        let server = tokio::spawn(async move {
+            let _ = node.start_server(port).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let vote = Message::BftVote(crate::consensus::bft::types::VoteMessage {
+            block_hash: [5u8; 32],
+            round: 9,
+            phase: crate::consensus::bft::types::BftPhase::Prepare,
+            voter_id: "node-b".into(),
+            signature: vec![1u8; 3309],
+        });
+        let payload = serde_json::to_vec(&vote).unwrap();
+
+        let connector = TlsConnector::from(Arc::new(client_cfg));
+        let server_name = ServerName::try_from("node-a").unwrap().to_owned();
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let mut tls = connector.connect(server_name, tcp).await.unwrap();
+        tls.write_all(&payload).await.unwrap();
+        tls.flush().await.unwrap();
+        let over_tls = tokio::time::timeout(std::time::Duration::from_secs(3), bft_rx.recv()).await;
+
+        let mut plain = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let _ = plain.write_all(&payload).await;
+        let over_plaintext =
+            tokio::time::timeout(std::time::Duration::from_millis(600), bft_rx.recv()).await;
+        server.abort();
+
+        assert!(
+            matches!(
+                over_tls,
+                Ok(Some(crate::consensus::controller::BftEvent::Vote(ref v))) if v.round == 9
+            ),
+            "mutual-TLS vote must be delivered: {over_tls:?}"
+        );
+        assert!(
+            over_plaintext.is_err(),
+            "a plaintext peer must not reach consensus: {over_plaintext:?}"
+        );
+    }
+
     #[test]
     fn state_is_served_only_to_admitted_validator_addresses() {
         let peers = Mutex::new(HashSet::from(["10.1.1.1:8081".to_string()]));
