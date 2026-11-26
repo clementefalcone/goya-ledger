@@ -58,15 +58,47 @@ Removing a validator is the same with its entry deleted. Keep at least four.
 
 ## Joining as an independent operator
 
-An operator needs an Ubuntu 24.04 host with a fixed public IP, TCP 8081 reachable from the other validators, and the `rust-bc` binary for its architecture.
+This is the lever for operational decentralization: a validator run by a
+different operator, on a different provider and network, raises the real cost
+of selectively partitioning the current leader (the decapitation weakness in
+`docs/architecture/security/ADVERSARIAL-TESTNET-2026-11.md`). More nodes under
+the same operator and account do not.
 
-1. Create the `goya` system user, `/var/lib/goya/data` (700) and the systemd unit from `install_validator` in the script.
-2. Start the node once with only `STORAGE_BACKEND=rocksdb` and `STORAGE_PATH=/var/lib/goya/data`. It generates `signing_key_mldsa65.bin`; stop it.
-3. Send the public key and the IP to Goya. The private key never leaves the host.
-4. Join through the procedure above. Goya sends the snapshot and the shared environment values.
+The operator needs an Ubuntu 24.04 host with a fixed public IP, TCP 8081
+reachable from the other validators, and the `rust-bc` binary for its
+architecture (Goya builds it in the cloud and hands it over; the operator does
+not build or receive source).
+
+Operator side:
+
+1. Run `scripts/mainnet/operator-setup.sh <rust-bc> [api_port] [p2p_port]` on
+   the host. It creates the `goya` user, the hardened systemd unit, the data
+   directory, generates `signing_key_mldsa65.bin`, leaves the node stopped, and
+   prints the public key, public IP and architecture to send to Goya. The
+   private key never leaves the host.
+2. Send those three values to Goya. Do not start the node yet.
+
+Goya side:
+
+3. Send the operator the shared secret values (`CHECKPOINT_HMAC_SECRET`,
+   `PAIRWISE_SECRET`, `NOTA_ISSUER_DID`) and the latest ledger snapshot; the
+   operator appends the secrets to `/etc/goya/env` and loads the snapshot into
+   `/var/lib/goya/data`.
+4. Add the new `{id, ip, public_key}` to `BFT_VALIDATORS`,
+   `BFT_VALIDATOR_KEYS`, `TRUSTED_BLOCK_SIGNERS` and `BOOTSTRAP_NODES` on every
+   validator, write the operator's full `bft_env` (set plus its own
+   `P2P_EXTERNAL_ADDRESS` and `BFT_NODE_ID`), then do the coordinated restart
+   above (a halted BFT network does not fork). Keep at least four.
+
+Tooling gap (do before the first external operator): `validators.sh` assumes
+every non-VPS node lives in Goya's AWS account — `address_of`, `key_of` and
+`host_of` resolve through AWS APIs, so an arbitrary external IP is not
+representable. Adding an external validator today is the manual env edit plus
+coordinated restart above. The minimal fix is to let the node set carry a
+static external entry (`id ip arch public_key`) that bypasses the AWS lookups.
 
 ## Not yet covered
 
 - Validator keys are files on disk (600, dedicated user, encrypted volume on AWS). Moving them to AWS KMS, which signs ML-DSA, needs a new signing provider.
 - P2P traffic is authenticated by signed handshakes but not encrypted. Blocks are public; mutual TLS between validators is the next step.
-- All four validators are operated by Goya.
+- All four validators are operated by Goya; the section above is the path to the first independent one.
