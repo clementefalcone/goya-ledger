@@ -73,7 +73,7 @@ fn is_authentic_proposal(
 pub async fn run_bft_loop(
     node_id: String,
     validators: Vec<String>,
-    mut rx: mpsc::UnboundedReceiver<BftEvent>,
+    mut rx: mpsc::Receiver<BftEvent>,
     node: Arc<Node>,
     store: Arc<dyn crate::storage::BlockStore>,
     signer: Arc<dyn SigningProvider>,

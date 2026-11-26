@@ -242,7 +242,7 @@ pub struct Node {
     /// Sender side of the push-gossip channel for newly accepted blocks.
     pub gossip_block_tx: GossipBlockTx,
     /// BFT event channel — routes incoming BFT messages to the consensus controller.
-    pub bft_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::consensus::controller::BftEvent>>,
+    pub bft_tx: Option<tokio::sync::mpsc::Sender<crate::consensus::controller::BftEvent>>,
     /// Gossip membership table for alive-based liveness tracking.
     pub membership: gossip::MembershipTable,
     /// Organization ID of this node (used in alive messages and endorsements).
@@ -776,7 +776,7 @@ impl Node {
         private_data_store: Option<Arc<dyn crate::private_data::PrivateDataStore>>,
         collection_registry: Option<Arc<dyn crate::private_data::CollectionRegistry>>,
         net_security: Arc<Mutex<NetworkSecurityManager>>,
-        bft_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::consensus::controller::BftEvent>>,
+        bft_tx: Option<tokio::sync::mpsc::Sender<crate::consensus::controller::BftEvent>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let peer_addr_str = format!("{}:{}", peer_addr.ip(), peer_addr.port());
         let peer_ip = peer_addr.ip().to_string();
@@ -1038,7 +1038,7 @@ impl Node {
         _raft_node: RaftNodeHandle,
         private_data_store: Option<Arc<dyn crate::private_data::PrivateDataStore>>,
         collection_registry: Option<Arc<dyn crate::private_data::CollectionRegistry>>,
-        bft_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::consensus::controller::BftEvent>>,
+        bft_tx: Option<&tokio::sync::mpsc::Sender<crate::consensus::controller::BftEvent>>,
     ) -> Result<Option<Message>, Box<dyn std::error::Error>> {
         match message {
             Message::Ping => Ok(Some(Message::Pong)),
@@ -1394,7 +1394,7 @@ impl Node {
 
             Message::SubmitTransaction(tx) => {
                 if let Some(bft) = bft_tx {
-                    let _ = bft.send(crate::consensus::controller::BftEvent::Transaction(tx));
+                    try_enqueue_bft(bft, crate::consensus::controller::BftEvent::Transaction(tx));
                     return Ok(None);
                 }
                 if matches!(role, NodeRole::Orderer | NodeRole::PeerAndOrderer) {
@@ -1693,14 +1693,17 @@ impl Node {
                         } else {
                             serde_json::from_slice(&justify_qc).ok()
                         };
-                        let _ = tx.send(crate::consensus::controller::BftEvent::Proposal {
-                            round,
-                            block_hash,
-                            leader_id,
-                            block,
-                            justify_qc: jqc,
-                            leader_signature,
-                        });
+                        try_enqueue_bft(
+                            tx,
+                            crate::consensus::controller::BftEvent::Proposal {
+                                round,
+                                block_hash,
+                                leader_id,
+                                block,
+                                justify_qc: jqc,
+                                leader_signature,
+                            },
+                        );
                     } else {
                         log::warn!("BFT: failed to deserialize block_data");
                     }
@@ -1721,7 +1724,10 @@ impl Node {
                     vote.round
                 );
                 if let Some(tx) = bft_tx {
-                    let _ = tx.send(crate::consensus::controller::BftEvent::Vote(vote.clone()));
+                    try_enqueue_bft(
+                        tx,
+                        crate::consensus::controller::BftEvent::Vote(vote.clone()),
+                    );
                 }
                 Ok(None)
             }
@@ -1733,9 +1739,10 @@ impl Node {
                     return Ok(None);
                 }
                 if let Some(tx) = bft_tx {
-                    let _ = tx.send(crate::consensus::controller::BftEvent::Timeout(
-                        message.clone(),
-                    ));
+                    try_enqueue_bft(
+                        tx,
+                        crate::consensus::controller::BftEvent::Timeout(message.clone()),
+                    );
                 }
                 Ok(None)
             }
@@ -2826,6 +2833,17 @@ impl Node {
     }
 }
 
+pub const BFT_EVENT_CHANNEL_CAPACITY: usize = 4096;
+
+fn try_enqueue_bft(
+    tx: &tokio::sync::mpsc::Sender<crate::consensus::controller::BftEvent>,
+    event: crate::consensus::controller::BftEvent,
+) {
+    if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
+        log::warn!("BFT event channel full; dropped an event under load");
+    }
+}
+
 fn is_admitted_source(peers: &Mutex<HashSet<String>>, source_peer: Option<&str>) -> bool {
     let Some((source_ip, _)) = source_peer.and_then(|address| address.rsplit_once(':')) else {
         return false;
@@ -3009,7 +3027,7 @@ mod tests {
             100, 2000,
         ));
         let (peers, receipts, rates) = empty_process_message_args();
-        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::channel(256);
         let tx = make_storage_tx();
 
         Node::process_message(
@@ -3322,7 +3340,7 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::channel(256);
         let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
         node.bft_tx = Some(bft_tx);
         node.peers
@@ -3368,7 +3386,7 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::channel(256);
         let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
         node.bft_tx = Some(bft_tx);
         let server = tokio::spawn(async move {
@@ -3397,6 +3415,27 @@ mod tests {
             delivered.is_err(),
             "unadmitted vote must not reach consensus: {delivered:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn bft_events_over_capacity_are_dropped_not_blocked() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let event = || {
+            crate::consensus::controller::BftEvent::Vote(
+                crate::consensus::bft::types::VoteMessage {
+                    block_hash: [0u8; 32],
+                    round: 1,
+                    phase: crate::consensus::bft::types::BftPhase::Prepare,
+                    voter_id: "v".into(),
+                    signature: vec![],
+                },
+            )
+        };
+        try_enqueue_bft(&tx, event());
+        try_enqueue_bft(&tx, event());
+
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -3443,7 +3482,7 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (bft_tx, mut bft_rx) = tokio::sync::mpsc::channel(256);
         let mut node = Node::new("127.0.0.1:0".parse().unwrap(), None, None, None);
         node.bft_tx = Some(bft_tx);
         let server = tokio::spawn(async move {

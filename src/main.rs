@@ -326,8 +326,9 @@ async fn async_main_inner() -> std::io::Result<()> {
     }
     // Compartir los mismos recursos compartidos
     // BFT event channel — created early so node_for_server can route incoming BFT messages.
-    let (bft_tx, bft_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::consensus::controller::BftEvent>();
+    let (bft_tx, bft_rx) = tokio::sync::mpsc::channel::<crate::consensus::controller::BftEvent>(
+        crate::network::BFT_EVENT_CHANNEL_CAPACITY,
+    );
     let bft_enabled = std::env::var("BFT_VALIDATORS")
         .ok()
         .filter(|v| !v.is_empty());
