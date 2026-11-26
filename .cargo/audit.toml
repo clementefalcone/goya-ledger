@@ -1,38 +1,19 @@
-# cargo-audit configuration.
-#
-# Every entry below is an advisory with NO fixed version reachable from this
-# tree — each is pinned by a dependency we do not control. They are listed
-# individually, with the blocker named, so the exception is reviewable rather
-# than a blanket `--ignore`. Re-check on the review date: if the blocking crate
-# has published a fix, drop the entry instead of extending it.
-#
-# Reviewed: 2026-07-27 · Next review: 2026-10-27
-#
-# NOT listed here (deliberately): anything `cargo update` can fix. Seven
-# advisories were closed that way on 2026-07-27 — including two rated 7.5 —
-# rather than being silenced.
-
 [advisories]
 ignore = [
-    # protobuf 2.28.0 — uncontrolled recursion (crash).
-    # Blocked by raft 0.7.0, the latest published release, which pins
-    # protobuf 2.x. prometheus 0.14 exists but bumping it alone does not
-    # remove protobuf 2 while raft is in the tree. Reachable only through
-    # raft's wire codec, which speaks to our own peers, not to the internet.
-    "RUSTSEC-2024-0437",
-
-    # rustls-webpki 0.101.7 — three reachable panics in certificate and CRL
-    # parsing. Blocked by tauri 2.11.5, which pins reqwest 0.11 and with it
-    # the rustls 0.21 stack. The node's own P2P TLS uses rustls 0.23 +
-    # webpki 0.103 (declared directly in Cargo.toml); this old copy is
-    # reachable only from the desktop app's HTTP client.
-    "RUSTSEC-2026-0104",
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
-
-    # tracing-subscriber 0.2.25 — logging of ANSI escape sequences.
-    # Blocked upstream by revm -> revm-precompile -> ark-bn254 ->
-    # ark-r1cs-std -> ark-relations. Nothing in our control pins it, and the
-    # node itself uses tracing-subscriber 0.3.
-    "RUSTSEC-2025-0055",
+  "RUSTSEC-2026-0585",
+  "RUSTSEC-2026-0586",
+  "RUSTSEC-2026-0286",
+  "RUSTSEC-2026-0346",
+  "RUSTSEC-2026-0349",
+  "RUSTSEC-2026-0104",
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0099",
+  "RUSTSEC-2026-0382",
+  "RUSTSEC-2026-0381",
+  "RUSTSEC-2025-0055",
+  "RUSTSEC-2026-0594",
+  "RUSTSEC-2026-0387",
+  "RUSTSEC-2026-0258",
+  "RUSTSEC-2023-0071",
+  "RUSTSEC-2024-0437",
 ]

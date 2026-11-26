@@ -197,7 +197,7 @@ deploy() {
 remote_build() {
   local arch=$1 region=us-east-1 type=c7g.2xlarge ami builder ip host toolchain gate=true result
   [ "$arch" = amd64 ] && type=c7i.2xlarge
-  [ "${REMOTE_GATE:-0}" = 1 ] && gate="cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --test crypto_boundary && cargo test --lib && cargo test --doc && cargo test --test bft_e2e --test bft_mldsa65_e2e && cargo test -p pqc_crypto_module --features acvp"
+  [ "${REMOTE_GATE:-0}" = 1 ] && gate="cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo audit && cargo test --test crypto_boundary && cargo test --lib && cargo test --doc && cargo test --test bft_e2e --test bft_mldsa65_e2e && cargo test -p pqc_crypto_module --features acvp"
   toolchain=$(grep '^channel' rust-toolchain.toml | cut -d'"' -f2)
   prepare_region "$region"
   allow "$region" 22 "$(my_ip)"
@@ -223,7 +223,7 @@ remote_build() {
     sudo apt-get update -qq
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential cmake clang llvm-dev libclang-dev libssl-dev pkg-config perl protobuf-compiler >/dev/null
     curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -c rustfmt -c clippy --default-toolchain $toolchain >/dev/null
-    cd src && nohup bash -c 'export PATH=\$HOME/.cargo/bin:\$PATH; ($gate) && cargo build --release --bin rust-bc; echo \$? > build.status' > build.log 2>&1 < /dev/null &"
+    cd src && nohup bash -c 'export PATH=\$HOME/.cargo/bin:\$PATH; command -v cargo-audit >/dev/null || cargo install cargo-audit --locked >/dev/null 2>&1; ($gate) && cargo build --release --bin rust-bc; echo \$? > build.status' > build.log 2>&1 < /dev/null &"
   until "${SSH[@]}" "$host" 'test -s src/build.status' 2>/dev/null; do sleep 30; done
   result=$("${SSH[@]}" "$host" 'cat src/build.status')
   "${SSH[@]}" "$host" "grep -E '^test result|^error|warning: unused|Finished' src/build.log | tail -5"
